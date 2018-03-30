@@ -17,15 +17,14 @@ Download the repository and run a Jupyter notebook from example folder. You need
 See examples folder.
 
 ### This project is developing thanks to
+- Grigory Smolentsev
+- Sergey Guda
 - Alexandr Soldatov
 - Carlo Lamberti
-- Grigory Smolentsev
-- Alexandr Guda
+- Alexander Guda
 - Oleg Usoltsev
-- Sergey Guda
 - Yury Rusalev
 - Andrea Martini
-- Liu Xuanran
 
 ### If you like the software acknowledge it using the references below:
 - G. Smolentsev, A.V. Soldatov "Quantitative local structure refinement from XANES: multidimensional interpolation approach" Journal of Synchrotron Radiation 2006, 13, 19-29.
