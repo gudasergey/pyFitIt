@@ -8,7 +8,7 @@ import json
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import minimize
+import optimize
 import utils
 
 # если строка folder пустая - создает внутри папки ./tmp и возвращает путь к созданной папке
@@ -192,7 +192,7 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None):
     fdmnes_en = smoothed_xanes.energy
     fdmnes_xan = smoothed_xanes.absorb
     with open(folder+'/args_smooth.txt', 'r') as f: smooth_params = json.load(f)
-    shift = minimize.value(smooth_params,'shift')
+    shift = optimize.value(smooth_params,'shift')
     if not shiftIsAbsolute: shift += utils.getInitialShift(exp_e, exp_xanes, fdmnes_en, fdmnes_xan, search_shift_level)
     fdmnes_xan0 = utils.fit_arg_to_experiment(xanes0.energy, exp_e, xanes0.absorb, shift, lastValueNorm=True)
     ax.plot(exp_e-shift, fdmnes_xan0, label='initial')
@@ -225,8 +225,8 @@ def plotDiffToFolder(folder0, exp_e0, exp_xanes0, folder, exp_e, exp_xanes, fit_
     fdmnes_en_conv0, fdmnes_xan_conv0 = parse_convolution(folder0)
     with open(folder+'/args_smooth.txt', 'r') as f: smooth_params = json.load(f)
     with open(folder0+'/args_smooth.txt', 'r') as f: smooth_params0 = json.load(f)
-    shift = minimize.value(smooth_params,'shift')
-    shift0 = minimize.value(smooth_params0,'shift')
+    shift = optimize.value(smooth_params,'shift')
+    shift0 = optimize.value(smooth_params0,'shift')
     assert shift == shift0
     if not shiftIsAbsolute:
         shift += utils.getInitialShift(exp_e, exp_xanes, fdmnes_en_conv, fdmnes_xan_conv, search_shift_level)
@@ -248,8 +248,8 @@ def plotDiffToFolder(folder0, exp_e0, exp_xanes0, folder, exp_e, exp_xanes, fit_
         fdmnes_xan_conv = utils.fit_by_regression(exp_e, exp_xanes, fdmnes_xan_conv, fit_interval)
         fdmnes_xan_conv0 = utils.fit_by_regression(exp_e0, exp_xanes0, fdmnes_xan_conv0, fit_interval)
     elif fitBy == 'FixedNorm':
-        norm = minimize.value(smooth_params, 'norm')
-        norm0 = minimize.value(smooth_params0, 'norm')
+        norm = optimize.value(smooth_params, 'norm')
+        norm0 = optimize.value(smooth_params0, 'norm')
         fdmnes_xan_conv = utils.fit_to_experiment_by_norm_or_regression_mult_only(exp_e, exp_xanes, fit_interval, fdmnes_en_conv, fdmnes_xan_conv, shift, norm)
         fdmnes_xan_conv0 = utils.fit_to_experiment_by_norm_or_regression_mult_only(exp_e0, exp_xanes0, fit_interval, fdmnes_en_conv0, fdmnes_xan_conv0, shift0, norm0)
     else: assert False, 'Unknown fitBy = '+fitBy

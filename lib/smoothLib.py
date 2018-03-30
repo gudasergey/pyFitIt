@@ -1,8 +1,8 @@
 import sys
 import numpy as np
 import pandas as pd
-import minimize
-from minimize import value, param, arg2string, arg2json
+import optimize
+from optimize import value, param, arg2string, arg2json
 import random
 import fdmnes
 import math
@@ -369,10 +369,10 @@ def fitSmooth(expList, xanesList0, smoothType = 'fdmnes', fixParamNames=[], comm
         if xanesList[i].molecula is not None: xanesList[i].molecula.export_xyz(xanesList[i].folder+'/molecula.xyz')
     arg0 = createArg(expList, smoothType, fixParamNames, commonParams0)
     # 0.0001
-    fmin, smooth_params, trace = minimize.minimizePokoord(funcFitSmoothList, arg0, minDeltaFunc = 1e-4, enableOutput = False, methodType=minimizeMethodType, parallel=False, useRefinement=useRefinement, useGridSearch=useGridSearch, returnTrace=True, f_kwargs={'expList':expList, 'xanesList':xanesList, 'smoothType': smoothType, 'targetFunc':targetFunc, 'normType':normType})
+    fmin, smooth_params, trace = optimize.minimizePokoord(funcFitSmoothList, arg0, minDeltaFunc = 1e-4, enableOutput = False, methodType=minimizeMethodType, parallel=False, useRefinement=useRefinement, useGridSearch=useGridSearch, returnTrace=True, f_kwargs={'expList':expList, 'xanesList':xanesList, 'smoothType': smoothType, 'targetFunc':targetFunc, 'normType':normType})
     with open(folder+'/func_smooth_value.txt', 'w') as f: json.dump(fmin, f)
     with open(folder+'/args_smooth.txt', 'w') as f: json.dump(smooth_params, f)
-    with open(folder+'/args_smooth_human.txt', 'w') as f: f.write(minimize.arg2string(smooth_params))
+    with open(folder+'/args_smooth_human.txt', 'w') as f: f.write(arg2string(smooth_params))
     # выдаем предостережение, если достигли границы одного из параметров
     for p in smooth_params:
         d = p['rightBorder'] - p['leftBorder']
@@ -388,7 +388,7 @@ def fitSmooth(expList, xanesList0, smoothType = 'fdmnes', fixParamNames=[], comm
         fdmnes_xan, _ = funcFitSmoothHelper(arg, xanesList[j], smoothType, exp, norm)
         smoothed_xanes.append(fdmnes_xan)
         with open(folder+'/'+expList[j].name+'/args_smooth.txt', 'w') as f: json.dump(arg, f)
-        with open(folder+'/'+expList[j].name+'/args_smooth_human.txt', 'w') as f: f.write(minimize.arg2string(arg))
+        with open(folder+'/'+expList[j].name+'/args_smooth_human.txt', 'w') as f: f.write(arg2string(arg))
         shift = value(arg,'shift')
         fdmnes.plotToFolder(folder+'/'+expList[j].name, exp, xanesList[j], fdmnes_xan, append = getSmoothWidth(smoothType, exp.xanes.energy-shift, arg))
         ind = (exp.fit_intervals['smooth'][0]<=exp.xanes.energy) & (exp.xanes.energy<=exp.fit_intervals['smooth'][1])
@@ -454,11 +454,11 @@ def fitSmooth(expList, xanesList0, smoothType = 'fdmnes', fixParamNames=[], comm
 
 def deconvolve(e, xanes, smooth_params):
     xanes = utils.simpleSmooth(e, xanes, 1)
-    Gamma_hole = minimize.value(smooth_params, 'Gamma_hole')
-    Ecent = minimize.value(smooth_params, 'Ecent')
-    Elarg = minimize.value(smooth_params, 'Elarg')
-    Gamma_max = minimize.value(smooth_params, 'Gamma_max')
-    Efermi = minimize.value(smooth_params, 'Efermi')
+    Gamma_hole = value(smooth_params, 'Gamma_hole')
+    Ecent = value(smooth_params, 'Ecent')
+    Elarg = value(smooth_params, 'Elarg')
+    Gamma_max = value(smooth_params, 'Gamma_max')
+    Efermi = value(smooth_params, 'Efermi')
     n = e.size
     A = np.zeros([n,n])
     for i in range(n):

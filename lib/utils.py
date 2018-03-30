@@ -1,6 +1,8 @@
 import parser
 import numpy as np
 import math
+import random
+import string
 
 class Xanes:
     def __init__(self, energy, absorb, folder=None, molecula=None):
@@ -181,3 +183,6 @@ def expandEnergyRange(e, xanes):
     xanes0 = np.ones(e.size)*np.min(xanes)
     xanes1 = np.ones(e.size)*xanes[-1]
     return np.concatenate((e0,e,e1)), np.concatenate((xanes0,xanes,xanes1))
+
+def randomString(N):
+    return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(N))

@@ -12,3 +12,5 @@ __pycache__/
 
 # temp files and folder
 tmp*
+
+examples/test.py

@@ -102,6 +102,7 @@ class Molecula:
             lines = ps.split("\n")
             atoms = []
             for line in lines:
+                if line[0] == '#': continue
                 words = line.strip().split()
                 assert len(words)==4, "Wrong line "+line+" in file "+filename
                 atoms.append([atom_proton_numbers[words[0]], float(words[1]), float(words[2]), float(words[3]), words[0]])
@@ -160,7 +161,7 @@ class Molecula:
 
     def move_mol_part(self, partInd, shift):
         # сдвигает часть молекулы на вектор shift
-        if isinstance(shift, list): shift = np.array(shift,dtype=float)
+        shift = np.array(shift,dtype=float)
         newMol = self.copy()
         part = newMol.parts[partInd]
         for i in part.ind:
