@@ -6,7 +6,6 @@ import subprocess
 import tempfile
 import json
 import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import optimize
 import utils
@@ -131,7 +130,7 @@ def parse_convolution(folder):
     return energies, xanesVal
 
 # если parseConvolution=True, тогда возвращает вместо обычного xanes - convolution
-def parse_all_folders(parentFolder, paramNames, parseConvolution = False):
+def parse_all_folders(parentFolder, paramNames, parseConvolution = False, parseAtoms = True):
     df_rows = []
     energies0 = np.zeros(1)
     atomColumnNames = []
@@ -145,38 +144,49 @@ def parse_all_folders(parentFolder, paramNames, parseConvolution = False):
             continue
         skip_header = 2 if not parseConvolution else 1
         xanes = np.genfromtxt(xanesFile, skip_header=2)
-        molecula = parseAtomPositions(parentFolder+'/'+d+'/out_bav.txt')
+        if parseAtoms:
+            molecula = parseAtomPositions(parentFolder+'/'+d+'/out_bav.txt')
         energies = xanes[:,0].ravel()
-        with open(parentFolder+'/'+d+'/params.txt', 'r') as f: params = json.load(f)
+        with open(parentFolder+'/'+d+'/geometryParams.txt', 'r') as f: params = json.loads(f.read().replace("'",'"'))
         if energies0.shape[0] == 1:  # первая итерация цикла
             energies0 = np.copy(energies)
-            for ai in range(molecula.shape[0]):
-                z = 'atom'+str(ai+1)+'_'+str(int(molecula.loc[ai,'proton_number']))
-                atomColumnNames.extend([z+'_x',z+'_y',z+'_z'])
+            if parseAtoms:
+                for ai in range(molecula.shape[0]):
+                    z = 'atom'+str(ai+1)+'_'+str(int(molecula.loc[ai,'proton_number']))
+                    atomColumnNames.extend([z+'_x',z+'_y',z+'_z'])
         else:
             if energies0.shape[0] != energies.shape[0]:
                 print('Error different number of energies in '+subfolders[0]+' and '+d)
                 # exit(1)
         xanes = xanes[:,1].ravel()
-        atom_coords = molecula.loc[:,['x','y','z']].values.ravel('C') # C - row-major order, F - column-major order
+        if parseAtoms:
+            atom_coords = molecula.loc[:,['x','y','z']].values.ravel('C') # C - row-major order, F - column-major order
         params = np.array([params[p] for p in paramNames])
-        df_rows.append({'xanes':xanes, 'atom_coords':atom_coords, 'folder':d, 'params':params})
+        newEl = {'xanes':xanes, 'folder':d, 'params':params}
+        if parseAtoms: newEl['atom_coords'] = atom_coords
+        df_rows.append(newEl)
     df_xanes = np.zeros([len(df_rows), df_rows[0]['xanes'].shape[0]])
-    df_atom_coords  = np.zeros([len(df_rows), df_rows[0]['atom_coords'].shape[0]])
+    if parseAtoms: df_atom_coords  = np.zeros([len(df_rows), df_rows[0]['atom_coords'].shape[0]])
     df_params = np.zeros([len(df_rows), df_rows[0]['params'].shape[0]])
     i = 0
     for row in df_rows:
         df_xanes[i,:] = row['xanes']
-        df_atom_coords[i,:] = row['atom_coords']
+        if parseAtoms: df_atom_coords[i,:] = row['atom_coords']
         df_params[i,:] = row['params']
         i += 1
     df_xanes = pd.DataFrame(data=df_xanes, columns=['e_'+str(e) for e in energies0])
-    df_atom_coords = pd.DataFrame(data=df_atom_coords, columns=atomColumnNames)
+    if parseAtoms: df_atom_coords = pd.DataFrame(data=df_atom_coords, columns=atomColumnNames)
     df_params = pd.DataFrame(data=df_params, columns=paramNames)
-    return df_xanes, df_atom_coords, df_params
+    if parseAtoms: return df_xanes, df_atom_coords, df_params
+    else: return df_xanes, df_params
 
 def runLocal(folder = '.'):
-    return subprocess.Popen(["fdmnes_11"], cwd=folder, stdout=subprocess.PIPE).stdout.read()
+    fdmnes = 'fdmnes.exe' if os.name == 'nt' else 'fdmnes'
+    proc = subprocess.Popen([fdmnes], cwd=folder, stdout=subprocess.PIPE)
+    proc.wait()
+    if proc.returncode != 0:
+      raise Exception('Error while executing "'+fdmnes+'" command')
+    return proc.stdout.read()
 
 def runCluster(folder = '.', memory=5000, nProcs = 1):
     proc = subprocess.Popen(["run-cluster-and-wait", "-m", str(memory), '-n', str(nProcs), "fdmnes_11"], cwd=folder, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
