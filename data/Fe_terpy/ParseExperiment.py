@@ -46,7 +46,7 @@ def moleculaConstructor(params):
 
 def parse():
     folder = os.path.dirname(os.path.realpath(__file__))
-    experiment_data = pd.read_csv(folder+'/exp_Febpy_lowspin-ground.txt', sep="\t", decimal=",", header=1).values
+    experiment_data = pd.read_csv(folder+'/exp_Feterpy_lowspin-ground.txt', sep="\t", decimal=",", header=1).values
     exp_e = experiment_data[:, 0];
     ind = (exp_e>=7100) & (exp_e<=7350)
     exp_e = exp_e[ind]
@@ -55,7 +55,7 @@ def parse():
     fit_intervals = {'norm':[exp_e[0], exp_e[-1]], 'smooth':[exp_e[0], exp_e[-1]], 'geometry':[exp_e[0], exp_e[-1]]}
     a=-0.5; b = 0.5
     geometryParamRanges = {'nearSideRingsShift':[a,b], 'nearCentralRingShift':[a,b], 'remoteSideRingsShiftAdd':[0,b-a], 'remoteCentralRingShift':[a,b], 'nearSideRingsTurn':[-20,7], 'remoteSideRingsTurn':[-20,7]}
-    exp = Experiment('Febpy', Xanes(exp_e, exp_xanes), fit_intervals, geometryParamRanges)
+    exp = Experiment('Feterpy', Xanes(exp_e, exp_xanes), fit_intervals, geometryParamRanges)
     exp.defaultSmoothParams = DefaultSmoothParams(7113)
     exp.defaultSmoothParams.fdmnesSmoothHeader = '''  7112.000   26  1  1  9.5222797E-03 -6.2329036E+00  0.0000000E+00  1  1  7.2647627E+03  0.0000000E+00  0.0000000E+00  2.6654847E+00   1 = E_edge, Z, n_edge, j_edge, Abs_before_edge, VO_interstitial, E_cut, ninitl, ninit1, Epsii, UnitCell_Volume, Surface_ref, f0_forward, natomsym
     Energy    <xanes>    '''
