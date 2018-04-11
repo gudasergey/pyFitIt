@@ -51,7 +51,6 @@ def parse():
     ind = (exp_e>=7100) & (exp_e<=7350)
     exp_e = exp_e[ind]
     exp_xanes = experiment_data[ind, 1]
-    exp_xanes /= np.mean(exp_xanes[-3:])
     fit_intervals = {'norm':[exp_e[0], exp_e[-1]], 'smooth':[exp_e[0], exp_e[-1]], 'geometry':[exp_e[0], exp_e[-1]]}
     a=-0.5; b = 0.5
     geometryParamRanges = {'nearSideRingsShift':[a,b], 'nearCentralRingShift':[a,b], 'remoteSideRingsShiftAdd':[0,b-a], 'remoteCentralRingShift':[a,b], 'nearSideRingsTurn':[-20,7], 'remoteSideRingsTurn':[-20,7]}

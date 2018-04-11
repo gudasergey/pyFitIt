@@ -15,17 +15,17 @@ if design_is_found:
   import design # install: pip install py-design, than in the case of import errors "_design" you need to copy library .so in the upper folder
 else:
   import warnings
-  warnings.warn("py-design module not found. If you want to use IHL sampling, do: pip install py-design")
+  warnings.warn("py-design module not found. If you want to use IHS sampling, do: pip install py-design")
 
 # ranges - dictionary with geometry parameters region {'paramName':[min,max], 'paramName':[min,max], ...}
-# method - IHL, random, grid (in case of grid, sampleCount must be a list of points count through each dimension)
+# method - IHS, random, grid (in case of grid, sampleCount must be a list of points count through each dimension)
 # xanesCalcParams - for FDMNES: {'energyRange':'...', 'radius':6, 'Green':False}, add here Gamma_hole, Ecent, Elarg, Gamma_max, Efermi if parseConvolution=True
-def sample(ranges, moleculaConstructor, sampleCount, method='IHL', threadCount = 0, parseConvolution=False, outputFolder='.', xanesCalcParams = {}):
+def sample(ranges, moleculaConstructor, sampleCount, method='IHS', threadCount = 0, parseConvolution=False, outputFolder='.', xanesCalcParams = {}):
     paramNames = [k for k in ranges]
     N = len(paramNames)
     leftBorder = np.array([ranges[k][0] for k in paramNames])
     rightBorder = np.array([ranges[k][1] for k in paramNames])
-    if method == 'IHL':
+    if method == 'IHS':
         points = (design.ihs(sampleCount, N) - 0.5) / sampleCount # row - is one point
         for j in range(N):
             points[:,j] = leftBorder[j] + points[:,j]*(rightBorder[j]-leftBorder[j])
