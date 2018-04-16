@@ -31,6 +31,9 @@ def fitBySliders(geometryParams, xanes, exp):
     xanesFolder = tempfile.mkdtemp(prefix='smooth_')
     e_names = xanes.columns
     xanes_energy = np.array([float(e_names[i][2:]) for i in range(e_names.size)])
+    fig, ax = plt.subplots()
+    ax2 = ax.twinx()
+    fig.set_size_inches((16*0.6, 9*0.8))
 
     def plotXanes(**params):
         geomArg = np.array([params[pName] for pName in geometryParams.columns]).reshape([1,geometryParams.shape[1]])
@@ -48,13 +51,13 @@ def fitBySliders(geometryParams, xanes, exp):
         e_fdmnes = exp_e-shift
         absorbPredictionNormalized = utils.fit_arg_to_experiment(xanesPrediction.energy, exp_e, xanesPrediction.absorb, shift, lastValueNorm=True)
         smoothedPredictionNormalized = utils.fit_arg_to_experiment(xanesPrediction.energy, exp_e, smoothedXanes, shift, lastValueNorm=True)
-        fig, ax = plt.subplots()
         if params['notConvoluted']: ax.plot(e_fdmnes, absorbPredictionNormalized, label='initial')
+        ax.clear()
         ax.plot(e_fdmnes, smoothedPredictionNormalized, label='convolution')
         ax.plot(e_fdmnes, exp_xanes, c='k', label="Experiment")
         if params['smoothWidth']:
-            ax2 = ax.twinx()
             smoothWidth = smoothLib.YvesWidth(e_fdmnes, params['Gamma_hole'], params['Ecent'], params['Elarg'], params['Gamma_max'], params['Efermi'])
+            ax2.clear()
             ax2.plot(e_fdmnes, smoothWidth, c='r', label='Smooth width')
             ax2.legend()
         ax.set_xlim([params['energyRange'][0], params['energyRange'][1]])
@@ -62,8 +65,7 @@ def fitBySliders(geometryParams, xanes, exp):
         ax.set_xlabel("Energy")
         ax.set_ylabel("Absorb")
         ax.legend()
-        fig.set_size_inches((16/3*2, 9/3*2))
-        plt.show()
+        # plt.show()
 
     controls = []
     o = 'vertical'
@@ -89,5 +91,5 @@ def fitBySliders(geometryParams, xanes, exp):
     controlsDict = {}
     for c in controls: controlsDict[c.description] = c
     out = widgets.interactive_output(plotXanes, controlsDict)
-    out.layout.min_height = '400px'
+    # out.layout.min_height = '400px'
     display(ui, out)
