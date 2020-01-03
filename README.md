@@ -1,4 +1,4 @@
-![Logo](http://www.nano.sfedu.ru/upload/medialibrary/37a/Logo_2.png)
+![Logo](http://hpc.nano.sfedu.ru/pyfitit/assets/logo.png)
 # pyFitIt
 Python implementation of FitIt software to fit X-ray absorption near edge structure (XANES). The python version is extended with additional features: machine learning, automatic component analysis, joint convolution fitting and others.
 
