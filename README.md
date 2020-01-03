@@ -2,6 +2,8 @@
 # pyFitIt
 Python implementation of FitIt software to fit X-ray absorption near edge structure (XANES). The python version is extended with additional features: machine learning, automatic component analysis, joint convolution fitting and others.
 
+[PyFitIt website](http://hpc.nano.sfedu.ru/pyfitit/)
+
 ## Features
 - Uses ipywidgets to construct the portable GUI
 - Calculates XANES by [FDMNES](http://neel.cnrs.fr/spip.php?rubrique1007&lang=en) or [FEFF](http://monalisa.phys.washington.edu/)
@@ -11,10 +13,10 @@ Python implementation of FitIt software to fit X-ray absorption near edge struct
 - Includes automatic and semi-automatic component analysis
 
 ## Installation
-Download the repository and run a Jupyter notebook from example folder. You need Jupyter, Pandas, Scikit-learn and py-design to be installed. The best way is to use the [Anaconda](https://www.anaconda.com/download/) distribution
+pip install pyfitit
 
 ## Usage
-See examples folder.
+See [examples](http://hpc.nano.sfedu.ru/pyfitit/download/examples.zip). Manual is included in the examples archive.
 
 ### This project is developing thanks to
 - Grigory Smolentsev
@@ -25,7 +27,9 @@ See examples folder.
 - Oleg Usoltsev
 - Yury Rusalev
 - Andrea Martini
+- Alexandr Algasov
+- Aram Bugaev
+- Mikhail Soldatov
 
 ### If you like the software acknowledge it using the references below:
-- G. Smolentsev, A.V. Soldatov "Quantitative local structure refinement from XANES: multidimensional interpolation approach" Journal of Synchrotron Radiation 2006, 13, 19-29.
-- G. Smolentsev, A.V. Soldatov "FitIt: new software to extract structural information on the basis of XANES fitting" Comp. Matter. Science V. 39, N 3, 2007, 569-574.
+A. Martini, S. A. Guda, A. A. Guda, G. Smolentsev, A. Algasov, O. Usoltsev, M. A. Soldatov, A. Bugaev, Yu. Rusalev, C. Lamberti, A. V. Soldatov "PyFitit: the software for quantitative analysis of XANES spectra using machine-learning algorithms" Computer Physics Communications. 2019. DOI: 10.1016/j.cpc.2019.107064

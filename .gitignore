@@ -1,16 +1,43 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+tmp
+tmp*
+Sim
+graphs
+trajectory*
+inverseExactMethodResults*
+directMethodResults*
+inverseMethodResults*
+cv_result*
+__pycache__
 .*
+*_bav.txt
 
 # Jupyter Notebook
 .ipynb_checkpoints
 
 # pyenv
 .python-version
+.idea
 
 # temp files and folder
 tmp*
+result
+results
+dist
+build
+!build/py-design
+!build/build.py
+*egg-info
+directMethodResults
+inverseMethodResults
+methodsCompare
+inverseEstimator_CVresult
+sample
 
 examples/test.py
+examples/results/*
+!examples/results/readme.txt
+
+xanes_smooth.txt
+xanes_smooth_params.txt
+spectra_smooth.txt
+spectra_smooth_params.txt
