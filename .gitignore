@@ -24,8 +24,6 @@ result
 results
 dist
 build
-!build/py-design
-!build/build.py
 *egg-info
 directMethodResults
 inverseMethodResults
