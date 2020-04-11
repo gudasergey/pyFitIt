@@ -302,14 +302,14 @@ def findGlobalL2NormMinimum(N, estimator, folderToSaveResult, calcXanes=None, fi
     fmins = np.zeros(N)
     geoms = [None]*N
     paramNames = estimator.paramNames
-    arg0 = []; bounds = []
-    rand = np.random.rand
-    for p in paramNames:
-        a = estimator.geometryParamRanges[p][0];
-        b = estimator.geometryParamRanges[p][1]
-        arg0.append(rand() * (b - a) + a)
-        bounds.append([a, b])
     for ir in range(N):
+        arg0 = []; bounds = []
+        rand = np.random.rand
+        for p in paramNames:
+            a = estimator.geometryParamRanges[p][0];
+            b = estimator.geometryParamRanges[p][1]
+            arg0.append(rand() * (b - a) + a)
+            bounds.append([a, b])
         fmins[ir], geoms[ir] = optimize.minimize(L2norm, arg0, bounds, fun_args=(estimator,), paramNames=paramNames, method='scipy')
         print('R-factor = '+str(fmins[ir])+' '+optimize.arg2string(geoms[ir], paramNames), flush=True)
 
