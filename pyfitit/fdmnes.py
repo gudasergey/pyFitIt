@@ -246,10 +246,10 @@ def parse_all_folders(parentFolder, printOutput=True):
 def runLocal(folder = '.'):
     fdmnes = 'fdmnes.exe' if os.name == 'nt' else 'fdmnes'
     proc = subprocess.Popen([fdmnes], cwd=folder, stdout=subprocess.PIPE)
-    proc.wait()
+    stdoutdata, stderrdata = proc.communicate()
     if proc.returncode != 0:
-      raise Exception('Error while executing "'+fdmnes+'" command')
-    return proc.stdout.read()
+      raise Exception('Error while executing "'+fdmnes+'" command:\n'+stderrdata)
+    return stdoutdata
 
 
 def runCluster(folder = '.', memory=5000, nProcs = 1):
