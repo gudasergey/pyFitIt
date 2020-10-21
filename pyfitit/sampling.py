@@ -1,7 +1,7 @@
 import numpy as np
 from multiprocessing.dummy import Pool as ThreadPool
 from distutils.dir_util import copy_tree, remove_tree
-import copy, math, shutil, os, tempfile, json, glob
+import copy, math, shutil, os, tempfile, json, glob, subprocess
 from . import fdmnes, feff, adf, utils, ihs, w2auto
 
 
@@ -59,13 +59,15 @@ def generateInputFiles(ranges, moleculeConstructor, sampleCount, spectrCalcParam
         print('folder=',folderOne, ' '.join([p+'={:.4g}'.format(geometryParams[p]) for p in geometryParams]))
         molecula.export_xyz(folderOne+'/molecule.xyz')
 
+
 def runUserDefined(cmd, folder = '.'):
     assert cmd != '', 'Specify command to run'
-    proc = subprocess.Popen([cmd], cwd=folder, stdout=subprocess.PIPE)
-    proc.wait()
+    proc = subprocess.Popen([cmd], cwd=folder, stdout=subprocess.PIPE, shell=True)
+    stdoutdata, stderrdata = proc.communicate()
     if proc.returncode != 0:
-      raise Exception('Error while executing "'+cmd+'" command')
-    return proc.stdout.read()
+      raise Exception('Error while executing "'+cmd+'" command: '+stderrdata)
+    return stdoutdata
+
 
 # runType = 'local', 'run-cluster', 'user defined'
 def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, memory=5000, calcSampleInParallel=1, folder='sample', recalculateErrorsAttemptCount = 0, continueCalculation = False):
