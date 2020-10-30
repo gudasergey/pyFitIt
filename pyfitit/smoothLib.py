@@ -1,12 +1,11 @@
 from . import utils
 utils.fixDisplayError()
-import sys, random, math, matplotlib, copy, time, tempfile, os, json, hashlib, gc
-from . import fdmnes, optimize, plotting, project
+import math, copy, os, json, hashlib, gc
+from . import fdmnes, optimize, plotting, curveFitting
 import numpy as np
 import pandas as pd
-from .optimize import value, param, arg2string, arg2json, VectorPoint
+from .optimize import param, arg2string, VectorPoint
 import matplotlib.pyplot as plt
-from shutil import copyfile
 from scipy import interpolate
 
 # ============================================================================================================================
@@ -22,7 +21,10 @@ def kernelGauss(x, a, sigma): return 1/sigma/math.sqrt(2*math.pi)*np.exp(-(x-a)*
 def YvesWidth(e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     ee = (e-Efermi)/Ecent
     ee[ee==0] = 1e-5
-    return Gamma_hole + Gamma_max*(0.5+1/math.pi*np.arctan( math.pi/3*Gamma_max/Elarg*(ee-1/ee**2) ))
+    w = Gamma_hole + Gamma_max*(0.5+1/math.pi*np.arctan( math.pi/3*Gamma_max/Elarg*(ee-1/ee**2) ))
+    ind = e<Efermi
+    w[ind] = Gamma_hole
+    return w
 
 def lam(e, group, alpha1, alpha2, alpha3):
     # return (28-4)/(2000-100)*(e-100) + 5 + 2000/e**2*(group/11)
@@ -66,45 +68,60 @@ def spline_width(e, Efermi, *g):
     sigma[sigma<=0] = 1e-5
     return sigma
 
-def simpleSmooth(e, xanes, sigma):
+def simpleSmooth(e, xanes, sigma, kernel='Cauchy'):
     new_xanes = np.zeros(e.shape)
     for i in range(e.size):
-        kern = kernelCauchy(e, e[i], sigma)
+        if kernel == 'Cauchy':
+            kern = kernelCauchy(e, e[i], sigma)
+        elif kernel == 'Gauss':
+            kern = kernelGauss(e, e[i], sigma)
+        else: assert False, 'Unknown kernel name'
         norm = utils.integral(e, kern)
         if norm == 0: norm = 1
         new_xanes[i] = utils.integral(e, xanes*kern)/norm
     return new_xanes
 
-# def smooth_fdmnes(e, xanes, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
+# def smooth_fdmnes(e, xanes, exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
 #     xanes = np.copy(xanes)
 #     E_interval = e[-1] - e[0]
 #     xanes[e<Efermi] = 0
-#     new_xanes = np.zeros(e.shape)
-#     sigma = YvesWidth(e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
+#     new_xanes = np.zeros(exp_e.shape)
+#     sigma = YvesWidth(exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
 #     virtualStartEnergy = e[0]-E_interval; virtualEndEnergy = e[-1]+E_interval
-#     norms = 1.0/math.pi*( np.arctan((virtualEndEnergy-e)/sigma*2) - np.arctan((virtualStartEnergy-e)/sigma*2) )
-#     toAdd = 1.0/math.pi*( np.arctan((virtualEndEnergy-e)/sigma*2) - np.arctan((e[-1]-e)/sigma*2) ) * xanes[-1]
-#     for i in range(e.size):
-#         kern = kernelCauchy(e, e[i], sigma[i])
+#     norms = 1.0/math.pi*( np.arctan((virtualEndEnergy-exp_e)/sigma*2) - np.arctan((virtualStartEnergy-exp_e)/sigma*2) )
+#     toAdd = 1.0/math.pi*( np.arctan((virtualEndEnergy-exp_e)/sigma*2) - np.arctan((e[-1]-exp_e)/sigma*2) ) * xanes[-1]
+#     for i in range(exp_e.size):
+#         kern = kernelCauchy(e, exp_e[i], sigma[i])
 #         new_xanes[i] = (utils.integral(e, xanes*kern)+toAdd[i])/norms[i]
-#     return e, new_xanes
+#     return exp_e, new_xanes
 
-def smooth_fdmnes(e, xanes, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
+def smooth_fdmnes(e, xanes, exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
+    # print(len(e), len(xanes), len(exp_e))
     xanes = np.copy(xanes)
     lastValueInd = xanes.size - int(xanes.size*0.05)
     lastValue = utils.integral(e[lastValueInd:], xanes[lastValueInd:])/(e[-1] - e[lastValueInd])
     E_interval = e[-1] - e[0]
     xanes[e<Efermi] = 0
-    sigma = YvesWidth(e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
+    sigma = YvesWidth(exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
     virtualStartEnergy = e[0]-E_interval; virtualEndEnergy = e[-1]+E_interval
-    norms = 1.0/math.pi*( np.arctan((virtualEndEnergy-e)/sigma*2) - np.arctan((virtualStartEnergy-e)/sigma*2) )
-    toAdd = 1.0/math.pi*( np.arctan((virtualEndEnergy-e)/sigma*2) - np.arctan((e[-1]-e)/sigma*2) ) * lastValue
-    kern = kernelCauchy(e.reshape(-1,1), e.reshape(1,-1), sigma.reshape(-1,1))
-    assert (kern.shape[0]==e.size) and (kern.shape[1]==e.size)
-    de = (e[1:]-e[:-1]).reshape(1,-1);
-    f = xanes.reshape(1,-1) * kern
-    new_xanes = (0.5*np.sum((f[:,1:]+f[:,:-1])*de, axis=1).reshape(-1) + toAdd)/norms
-    return e, new_xanes
+    norms = 1.0/math.pi*( np.arctan((virtualEndEnergy-exp_e)/sigma*2) - np.arctan((virtualStartEnergy-exp_e)/sigma*2) )
+    toAdd = 1.0/math.pi*( np.arctan((virtualEndEnergy-exp_e)/sigma*2) - np.arctan((e[-1]-exp_e)/sigma*2) ) * lastValue
+    max_memory = 2**32//4//8
+    block_sz = max_memory//8//len(e) # max row count in kern
+    block_count = (len(exp_e)+block_sz-1)//block_sz
+    integr = np.zeros(len(exp_e))
+    for bi in range(block_count):
+        a,b = bi*block_sz,  min((bi+1)*block_sz, len(exp_e))
+        exp_e_block = exp_e[a:b]
+        sigma_block = sigma[a:b]
+        kern = kernelCauchy(exp_e_block.reshape(-1,1), e.reshape(1,-1), sigma_block.reshape(-1,1))
+        assert (kern.shape[0]==exp_e_block.size) and (kern.shape[1]==e.size)
+        de = (e[1:]-e[:-1]).reshape(1,-1)
+        f = xanes.reshape(1,-1) * kern
+        integr[a:b] = np.sum((f[:,1:]+f[:,:-1])*de, axis=1)
+    new_xanes = (0.5*integr + toAdd)/norms
+    assert len(exp_e) == len(new_xanes)
+    return exp_e, new_xanes
 
 def smooth_fdmnes_notconv(e0, xanes0, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     n0 = e0.size
@@ -123,13 +140,13 @@ def smooth_fdmnes_notconv(e0, xanes0, Gamma_hole, Ecent, Elarg, Gamma_max, Eferm
     return e0, new_xanes[n0:2*n0]
 
 
-def smooth_adf(e0, xanes0, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
+def smooth_adf(e0, xanes0, e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi, reflect):
     # reflect spectrum
-    e0 = np.hstack((e0, e0[-1] + e0[-1]-np.flip(e0,0) ))
-    fxanes0 = np.flip(xanes0,0); fxanes0[0] = 0
-    xanes0 = np.hstack((xanes0, fxanes0))
+    if reflect:
+        e0 = np.hstack((e0, e0[-1] + e0[-1]-np.flip(e0,0) ))
+        fxanes0 = np.flip(xanes0,0); fxanes0[0] = 0
+        xanes0 = np.hstack((xanes0, fxanes0))
     start = e0[0]
-    e = np.linspace(e0[0]-50, e0[-1]+50, 1000)
     sigma = YvesWidth(e0-start, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
     new_xanes = np.zeros(e.size)
     for i in range(e0.size):
@@ -219,15 +236,16 @@ def generalSmooth(e, xanes, sigma):
 
 
 class DefaultSmoothParams:
-    def __init__(self, shift):
+    def __init__(self, Efermi, shift):
         shiftParam = param('shift', shift, [shift-20, shift+20], 1, 0.25)
+        efermiParam = param('Efermi', Efermi, [Efermi-20,Efermi+20], 2, 0.2)
         self.params = {'fdmnes':\
             [param('Gamma_hole', 1.5, [0.1,10], 0.4, 0.1), param('Ecent', 26, [1,100], 3, 0.5),\
-             param('Elarg', 39, [1,100], 5, 0.5), param('Gamma_max', 15, [5,25], 1, 0.2), param('Efermi', 0, [-10,20], 2, 0.2)\
+             param('Elarg', 39, [1,100], 5, 0.5), param('Gamma_max', 15, [5,25], 1, 0.2), efermiParam\
             ], 'linear':\
-            [param('Gamma_hole', -1, [-20,20], 1, 0.1), param('Gamma_max', 22, [-30,50], 2, 0.5), param('Efermi', 0, [-10,10], 2, 0.2)\
+            [param('Gamma_hole', -1, [-20,20], 1, 0.1), param('Gamma_max', 22, [-30,50], 2, 0.5), efermiParam\
             ], 'Muller':\
-            [param('group', 8, [1,18], 1, 1), param('Gamma_hole', 1, [0.01,5], 0.02, 0.002), param('Efermi', 0, [-20,20], 1, 0.2),\
+            [param('group', 8, [1,18], 1, 1), param('Gamma_hole', 1, [0.01,5], 0.02, 0.002), efermiParam,\
              param('alpha1', 0, [-0.999,2], 0.1, 0.01), param('alpha2', 0, [-0.9,2], 0.1, 0.01), param('alpha3', 0, [-0.9,2], 0.1, 0.01)\
             ], 'piecewise':\
             [param('Gamma_hole', 5, [0.1,10], 0.2, 0.03), param('Gamma_max', 20, [5,40], 2, 0.5), param('Ecent', 30, [-10,100], 2, 0.2)\
@@ -235,8 +253,8 @@ class DefaultSmoothParams:
             [param('g0', 0.3, [0.01,2], 0.03, 0.005), param('e1', 10, [0,25], 1, 0.3), param('g1', 5, [1,10], 0.2, 0.05),\
             param('e2', 30, [25,70], 2, 0.5), param('g2', 8, [1,25], 0.5, 0.05), param('e3', 100, [70,150], 5, 1), param('g3', 20, [5,50], 1, 0.05)\
             ], 'spline':\
-            [param('Efermi', 1.2, [-20,20], 1, 0.1)\
-            ]}
+            [efermiParam\
+            ], 'optical': []}
         n = 20
         for i in range(n): self.params['spline'].append( param('g_'+str(i), 1+i/n*35, [0,50], 0.5, 0.05) )
         self.params['adf'] = copy.deepcopy(self.params['fdmnes'])
@@ -257,6 +275,14 @@ class DefaultSmoothParams:
         return res
 
 
+def findEfermiOnRawSpectrum(energy, intensity):
+    smoothedTheorXanes = simpleSmooth(energy, intensity, 4)
+    tmx = (np.min(smoothedTheorXanes) + np.max(smoothedTheorXanes)) / 2
+    ind = np.where(smoothedTheorXanes > tmx)[0]
+    tme = energy[ind[0]]
+    return tme, smoothedTheorXanes
+
+
 # spectrumType = 'fdmmnes' or 'adf'
 def checkShift(expXanes, theorXanes, shift, spectrumType):
     smoothedTheorXanes = simpleSmooth(theorXanes.energy, theorXanes.intensity, 4)
@@ -275,12 +301,12 @@ def checkShift(expXanes, theorXanes, shift, spectrumType):
 
 def getSmoothParams(arg, names):
     res = ()
-    for name in names: res = res + (value(arg,name),)
+    for name in names: res = res + (arg[name],)
     return res
 
 
 def getSmoothWidth(smoothType, e, args):
-    ps = DefaultSmoothParams(0)
+    ps = DefaultSmoothParams(0,0)
     names = [p['paramName'] for p in ps[smoothType]]
     names.remove('shift')
     params = getSmoothParams(args, names)
@@ -336,35 +362,42 @@ def funcFitSmoothHelper(smooth_params, spectrum, smoothType, exp, norm=None):
 
 def smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, fit_norm_interval, norm=None):
     shift = smooth_params['shift']
+    spectrum_energy = spectrum.energy + shift
     # t1 = time.time()
     if (smoothType == 'fdmnes') or (smoothType == 'fdmnes_notconv') or (smoothType == 'adf'):
         Gamma_hole, Ecent, Elarg, Gamma_max, Efermi = smooth_params['Gamma_hole'], smooth_params['Ecent'], smooth_params['Elarg'], smooth_params['Gamma_max'], smooth_params['Efermi']
         if not fdmnes.useEpsiiShift: Efermi += shift
         if smoothType == 'fdmnes':
-            fdmnes_en1, res = smooth_fdmnes(spectrum.energy+shift, spectrum.intensity, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
+            fdmnes_en1, res = smooth_fdmnes(spectrum_energy, spectrum.intensity, exp_spectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
         elif smoothType == 'fdmnes_notconv':
-            fdmnes_en1, res = smooth_fdmnes_notconv(spectrum.energy+shift, spectrum.intensity, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
-        else:
-            fdmnes_en1, res = smooth_adf(spectrum.energy+shift, spectrum.intensity, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
+            fdmnes_en1, res = smooth_fdmnes_notconv(spectrum_energy, spectrum.intensity, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
+        else: # adf
+            fdmnes_en1, res = smooth_adf(spectrum_energy, spectrum.intensity, exp_spectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi, smooth_params['reflect'])
     elif smoothType == 'linear':
         Gamma_hole, Gamma_max, Efermi = getSmoothParams(smooth_params, ['Gamma_hole', 'Gamma_max', 'Efermi'])
-        fdmnes_en1, res = smooth_linear_conv(spectrum.energy+shift, spectrum.intensity, Gamma_hole, Gamma_max, Efermi)
+        fdmnes_en1, res = smooth_linear_conv(spectrum_energy, spectrum.intensity, Gamma_hole, Gamma_max, Efermi)
     elif smoothType == 'Muller':
         group, Efermi, Gamma_hole, alpha1, alpha2, alpha3 = getSmoothParams(smooth_params, ['group', 'Efermi', 'Gamma_hole', 'alpha1', 'alpha2', 'alpha3'])
-        fdmnes_en1, res = smooth_Muller(spectrum.energy+shift, spectrum.intensity, group, Gamma_hole, Efermi, alpha1, alpha2, alpha3)
+        fdmnes_en1, res = smooth_Muller(spectrum_energy, spectrum.intensity, group, Gamma_hole, Efermi, alpha1, alpha2, alpha3)
     elif smoothType == 'piecewise':
         Gamma_hole, Gamma_max, Ecent = getSmoothParams(smooth_params, ['Gamma_hole', 'Gamma_max', 'Ecent'])
-        fdmnes_en1, res = smooth_piecewise(spectrum.energy+shift, spectrum.intensity, Gamma_hole, Gamma_max, Ecent)
+        fdmnes_en1, res = smooth_piecewise(spectrum_energy, spectrum.intensity, Gamma_hole, Gamma_max, Ecent)
     elif smoothType == 'multi_piecewise':
-        sigma = getSmoothWidth(smoothType, spectrum.energy+shift, smooth_params)
-        fdmnes_en1, res = generalSmooth(spectrum.energy+shift, spectrum.intensity, sigma)
+        sigma = getSmoothWidth(smoothType, spectrum_energy, smooth_params)
+        fdmnes_en1, res = generalSmooth(spectrum_energy, spectrum.intensity, sigma)
     elif smoothType == 'spline':
-        sigma = getSmoothWidth(smoothType, spectrum.energy+shift, smooth_params)
-        fdmnes_en1, res = generalSmooth(spectrum.energy+shift, spectrum.intensity, sigma)
+        sigma = getSmoothWidth(smoothType, spectrum_energy, smooth_params)
+        fdmnes_en1, res = generalSmooth(spectrum_energy, spectrum.intensity, sigma)
+    elif smoothType == 'optical':
+        fdmnes_en1 = spectrum.energy
+        res = spectrum.intensity
     else: assert False, 'Unknown smooth type '+smoothType
     # t2 = time.time()
     # print("Smooth time=", t2 - t1)
-    res, norm = utils.fit_to_experiment_by_norm_or_regression_mult_only(exp_spectrum.energy, exp_spectrum.intensity, fit_norm_interval, fdmnes_en1, res, 0, norm)
+    fit_norm_interval = copy.deepcopy(fit_norm_interval)
+    if spectrum_energy[0] > fit_norm_interval[0]: fit_norm_interval[0] = spectrum_energy[0]
+    if spectrum_energy[-1] < fit_norm_interval[-1]: fit_norm_interval[-1] = spectrum_energy[-1]
+    res, norm = curveFitting.fit_to_experiment_by_norm_or_regression_mult_only(exp_spectrum.energy, exp_spectrum.intensity, fit_norm_interval, fdmnes_en1, res, 0, norm)
     # if smoothType == 'adf': print(norm)
     return utils.Spectrum(exp_spectrum.energy,res), norm
 
@@ -390,7 +423,7 @@ def createArg(expList, smoothType, fixParamNames, commonParams):
                 newParam = copy.deepcopy(p)
                 newParam['paramName'] = exp.name+'_'+newParam['paramName']
                 arg.append(newParam)
-    return arg
+    return VectorPoint(arg)
 
 def getOneArg(argsOfList, exp, smoothType):
     args = copy.deepcopy(exp.defaultSmoothParams[smoothType])
@@ -460,25 +493,36 @@ def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, no
 # commonParams0 - ассоциативный массив начальных значений общих параметров (интервалы поиска берутся из первого эксперимента)
 # норма может быть: фиксированной (тогда она должна быть задана в параметрах каждого эксперимента), подбираемой: общей или частными
 # fitDiffFrom = {'exp':exp, 'xanes':xanes}
-def fitSmooth(expList, xanesList0, smoothType = 'fdmnes', fixParamNames=[], commonParams0 = {}, targetFunc = 'l2(max)', plotTrace=False, crossValidationExp = None, crossValidationXanes = None, minimizeMethodType='seq', useGridSearch = True, useRefinement=True, fitDiffFrom = None, optimizeWithoutPlot = False):
+def fitSmooth(expList, xanesList0, smoothType='fdmnes', fixParamNames=[], commonParams0={}, targetFunc='l2(max)', crossValidationExp=None, crossValidationXanes=None, fitDiffFrom=None, optimizeWithoutPlot=False, folder='result'):
     xanesList = copy.deepcopy(xanesList0)
     if 'norm' in fixParamNames: normType = 'fixed'
     else:
         if 'norm' in commonParams0: normType = 'variableCommon'
         else: normType = 'variablePrivate'
     if not optimizeWithoutPlot:
-        dir = './tmp' if os.path.exists('./tmp') else None
-        folder = tempfile.mkdtemp(dir=dir, prefix='smooth_')
         for i in range(len(expList)):
-            os.makedirs(folder+'/'+expList[i].name)
+            os.makedirs(folder+'/'+expList[i].name, exist_ok=True)
             xanesList[i].folder = folder+'/'+expList[i].name
             if xanesList[i].molecula is not None: xanesList[i].molecula.export_xyz(xanesList[i].folder+'/molecula.xyz')
     arg0 = createArg(expList, smoothType, fixParamNames, commonParams0)
-    fmin, smooth_params, trace = optimize.minimizePokoord(funcFitSmoothList, arg0, minDeltaFunc = 1e-4, enableOutput = False, methodType=minimizeMethodType, parallel=False, useRefinement=useRefinement, useGridSearch=useGridSearch, returnTrace=True, f_kwargs={'expList':expList, 'xanesList':xanesList, 'smoothType': smoothType, 'targetFunc':targetFunc, 'normType':normType, 'fitDiffFrom':fitDiffFrom})
+    arg0_1 = [arg0[i]['value'] for i in range(len(arg0))]
+    bounds = [[arg0[i]['leftBorder'], arg0[i]['rightBorder']] for i in range(len(arg0))]
+    for i in range(len(arg0)): assert  bounds[i][0]<= arg0_1[i] and arg0_1[i] <= bounds[i][1]
+
+    def funcFitSmoothList1(arg1, *params):
+        arg = copy.deepcopy(arg0)
+        for i in range(len(arg0)): arg[i]['value'] = arg1[i]
+        res = funcFitSmoothList(arg, *params)
+        return res
+
+    fmin, smooth_params_vec = optimize.minimize(funcFitSmoothList1, arg0_1, bounds, fun_args=(expList, xanesList, smoothType, targetFunc, normType, fitDiffFrom), method='scipy')
+    # print(fmin)
+    smooth_params = copy.deepcopy(arg0)
+    for i in range(len(arg0)): smooth_params[i]['value'] = smooth_params_vec[i]
     if optimizeWithoutPlot: return smooth_params
     with open(folder+'/func_smooth_value.txt', 'w') as f: json.dump(fmin, f)
     with open(folder+'/args_smooth.txt', 'w') as f: json.dump(smooth_params, f)
-    with open(folder+'/args_smooth_human.txt', 'w') as f: f.write(arg2string(smooth_params))
+    with open(folder+'/args_smooth_human.txt', 'w') as f: f.write(optimize.arg2string(smooth_params))
     # выдаем предостережение, если достигли границы одного из параметров
     for p in smooth_params:
         d = p['rightBorder'] - p['leftBorder']
@@ -493,7 +537,8 @@ def fitSmooth(expList, xanesList0, smoothType = 'fdmnes', fixParamNames=[], comm
         norm = getNorm(normType, argsOfList, arg)
         fdmnes_xan, _ = funcFitSmoothHelper(arg, xanesList[j], smoothType, exp, norm)
         smoothed_xanes.append(fdmnes_xan)
-        with open(folder+'/'+expList[j].name+'/args_smooth.txt', 'w') as f: json.dump(arg, f)
+        arg
+        with open(folder+'/'+expList[j].name+'/args_smooth.txt', 'w') as f: json.dump(arg.to_dict(), f)
         with open(folder+'/'+expList[j].name+'/args_smooth_human.txt', 'w') as f: f.write(arg2string(arg))
         shift = value(arg,'shift')
         plotting.plotToFolder(folder+'/'+expList[j].name, exp, xanesList[j], fdmnes_xan, append = {'data':getSmoothWidth(smoothType, exp.spectrum.energy, arg), 'label':'smooth width', 'twinx':True}, fileName='xanes')
@@ -515,58 +560,6 @@ def fitSmooth(expList, xanesList0, smoothType = 'fdmnes', fixParamNames=[], comm
             partial_fmin = np.sqrt(utils.integral( exp.spectrum.energy[ind], (purity*(fdmnes_xan.intensity[ind]-fitDiffFrom_smoothed_xanes.intensity[ind]) - (exp.spectrum.intensity[ind]-fitDiffFromExpXanes_absorb[ind]))**2 ))
         with open(folder+'/'+expList[j].name+'/func_smooth_partial_value.txt', 'w') as f: json.dump(partial_fmin, f)
         # plotSmoothWidthToFolder(smoothType, exp.spectrum.energy[ind], arg, folder+'/'+expList[j].name)
-    if plotTrace:
-        privateFuncData = np.zeros([len(expList), len(trace)])
-        norms = np.zeros([len(expList), len(trace)])
-        for j in range(len(trace)):
-            step = trace[j]
-            argsOfList = step[0]
-            for i in range(len(expList)):
-                arg = getOneArg(argsOfList, expList[i], smoothType)
-                norm = getNorm(normType, argsOfList, arg)
-                privateFuncData[i,j] = funcFitSmooth(arg, xanesList[i], smoothType, expList[i], norm, fitDiffFrom)
-                _, norms[i,j] = funcFitSmoothHelper(arg, xanesList[i], smoothType, expList[i], norm)
-        fig, ax = plt.subplots()
-        steps = np.arange(1, len(trace)+1)
-        targetFuncData = [step[1] for step in trace]
-        for i in range(len(expList)): ax.plot(steps, privateFuncData[i], label=expList[i].name)
-        ax.plot(steps, targetFuncData, label='target')
-        if crossValidationExp is not None:
-            crossValidationXanes = copy.deepcopy(crossValidationXanes)
-            if smoothType == 'fdmnes':
-                folder2 = folder+'/CV_'+crossValidationExp.name
-                os.makedirs(folder2)
-                if crossValidationXanes.folder is not None:
-                    copyfile(crossValidationXanes.folder+'/out.txt', folder2+'/out.txt')
-                crossValidationXanes.folder = folder2
-            crossValidationData = []
-            for step_i in range(len(trace)):
-                step = trace[step_i]
-                argsOfList = step[0]
-                arg = getOneArg(argsOfList, crossValidationExp, smoothType)
-                for a in arg:
-                    if value(argsOfList, a['paramName']) is None:
-                        mean = 0
-                        for exp in expList: mean += value(argsOfList, exp.name+'_'+a['paramName'])
-                        mean /= len(expList)
-                        print('Warning: parameter '+a['paramName']+' is not common. Take mean for cross validation: '+str(mean))
-                        a['value'] = mean
-                if normType == 'variablePrivate': norm = None
-                else: norm = np.mean(norms[:,step_i])
-                fmin1 = funcFitSmooth(arg, crossValidationXanes, smoothType, crossValidationExp, norm)
-                crossValidationData.append( fmin1 )
-                if step_i == len(trace)-1:
-                    with open(folder2+'/func_smooth_check_value.txt', 'w') as f: json.dump(fmin1, f)
-                    with open(folder2+'/args_smooth.txt', 'w') as f: json.dump(arg, f)
-                    fdmnes_xan, _ = funcFitSmoothHelper(arg, crossValidationXanes, smoothType, crossValidationExp, norm)
-                    plotting.plotToFolder(folder2, crossValidationExp, crossValidationXanes, fdmnes_xan, fileName='xanes')
-                    #print(np.mean(norms[:,step_i]))
-            ax.plot(steps, crossValidationData, label='check')
-        ax.set_xscale('log')
-        ax.legend()
-        fig.set_size_inches((16/3*2, 9/3*2))
-        fig.savefig(folder+'/trace.png')
-        plt.close(fig)
     return smoothed_xanes, smooth_params, fmin
 # ============================================================================================================================
 # ============================================================================================================================
@@ -594,7 +587,8 @@ def deconvolve(e, xanes, smooth_params):
 
 # параметры размазки и новый диапазон энергии беруться из эксперимента. norm - можно задавать, а можно писать None для автоопределения
 # cacheStatus = True if read from cache
-def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_interval, norm=None, folder=None, returnCacheStatus=False):
+def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_interval, norm=None, folder=None, returnCacheStatus=False, energy=None):
+    xanes_df_is_dataframe = isinstance(xanes_df, pd.DataFrame)
     if folder is not None:
         folder = utils.fixPath(folder)
         assert os.path.exists(folder+os.sep+'spectra.txt'), 'File spectra.txt doesn\'t exist in folder '+folder
@@ -611,33 +605,38 @@ def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_i
         if os.path.isfile(smoothFileName) and os.path.isfile(smoothParamsFileName):
             with open(smoothParamsFileName, 'r') as f: cachedParams = json.load(f)
             smoothParamsCached = cachedParams['smoothParams']
-            energy = np.array(cachedParams['energy'])
+            en = np.array(cachedParams['energy'])
             if 'exp' in cachedParams: exp_xanes = np.array(cachedParams['exp'])
             else: exp_xanes = np.array([0])
             equal = True
             if len(smoothParams) == len(smoothParamsCached):
                 for p in smoothParams:
                     if smoothParams[p] != smoothParamsCached[p]: equal = False
-                if not np.array_equal(energy, exp_spectrum.energy): equal = False
+                if not np.array_equal(en, exp_spectrum.energy): equal = False
                 if not np.array_equal(exp_xanes, exp_spectrum.intensity): equal = False
             else: equal = False
             if equal:
                 res = pd.read_csv(smoothFileName, sep=' ')
                 if returnCacheStatus: return res, True
                 else: return res
-    e_names = xanes_df.columns
-    xanes_energy = np.array([float(e_names[i][2:]) for i in range(e_names.size)])
+    if energy is None:
+        energy = utils.getEnergy(xanes_df)
+    if xanes_df_is_dataframe:
+        xanes_df = xanes_df.to_numpy()
     # smoothed_xanes = funcFitSmoothHelperMulti(exp.defaultSmoothParams[smoothType], xanes_energy, xanes_df.values, exp, norm)
     smoothed_xanes = np.zeros([xanes_df.shape[0], exp_spectrum.energy.size])
     for k in range(smoothed_xanes.shape[0]):
-        xanes = utils.Spectrum(xanes_energy, xanes_df.loc[k,].values)
+        xanes = utils.Spectrum(energy, xanes_df[k,:])
         smoothed_xanes1, _ = smoothInterpNorm(smoothParams, xanes, smoothType, exp_spectrum, fit_norm_interval,  norm)
         smoothed_xanes[k] = smoothed_xanes1.intensity
-    res = pd.DataFrame(data=smoothed_xanes, columns=['e_'+str(e) for e in exp_spectrum.energy])
-    if folder is not None:
-        res.to_csv(smoothFileName, sep=' ', index=False)
-        with open(smoothParamsFileName, 'w') as f: json.dump({'smoothParams':smoothParams, 'energy':exp_spectrum.energy.tolist(), 'exp':exp_spectrum.intensity.tolist()}, f)
-    if returnCacheStatus:
-        return res, False
-    else:
-        return res
+    if xanes_df_is_dataframe:
+        res = utils.makeDataFrame(exp_spectrum.energy, smoothed_xanes)
+        if folder is not None:
+            res.to_csv(smoothFileName, sep=' ', index=False)
+            with open(smoothParamsFileName, 'w') as f: json.dump({'smoothParams':smoothParams, 'energy':exp_spectrum.energy.tolist(), 'exp':exp_spectrum.intensity.tolist()}, f)
+        if returnCacheStatus:
+            return res, False
+        else:
+            return res
+    else: return smoothed_xanes, exp_spectrum.energy
+

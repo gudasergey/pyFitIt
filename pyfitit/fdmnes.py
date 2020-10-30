@@ -11,7 +11,7 @@ useEpsiiShift = True
 # energyRange - строка в формате FDMNES
 # electronTransfer = ['lineInFDMNESInputAtom1', 'lineInFDMNESInputAtom2', ...]
 # пока поддерживается только переброс электронов сразу всем атомам заданного типа
-def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, Convolution='', Absorber=1, Green=False, Edge='K', cellSize=1.0, electronTransfer=None, **other):
+def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, Convolution='', Absorber=1, Green=False, Edge='K', cellSize=1.0, electronTransfer=None, additional='', **other):
     if 'Energy range' in other: energyRange = other['Energy range']
     else: energyRange = '-15 0.02 8 0.1 18 0.5 30 2 54 3 117'
     if 'energyRange' in other: energyRange = other['energyRange']
@@ -35,6 +35,7 @@ def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, C
         f.write(energyRange+'\n\n')
         if Adimp is not None: f.write('Adimp\n'+str(Adimp)+'\n\n')
         if Edge != 'K': f.write('Edge\n'+Edge+'\n\n')
+        if additional != '' and additional is not None: f.write(additional)
         if electronTransfer is not None:
             f.write('Atom\n')
             for e in electronTransfer: f.write(e+'\n')
@@ -49,7 +50,7 @@ def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, C
             else:
                 s = str(az)+' '
                 indexes = [j for j,e in enumerate(electronTransfer) if e[:len(s)] == s]
-                assert len(indexes)==1
+                assert len(indexes)==1, 'az = '+str(az)+' indexes = '+str(indexes)
                 atomInd = 1 + indexes[0]
             f.write('{0}\t{1}\t{2}\t{3}\t! {4}\n'.format(atomInd, a[0], a[1], a[2], atom_names[az]))
         f.write('\n\n')
@@ -137,40 +138,52 @@ def parse_input(d):
     if not os.path.isfile(fdmfile):
         raise Exception('Error: in folder '+d+' there is no fdmfile.txt')
     flines = strip_fdmnes_file(fdmfile)
-    count = int(flines[0])
+    count = int(flines[0].split()[0])
     lastFile = utils.fixPath(d+os.sep+flines[count])
     if not os.path.isfile(lastFile):
         raise Exception('Error: the last file '+lastFile+' in fdmfile.txt doesn\'t exist')
     lines = strip_fdmnes_file(lastFile)
     lines_down = list(map(lambda a: a.lower(), lines))
     i = lines_down.index('filout') if 'filout' in lines_down else None
+    if i is None:
+        i = lines_down.index('fileout') if 'fileout' in lines_down else None
     if i is None: filout = 'fdmnes_out'
     else: filout = lines[i+1]
-    return {'filout':filout}
+    Energpho = False
+    if 'energpho' in lines_down: Energpho = True
+    return {'filout':filout, 'energpho':Energpho}
 
 
 def parse_one_folder(d):
     d = utils.fixPath(d)
     if not os.path.exists(d):
         raise Exception('Error: folder '+d+' doesn\'t exist')
-    filout = parse_input(d)['filout']
+    inp = parse_input(d)
+    filout = inp['filout']
+    Energpho = inp['energpho']
     xanesFile = d+os.sep+filout+'.txt'
     if not os.path.isfile(xanesFile):
         raise Exception('Error: the filout file '+xanesFile+' doesn\'t exist')
     xanes = np.genfromtxt(xanesFile, skip_header=2)
     energies = xanes[:,0].ravel()
     xanesVal = xanes[:,1].ravel()
+
+    # parse energy shift
+    with open(xanesFile,'r') as f: s = f.read()
+    i = s.find('\n')
+    if i<0: raise Exception('Error: can\'t find header in output file: '+xanesFile)
+    s = s[:i]
+    values, names = s.split('=')
+    names = list(map(lambda w: w.strip(), names.strip().split(',')))
+    i = names.index('Epsii')
+    values = list(map(lambda w: w.strip(), values.strip().split()))
+    Epsii = float(values[i])
+    i = names.index('E_edge')
+    E_edge = float(values[i])
+
+    if Energpho: energies -= E_edge
+
     if useEpsiiShift:
-        # parse energy shift
-        with open(xanesFile,'r') as f: s = f.read()
-        i = s.find('\n')
-        if i<0: raise Exception('Error: can\'t find header in output file: '+xanesFile)
-        s = s[:i]
-        values, names = s.split('=')
-        names = list(map(lambda w: w.strip(), names.strip().split(',')))
-        i = names.index('Epsii')
-        values = list(map(lambda w: w.strip(), values.strip().split()))
-        Epsii = float(values[i])
         energies += Epsii
     return utils.Spectrum(energies, xanesVal)
 
@@ -248,11 +261,11 @@ def runLocal(folder = '.'):
     proc = subprocess.Popen([fdmnes], cwd=folder, stdout=subprocess.PIPE)
     stdoutdata, stderrdata = proc.communicate()
     if proc.returncode != 0:
-      raise Exception('Error while executing "'+fdmnes+'" command:\n'+stderrdata)
+        raise Exception('Error while executing "'+fdmnes+'" command:\n'+stderrdata)
     return stdoutdata
 
 
-def runCluster(folder = '.', memory=5000, nProcs = 1):
+def runCluster(folder='.', memory=5000, nProcs = 1):
     proc = subprocess.Popen(["run-cluster-and-wait", "-m", str(memory), '-n', str(nProcs), "fdmnes"], cwd=folder, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     proc.wait()
 

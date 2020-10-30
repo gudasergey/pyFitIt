@@ -4,9 +4,16 @@ from scipy.interpolate import Rbf, NearestNDInterpolator, LinearNDInterpolator
 import numpy as np
 import pandas as pd
 import math, copy, os, time, gc, warnings
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+from pyfitit.enhancedGpr import EnhancedGaussianProcessRegressor
 from . import geometry, utils
 from sklearn.linear_model import LogisticRegression, RidgeCV
 import sklearn
+from sklearn.gaussian_process import GaussianProcessRegressor
+import sklearn.gaussian_process.kernels
+
+
 if utils.isLibExists("keras"):
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",category=FutureWarning)
@@ -20,25 +27,44 @@ if utils.isLibExists("keras"):
 
 
 class Sample:
-    def __init__(self, params, spectra):
+    def __init__(self, params, spectra, energy=None):
         assert isinstance(params, pd.DataFrame), 'params should be pandas DataFrame object'
-        assert isinstance(spectra, pd.DataFrame), 'spectra should be pandas DataFrame object'
-        self.params = params
-        self._spectra = spectra
-        self.paramNames = params.columns.values
-        self.folder = None
-        e_names = spectra.columns
-        self.energy = np.array([float(e_names[i][2:]) for i in range(e_names.size)])
-
-    def setSpectra(self, spectra):
+        if isinstance(spectra, np.ndarray):
+            assert energy is not None
+            assert len(energy) == spectra.shape[1], 'energy vector must contain values for all columns of spectra matrix'
+            spectra = pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
+        else:
+            assert isinstance(spectra, pd.DataFrame), 'spectra should be pandas DataFrame object'
+        assert params.shape[0] == spectra.shape[0], str(params.shape[0]) + ' != ' + str(spectra.shape[0])
+        self._params = copy.deepcopy(params)
         self._spectra = copy.deepcopy(spectra)
-        e_names = spectra.columns
-        self.energy = np.array([float(e_names[i][2:]) for i in range(e_names.size)])
+        self.paramNames = params.columns.to_numpy()
+        self.energy = utils.getEnergy(spectra)
         self.folder = None
+
+    def setSpectra(self, spectra, energy=None):
+        if isinstance(spectra, pd.DataFrame):
+            self._spectra = copy.deepcopy(spectra)
+            self.energy = utils.getEnergy(spectra)
+            self.folder = None
+        else:
+            assert isinstance(spectra, np.ndarray)
+            assert energy is not None
+            self._spectra = utils.makeDataFrame(energy, copy.deepcopy(spectra))
+            self.folder = None
 
     def getSpectra(self): return self._spectra
 
     spectra = property(getSpectra, setSpectra)
+
+    def setParams(self, params):
+        assert isinstance(params, pd.DataFrame)
+        self._params = params
+        self.paramNames = params.columns.to_numpy()
+
+    def getParams(self): return self._params
+
+    params = property(getParams, setParams)
 
     @classmethod
     def readFolder(cls, folder):
@@ -52,18 +78,93 @@ class Sample:
         if not os.path.exists(folder): os.makedirs(folder)
         self.spectra.to_csv(folder+'/spectra.txt', sep=' ', index=False)
         self.params.to_csv(folder+'/params.txt', sep=' ', index=False)
+        self.folder = folder
 
-    def addParam(self, paramGenerator, paramName, project):
+    def copy(self):
+        return Sample(self.params, self.spectra)
+
+    def addParam(self, paramGenerator=None, paramName='', project=None, paramData=None):
+        assert (paramData is None) or (paramGenerator is None and project is None)
+        assert paramName != ''
         n = self.params.shape[0]
-        newParam = np.zeros(n)
-        for i in range(n):
-            params = {self.paramNames[j]:self.params.loc[i,self.paramNames[j]] for j in range(self.paramNames.size)}
-            m = project.moleculeConstructor(params)
-            newParam[i] = paramGenerator(params, m)
-        self.params[paramName] = newParam
+        if paramData is None:
+            if isinstance(paramName, str):  # need to construct one parameter
+                paramName = [paramName]
+            newParam = np.zeros((n, len(paramName)))
+            for i in range(n):
+                params = {self.paramNames[j]:self.params.loc[i,self.paramNames[j]] for j in range(self.paramNames.size)}
+                m = project.moleculeConstructor(params)
+                t = paramGenerator(params, m)
+                assert len(t) == len(paramName)
+                newParam[i] = t
+            for p,j in zip(paramName, range(len(paramName))): self.params[p] = newParam[:,j]
+        else:
+            assert paramData.size == n
+            self.params[paramName] = paramData
         self.paramNames = self.params.columns.values
+        self.folder = None
 
-def scoreFast(x,y,predictY):
+    def delParam(self, paramName):
+        assert self.params.shape[1]>1, 'Can\'t delete last parameter'
+        if isinstance(paramName, str): paramName = [paramName]
+        for p in paramName: del self.params[p]
+        self.paramNames = self.params.columns.to_numpy()
+        self.folder = None
+
+    def unionWith(self, other):
+        assert isinstance(other, self.__class__)
+        assert np.all(self.params.shape[1] == other.params.shape[1]), 'Params differ: self = '+str(self.paramNames)+' other = '+str(other.paramNames)
+        assert np.all(self.spectra.shape[1] == other.spectra.shape[1])
+        assert np.all(self.energy == other.energy)
+        assert np.all(self.paramNames == other.paramNames), 'Params differ: self = '+str(self.paramNames)+' other = '+str(other.paramNames)
+        self.params = pd.concat((self.params, other.params), ignore_index=True)
+        self._spectra = pd.concat((self._spectra, other._spectra), ignore_index=True)
+        self.folder = None
+
+    def addRow(self, spectrum=None, params=None):
+        i = self.params.shape[0]
+        if spectrum is not None:
+            if isinstance(spectrum, utils.Spectrum):
+                if len(self.energy) != len(spectrum.energy) or ~np.all(self.energy == spectrum.energy):
+                    spectrum = np.interp(self.energy, spectrum.energy, spectrum.intensity)
+                else: spectrum = spectrum.intensity
+            else:
+                assert isinstance(spectrum, np.array)
+                spectrum = spectrum.reshape(-1)
+                assert len(spectrum) == len(self.energy)
+        else:
+            spectrum = np.zeros(len(self.energy))
+            spectrum[:] = np.nan
+        # print(spectrum.shape, self.spectra.shape)
+        self.spectra.loc[i] = spectrum
+        if params is not None:
+            assert isinstance(params, dict)
+            assert set(params.keys()) < set(self.paramNames)
+        else: params = {}
+        self.params.loc[i, :] = np.nan
+        for p in params: self.params.loc[i, p] = params[p]
+        self.folder = None
+
+    def limit(self, energyRange):
+        ind = (energyRange[0] <= self.energy) & (self.energy <= energyRange[1])
+        energy = self.energy[ind]
+        spectra = self.spectra.to_numpy()[:, ind]
+        self.spectra = utils.makeDataFrame(energy, spectra)
+        self.folder = None
+
+    def splitUnknown(self):
+        p = self.params
+        nan = np.any(np.isnan(p), axis=1)
+        s = self.spectra
+        known = Sample(p.loc[~nan,:].reset_index(drop=True), s.loc[~nan,:].reset_index(drop=True))
+        unknown = Sample(p.loc[nan,:].reset_index(drop=True), s.loc[nan,:].reset_index(drop=True))
+        return known, unknown
+
+
+readSample = Sample.readFolder
+
+
+def scoreFast(y,predictY):
     if len(y.shape) == 1:
         u = np.mean((y - predictY)**2)
         v = np.mean((y - np.mean(y))**2)
@@ -76,11 +177,11 @@ def scoreFast(x,y,predictY):
 
 def score(x,y,predictor):
     predictY = predictor(x)
-    return scoreFast(x,y,predictY)
+    return scoreFast(y,predictY)
 
 
 class RBF:
-    def __init__(self, function, baseRegression='quadric'):
+    def __init__(self, function='linear', baseRegression='quadric'):
         # function: multiquadric, inverse, gaussian, linear, cubic, quintic, thin_plate
         # baseRegression: linear quadric
         self.function = function
@@ -120,19 +221,44 @@ class RBF:
     def score(self, x, y): return score(x,y,self.predict)
 
 
-def transformFeatures2Quadric(x):
-    if type(x) is pd.DataFrame: x = x.values
+class RBFWrapper(RBF):
+    def predict(self, x):
+        result = RBF.predict(self, x).flatten()
+        return result
+
+
+def transformFeatures2Quadric(x, addConst=True):
+    isDataframe = type(x) is pd.DataFrame
+    if isDataframe:
+        col_names = np.array(x.columns)
+        x = x.values
     n = x.shape[1]
-    newX = np.zeros([x.shape[0], n + n*(n+1)//2 + 1])
-    newX[:,0:n] = x
+    new_n = n + n*(n+1)//2
+    if addConst: new_n += 1
+    newX = np.zeros([x.shape[0], new_n])
+    newX[:,:n] = x
+    if isDataframe:
+        new_col_names = np.array(['']*newX.shape[1], dtype=object)
+        new_col_names[:n] = col_names
     k = n
     for i1 in range(n):
         for i2 in range(i1,n):
             newX[:,k] = x[:,i1]*x[:,i2]
+            if isDataframe:
+                if i1 != i2:
+                    new_col_names[k] = col_names[i1]+'*'+col_names[i2]
+                else:
+                    new_col_names[k] = col_names[i1] + '^2'
             k += 1
-    newX[:,k] = 1
-    k += 1
-    assert k == n + n*(n+1)//2 + 1
+    if addConst:
+        newX[:,k] = 1
+        if isDataframe:
+            new_col_names[k] = 'const'
+        k += 1
+        assert k == n + n*(n+1)//2 + 1
+    else: assert k == n + n*(n+1)//2
+    if isDataframe:
+        newX = pd.DataFrame(newX, columns=new_col_names)
     return newX
 
 def transformFeaturesAddDiff(x):
@@ -188,8 +314,17 @@ class Normalize:
         if not hasattr(learner, 'name'): self.name = str(type(learner))
         else: self.name = 'normalized '+learner.name
 
+    def get_params(self, deep=True):
+        return {'learner':self.learner, 'xOnly':self.xOnly}
+
+    def set_params(self, **params):
+        self.learner = copy.deepcopy(params['learner'])
+        self.xOnly= params['xOnly']
+        return self
+
     # args['xyRanges'] = {'minX':..., 'maxX':..., ...}
     def fit(self, x, y, **args):
+        if isinstance(y,np.ndarray) and (len(y.shape)==1): y = y.reshape(-1,1)
         y_is_df = type(y) is pd.DataFrame
         if y_is_df: columns = y.columns
         if 'xyRanges' in args: self.xyRanges = args['xyRanges']; del args['xyRanges']
@@ -214,11 +349,15 @@ class Normalize:
             args['validation_data'] = validation_data
         if 'yRange' in args: args['yRange'] = [norm(args['yRange'][0], self.minY, self.minY), norm(args['yRange'][1], self.minY, self.minY)]
         self.learner.fit(norm(x, self.minX, self.maxX), norm(y, self.minY, self.maxY), **args)
+        return self
 
-    def predict(self, x):
+    def predict(self, x, **predictArgs):
         if type(x) is pd.DataFrame: x = x.values
-        yn = self.learner.predict(norm(x, self.minX, self.maxX))
-        return invNorm(yn,self.minY, self.maxY)
+        yn = self.learner.predict(norm(x, self.minX, self.maxX), **predictArgs)
+        if isinstance(yn, tuple):
+            return (invNorm(yn[0], self.minY, self.maxY),) + yn[1:]
+        else:
+            return invNorm(yn,self.minY, self.maxY)
 
     def predict_proba(self, x):
         pyn = self.learner.predict_proba(norm(x, self.minX, self.maxX))
@@ -399,7 +538,14 @@ def enlargeDataset(moleculas, values, newCount):
     return res, resY
 
 def cross_val_predict(method, X, y, cv=10):
-    kf = sklearn.model_selection.KFold(n_splits=cv, shuffle=True, random_state=0)
+    if isinstance(cv, int):       
+        kf = sklearn.model_selection.KFold(n_splits=cv, shuffle=True, random_state=0)
+    else:
+        kf = cv
+    if type(X) is pd.DataFrame:
+        X = X.to_numpy()
+    if type(y) is pd.DataFrame:
+        y = y.to_numpy()
     predictions = np.zeros(y.shape)
     for train_index, test_index in kf.split(X):
         X_train, X_test = X[train_index,:], X[test_index,:]
@@ -521,3 +667,127 @@ class NNKCDE(object):
             cdes[idx, :] = kde(self.z_train[ids[idx], :], z_grid, bandwidth)
 
         return cdes
+
+
+class KrigingGaussianProcess:
+    def __init__(self, n_restarts_optimizer=9, kernel=None, alpha=1e-10):
+        if kernel is None:
+            # kernel = sklearn.gaussian_process.kernels.ExpSineSquared()
+            # kernel = sklearn.gaussian_process.kernels.RBF()
+            pass
+        self.model = GaussianProcessRegressor(n_restarts_optimizer=n_restarts_optimizer, kernel=kernel, alpha=alpha)
+
+    def fit(self, x, y):
+        self.model.fit(x, y)
+
+    def predict(self, x):
+        return self.model.predict(x, return_std=True)
+
+
+class KrigingEnhancedGaussianProcess:
+    def __init__(self, n_restarts_optimizer=9, kernel=None, alpha=1e-10):
+        if kernel is None:
+            # kernel = sklearn.gaussian_process.kernels.ExpSineSquared()
+            # kernel = sklearn.gaussian_process.kernels.RBF()
+            pass
+        self.model = EnhancedGaussianProcessRegressor(n_restarts_optimizer=n_restarts_optimizer, kernel=kernel, alpha=alpha)
+
+    def fit(self, x, y):
+        self.model.fit(x, y)
+
+    def predict(self, x):
+        return self.model.predict(x, return_std=True)
+
+
+class KrigingNNKCDE:
+    def __init__(self, bandwidth=0.2, k=10):
+        self.regressor = RBF(function='linear')
+        self.nnkcde = None
+        self.bandwidth = bandwidth
+        self.k = k
+        self.yBounds = None
+
+    def fit(self, x, y):
+        self.regressor.fit(x, y)
+        self.nnkcde = NNKCDE(x, y)
+        self.yBounds = [np.min(y, axis=0), np.max(y, axis=0)]
+
+    def predict(self, x):
+        assert self.yBounds[0].size == 1, str(self.yBounds[0].shape)
+        y_grid = np.linspace(self.yBounds[0][0], self.yBounds[1][0], 100)
+        dy = y_grid[1]-y_grid[0]
+        dens = self.nnkcde.predict(x, y_grid, k=self.k, bandwidth=self.bandwidth)
+        # print(dens.shape, x.shape, y_grid.shape)
+        def int_dens(f):
+            return np.sum(f*dens, axis=1)*dy / (np.sum(dens, axis=1)*dy)
+        m = int_dens(y_grid)
+        sigma = np.sqrt(int_dens(np.abs(y_grid.reshape(1,-1)-m.reshape(-1,1))**2))
+        y = self.regressor.predict(x)
+        # print(y)
+        # print(m)
+        # print(sigma)
+        return y, sigma
+
+
+class KrigingJointXY:
+    def __init__(self, n_restarts_optimizer=9, kernel=None, alpha=1e-10):
+        self.y_mult = 1
+        if kernel is None:
+            kernel = sklearn.gaussian_process.kernels.RationalQuadratic()
+            # kernel = sklearn.gaussian_process.kernels.RBF()
+            pass
+        self.model = Normalize(GaussianProcessRegressor(n_restarts_optimizer=n_restarts_optimizer, kernel=kernel, alpha=alpha), xOnly=False)
+        # self.model = Normalize(EnhancedGaussianProcessRegressor(n_restarts_optimizer=n_restarts_optimizer, kernel=kernel, alpha=alpha), xOnly=False)
+        self.regressor = RBF()
+
+    def fit(self, x0, y):
+        self.y_mult = x0.shape[1]  # increase importance of y coordinate in multidimensional case
+        self.regressor.fit(x0,y)
+        x = np.hstack((x0,y*self.y_mult))
+        self.model.fit(x, y)
+
+    def predict(self, x0):
+        y_regr = self.regressor.predict(x0)
+        x = np.hstack((x0,y_regr*self.y_mult))
+        # print(x.shape)
+        return self.model.predict(x, return_std=True)
+
+
+def isClassification(data, column=None):
+    if column is not None: data = data[column].to_numpy()
+    else:
+        if isinstance(data, list):
+            data = np.array(data)
+    if data.dtype != 'float64': return True
+    ind = ~np.isnan(data)
+    return np.all(np.round(data[ind]) == data[ind])
+
+
+def plotPredictionError(x, y, params, method, pathToSave):
+    '''
+    Parameters
+    ----------
+    x : DataFrame
+        Parameters of samples.
+    y : DataFrame
+        Smoothed spectra.
+    params : [param1, param2]
+        Parameters for which plot map.
+    method : ml model
+    pathToSave : folder name
+        Name of folder in which save the figure.
+    Returns
+    -------
+    None.
+    '''
+    
+    cv_result = cross_val_predict(method, x, y, cv=sklearn.model_selection.LeaveOneOut())
+    L2_norm = np.linalg.norm(cv_result - y, axis=1)
+    fig, ax = plt.subplots(1)
+    sc = ax.scatter(x[params[0]], x[params[1]], cmap='plasma', c=L2_norm, alpha=0.5, norm=LogNorm())
+    plt.colorbar(sc)
+    ax.set_xlabel(params[0])
+    ax.set_ylabel(params[1])
+    fig.savefig(f"./{pathToSave}/scatter-{params[0]}-{params[1]}.png", dpi=300)
+    plt.close(fig)
+    

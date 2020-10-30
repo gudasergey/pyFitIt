@@ -1,23 +1,20 @@
-import random, copy, json, scipy, scipy.optimize, matplotlib
+import random, copy, json, scipy, scipy.optimize, matplotlib, warnings, os, math
 import numpy as np
 from multiprocessing.dummy import Pool as ThreadPool
 import matplotlib.pyplot as plt
 from . import utils
 
 
-def arg2string(arg):
+def arg2string(arg, paramNames=None):
     s = ''
-    for a in arg:
-        s += a['paramName'] + ('=%.5g' % a['value'])
-        if a != arg[-1]: s += '  '
-    return s
-
-
-def arg2string(x, paramNames):
-    s = ''
-    for i in range(len(x)):
-        s += paramNames[i] + ('=%.5g' % x[i])
-        if i != len(x)-1: s += '  '
+    if paramNames is None:
+        for a in arg:
+            s += a['paramName'] + ('=%.5g' % a['value'])
+            if a != arg[-1]: s += '  '
+    else:
+        for i in range(len(arg)):
+            s += paramNames[i] + ('=%.5g' % arg[i])
+            if i != len(arg)-1: s += '  '
     return s
 
 
@@ -38,45 +35,88 @@ def arg2json(arg):
 
 
 def param(paramName, value, borders, step, minStep, isInt = False):
-    return {'paramName':paramName, 'value':value, 'leftBorder':borders[0], 'rightBorder':borders[1], 'step':step, 'minStep':minStep, 'isInt':isInt}
-
-
-def value(args, paramName):
-    for i in range(len(args)):
-        if args[i]['paramName'] == paramName: return args[i]['value']
-    return None
-
-
-def setValue(args, paramName, value):
-    for i in range(len(args)):
-        if args[i]['paramName'] == paramName:
-            if isinstance(value, dict): args[i] = value
-            else: args[i]['value'] = value
-            return
-    assert False, "paramName = "+paramName+" not found"
-
+    a = borders[0]; b = borders[1]
+    assert  a<=value and value<=b, 'Error, for '+paramName+' not true: '+str(a)+'<='+str(value)+'<='+str(b)
+    return {'paramName':paramName, 'value':value, 'leftBorder':a, 'rightBorder':b, 'step':step, 'minStep':minStep, 'isInt':isInt}
 
 class VectorPoint:
     def __init__(self, paramList):
         self.params = copy.deepcopy(paramList)
+        self.check()
+
+    def findParamByIndOrName(self, indOrName):
+        if isinstance(indOrName, str): 
+            paramName = indOrName
+            count = 0
+            for i in range(len(self.params)):
+                if self.params[i]['paramName'] == paramName:
+                    p = self.params[i]
+                    count += 1
+            if count == 0: return None
+            assert count==1, "Multiple params: "+paramName
+            return p
+        else: return self.params[indOrName]
 
     def __getitem__(self, i):
-        if isinstance(i, str): return value(self.params, i)
-        else: return self.params[i]
+        p = self.findParamByIndOrName(i)
+        if p is None: return None
+        if isinstance(i, str): return p['value']
+        else: return p
 
     def __setitem__(self, i, value):
-        if isinstance(i, str):
-            setValue(self.params, i, value)
-        else:
-            self.params[i] = value
+        assert value is not None
+        p = self.findParamByIndOrName(i)
+        assert p is not None, "param = "+str(i)+" not found"
+        if isinstance(value, dict):
+            assert value['value'] is not None
+            for n in ['value', 'leftBorder', 'rightBorder', 'step', 'minStep', 'isInt']:
+                p[n] = value[n]
+        else: p['value'] = value
+        self.check()
 
     def append(self, param):
-        self.params.append(param)
+        p = self.findParamByIndOrName(param['paramName'])
+        if p is not None: self[param['paramName']] = param
+        else: self.params.append(param)
+        self.check()
+
+    def increaseParamWithBounds(self, indOrName, toAdd):
+        p = self.findParamByIndOrName(indOrName)
+        assert p is not None
+        for n in ['value', 'leftBorder', 'rightBorder']: p[n] += toAdd
+        self.check()
+
+    def setAndExpandInterval(self, i, value):
+        assert value is not None
+        p = self.findParamByIndOrName(i)
+        assert p is not None, "param = "+str(i)+" not found"
+        assert not isinstance(value, dict)
+        p['value'] = value
+        if value<p['leftBorder']: p['leftBorder'] = value
+        if value>p['rightBorder']: p['rightBorder'] = value
+        self.check()
 
     def __len__(self): return len(self.params)
 
     def __str__(self):
         return arg2string(self.params)
+
+    def to_dict(self):
+        return dict([[p['paramName'], p['value']] for p in self.params])
+
+    def check(self):
+        for i in range(len(self.params)):
+            a = self.params[i]['leftBorder']
+            b = self.params[i]['rightBorder']
+            v = self.params[i]['value']
+            # print(self.params[i])
+            assert  a<=v and v<=b, 'Error, for '+self.params[i]['paramName']+' not true: '+str(a)+'<='+str(v)+'<='+str(b)
+
+    # def __deepcopy__(self, memo):
+    #     return VectorPoint(self.params)
+
+    # def __copy__(self):
+    #     return VectorPoint(self.params)
 
 
 def minimizePokoordOneDim(f, lastFuncValOneDim, x0, a, b, step, minStep, minFuncDelta, isInteger, paramName, enableOutput):
@@ -332,8 +372,9 @@ def minimizePokoord(f0, arg0, useRefinement=False, extraValue=False, **kwargs):
 
 
 # bounds - is a list of intervals [a,b]
-def minimize(fun, x0, bounds, fun_args=None, paramNames=None, method='coord'):
+def minimize(fun, x0, bounds, constraints=(), fun_args=None, paramNames=None, method='coord'):
     assert method in ['coord', 'scipy']
+    assert (len(constraints) == 0) or method == 'scipy'
     if paramNames is None: paramNames = ['x'+str(i) for i in range(len(x0))]
     if method == 'coord':
         def makeCoordArg(x,b,pNames):
@@ -351,17 +392,172 @@ def minimize(fun, x0, bounds, fun_args=None, paramNames=None, method='coord'):
         fmin, argmin = minimizePokoord(fun1, arg0, useRefinement=False, extraValue=False, f_args=fun_args, methodType='random')
         xmin = makeClassicX(argmin)
     else:
-        res = scipy.optimize.minimize(fun, x0, fun_args, bounds=bounds)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = scipy.optimize.minimize(fun, x0, args=fun_args, bounds=bounds, constraints=constraints, method='trust-constr')
         fmin, xmin = res.fun, res.x
     return fmin, xmin
 
 
-def plotMap1d(axis, fun, xmin, bounds, fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix=''):
+def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult='globalMinimumSearchResult',  fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extra_plot_func=None, printOnline=True):
+    """
+    Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum.
+    
+    :param targetFunction: function to minimize targetFunction(argsList, *fun_args)
+    :param trysCount: number of attempts to find minimum
+    :param bounds: list of 2-element lists with parameter bounds
+    :param constraints: additional constrains for ‘trust-constr’ scipy.optimize.minimize method
+    :param fun_args: extra params of targetFunction (tuple)
+    :param paramNames: list of target function argument names to use in plotting (not fixed and fixed)
+    :param folderToSaveResult: all result graphs and log are saved here
+    :param fixParams: dict of paramName:value to fix
+    :param contourMapCalcMethod: 'fast' - plot contours of the target function; 'thorough' - plot contours of the min of target function by all arguments except axes
+    :param plotContourMaps: 'all' or list of 1-element or 2-elements lists of axes names to plot contours of target function 
+    :param extra_plot_func: user defined function to plot something on result contours: extra_plot_func(ax, axisNamesList)
+    :return: sorted list of trysCount minimums of dicts {'value':.., 'x':...} 
+    """
+
+    n = len(bounds)
+    if paramNames is None:
+        paramNames = [f'x_{i}' for i in range(n)]
+    if fixParams is None: fixParams = {}
+    if fun_args is None: fun_args = tuple()
+    fixInd = np.zeros(len(fixParams), dtype=int)
+    fixVal = np.zeros(len(fixParams))
+    if constraints is None: constraints = tuple()
+    for p,j in zip(fixParams, range(len(fixParams))):
+        assert p in paramNames, f'Fixed param {p} doesn\'t present in paramNames'
+        i = paramNames.index(p)
+        fixInd[j] = i
+        fixVal[j] = fixParams[p]
+        a,b = bounds[i]
+        assert a <= fixParams[p] and fixParams[p] <= b, f'Fixed param {p} = {fixParams[p]} is out of bounds [{a}, {b}]'
+    notFixedInd = np.setdiff1d(np.arange(n), fixInd)
+    notFixedParamNames = np.array(paramNames)[notFixedInd]
+
+    def getFullx(partial_x):
+        full_x = np.zeros(n)
+        full_x[notFixedInd] = partial_x
+        full_x[fixInd] = fixVal
+        return full_x
+
+    def targetFunctionPartial(partial_x, *f_args):
+        return targetFunction(getFullx(partial_x), *f_args)
+
+    partial_constrains = tuple()
+    for c in constraints:
+        if isinstance(c, scipy.optimize.LinearConstraint):
+            if len(c.A.shape) == 1: c.A = c.A.reshape(1,-1)
+            x = np.zeros(n)
+            x[fixInd] = fixVal
+            d = c.A.dot(x)
+            part_c = scipy.optimize.LinearConstraint(c.A[:,notFixedInd], c.lb-d, c.ub-d, c.keep_feasible)
+        else:
+            assert isinstance(c, scipy.optimize.NonlinearConstraint)
+            part_c = scipy.optimize.NonlinearConstraint(lambda partial_x: c.fun(getFullx(partial_x), *fun_args), c.lb, c.up, keep_feasible=c.keep_feasible)
+        partial_constrains += (part_c,)
+
+    folderToSaveResult = utils.fixPath(folderToSaveResult)
+    if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
+    fmins = np.zeros(trysCount)
+    xs = [None]*trysCount
+    xs_partial = [None]*trysCount
+    rand = np.random.rand
+
+    def getArg0AndBounds():
+        m = len(notFixedInd)
+        partialBounds = np.zeros((m, 2))
+        for i,j in zip(notFixedInd, range(m)):
+            partialBounds[j,:] = bounds[i]
+        partial_arg0 = rand(m) * (partialBounds[:,1] - partialBounds[:,0]) + partialBounds[:,0]
+        try_i = 0
+        while not checkConstrains(partial_arg0, partial_constrains):
+            partial_arg0 = rand(m) * (partialBounds[:, 1] - partialBounds[:, 0]) + partialBounds[:, 0]
+            try_i += 1
+            assert try_i < 10000, f'Too many attempts to find start point for optimization inside constrains\nLast try: {partial_arg0}'
+        return partial_arg0, partialBounds
+
+    for ir in range(trysCount):
+        partial_arg0, partialBounds = getArg0AndBounds()
+        fmins[ir], xs_partial[ir] = minimize(targetFunctionPartial, partial_arg0, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, method='scipy')
+        # method can violate bounds and constrains!
+        for j in range(len(partialBounds)):
+            g = xs_partial[ir]
+            xs_partial[ir][j] = max(g[j], bounds[j][0])
+            xs_partial[ir][j] = min(g[j], bounds[j][1])
+        xs[ir] = getFullx(xs_partial[ir])
+        # old = fmins[ir]
+        fmins[ir] = targetFunction(xs[ir])
+        ok, rate = checkConstrains(xs[ir], constraints, returnRate=True)
+        if not ok: warnings.warn(f'Constrains are violated. Violation size = {rate}')
+        if printOnline: print('targetFunction = '+str(fmins[ir])+' '+arg2string(xs[ir], paramNames), flush=True)
+
+    ind = np.argsort(fmins)
+    output = ''
+    for ir in range(trysCount):
+        j = ind[ir]
+        output += str(fmins[j])+' '+arg2string(xs[j], paramNames)+"\n"
+    with open(folderToSaveResult+'/minimums.txt', 'w') as f: f.write(output)
+
+    best_ind = ind[0]
+    best_x_partial = xs_partial[best_ind]
+
+    def plot1d(param):
+        plotMap1d(param, targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_1d_target_func')
+
+    def plot2d(param1, param2):
+        plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extra_plot_func=extra_plot_func)
+
+    if plotContourMaps == 'all':
+        for i in range(len(notFixedParamNames)):
+            plot1d(i)
+        for i1 in range(len(notFixedParamNames)):
+            for i2 in range(i1+1,len(notFixedParamNames)):
+                plot2d(i1,i2)
+    else:
+        assert isinstance(plotContourMaps, list)
+        for params in plotContourMaps:
+            assert isinstance(params, list)
+            if len(params) == 1:
+                assert params[0] in notFixedParamNames, params[0]+' is not in not fixed param list: '+str(notFixedParamNames)
+                plot1d(params[0])
+            else:
+                assert len(params) == 2
+                assert params[0] in notFixedParamNames, params[0] + ' is not in not fixed param list: ' + str(notFixedParamNames)
+                assert params[1] in notFixedParamNames, params[1] + ' is not in not fixed param list: ' + str(notFixedParamNames)
+                plot2d(params[0], params[1])
+    result = [{'value': fmins[ind[i]], 'x':xs[ind[i]]} for i in range(trysCount)]
+    return result
+
+
+def checkConstrains(x, constraints, returnRate=False):
+    result = True
+    if len(constraints) == 0:
+        if returnRate: return result, 0
+        else: return result
+    rate = np.zeros(len(constraints))
+    for c in constraints:
+        if isinstance(c, scipy.optimize.LinearConstraint):
+            Ax = c.A.dot(x)
+            result &= np.all((c.lb <= Ax) & (Ax <= c.ub))
+        else:
+            assert isinstance(c, scipy.optimize.NonlinearConstraint)
+            Ax = c.fun(x)
+            result &= np.all((c.lb <= Ax) & (Ax <= c.ub))
+        rate = np.maximum(rate, Ax - c.lb)
+        rate = np.maximum(rate, c.ub - Ax)
+    rate = np.max(rate)
+    rate = max(0, rate)
+    if returnRate: return result, rate
+    else: return result
+
+
+def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix=''):
     assert calMapMethod in ['fast', 'thorough']
     if isinstance(axis, str):
         assert axis in paramNames
         axisName = axis
-        axisInd = np.where(paramNames == axisName)[0][0]
+        axisInd = np.where(np.array(paramNames) == axisName)[0][0]
     else:
         axisInd = axis
         axisName = paramNames[axisInd]
@@ -373,30 +569,56 @@ def plotMap1d(axis, fun, xmin, bounds, fun_args=None, paramNames=None, optimizeM
         forEvaluation[i] = np.copy(xmin)
         forEvaluation[i, axisInd] = axisValues[i]
 
-    def minFun(xPart, axis1):
+    def addFixedParams(xPart, fixParamValue):
         x = np.zeros(dim)
         j = 0
         for i in range(dim):
-            if i == axisInd: x[i] = axis1
+            if i == axisInd:
+                x[i] = fixParamValue
             else:
                 x[i] = xPart[j]
                 j += 1
+        return x
+
+    def minFun(xPart, fixParamValue):
+        x = addFixedParams(xPart, fixParamValue)
         return fun(x) if fun_args is None else fun(x, *fun_args)
+
+    def transformConstrain(c, fixParamValue):
+        if isinstance(c, dict): # nonlinear constrain
+            return lambda xPart: c(addFixedParams(xPart, fixParamValue))
+        elif isinstance(c, scipy.optimize.LinearConstraint):
+            coef = c.A[axisInd]
+            A = np.concatenate((c.A[:axisInd],c.A[axisInd+1:]))
+            lb = c.lb - coef*fixParamValue
+            ub = c.ub - coef*fixParamValue
+            return scipy.optimize.LinearConstraint(A, lb, ub, keep_feasible=c.keep_feasible)
+        else: assert False, str(c)
+
     indOther = np.setdiff1d(np.arange(dim), [axisInd])
     arg0 = xmin[indOther]
     boundsOther = [bounds[i] for i in indOther]
     paramNamesOther = [paramNames[i] for i in indOther]
 
     funcValues = np.zeros(axisValues.shape)
+    insideConstrains = np.ones(axisValues.shape, dtype=bool)
     for i in range(N):
+        inside = checkConstrains(forEvaluation[i], constraints)
+        if not inside:
+            insideConstrains[i] = False
+            continue
         if calMapMethod == 'fast':
             funcValues[i] = fun(forEvaluation[i]) if fun_args is None else fun(forEvaluation[i], *fun_args)
         else:
-            funcValues[i], _ = minimize(minFun, arg0, boundsOther, fun_args=(axisValues[i],), paramNames=paramNamesOther, method=optimizeMethod)
+            constraints1 = tuple(transformConstrain(c, axisValues[i]) for c in constraints)
+            funcValues[i], _ = minimize(minFun, arg0, boundsOther, constraints=constraints1, fun_args=(axisValues[i],), paramNames=paramNamesOther, method=optimizeMethod)
+    axisValues = axisValues[insideConstrains]
+    funcValues = funcValues[insideConstrains]
     fig, ax = plt.subplots()
     ax.plot(axisValues, funcValues)
     fun_val = fun(xmin) if fun_args is None else fun(xmin, *fun_args)
     ax.plot(xmin[axisInd], fun_val, marker='o', markersize=10, color="red")
+    
     plt.xlabel(axisName)
     plt.title(utils.wrap('Map 1d '+arg2string(xmin, paramNames), 100))
     fig.set_size_inches((16 / 3 * 2, 9 / 3 * 2))
@@ -409,12 +631,12 @@ def plotMap1d(axis, fun, xmin, bounds, fun_args=None, paramNames=None, optimizeM
 
 # axes - a pair of param names or param indexes
 # N = {paramName1:N1, paramName2:N2}
-def plotMap2d(axes, fun, xmin, bounds, fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix=''):
+def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix='', extra_plot_func=None):
     assert calMapMethod in ['fast', 'thorough']
     if isinstance(axes[0], str):
         assert (axes[0] in paramNames) and (axes[1] in paramNames)
         axisNames = axes
-        axisInds = [np.where(paramNames == axisNames[0])[0][0], np.where(paramNames == axisNames[1])[0][0]]
+        axisInds = [np.where(np.array(paramNames) == axisNames[0])[0][0], np.where(np.array(paramNames) == axisNames[1])[0][0]]
     else:
         axisInds = axes
         axisNames = [paramNames[axisInds[0]], paramNames[axisInds[1]]]
@@ -433,7 +655,7 @@ def plotMap2d(axes, fun, xmin, bounds, fun_args=None, paramNames=None, optimizeM
             forEvaluation[k, axisInds[1]] = param2mesh[i0, i1]
             k += 1
 
-    def minFun(xPart, axis1, axis2):
+    def addFixedParams(xPart, axis1, axis2):
         x = np.zeros(dim)
         j = 0
         for i in range(dim):
@@ -442,30 +664,57 @@ def plotMap2d(axes, fun, xmin, bounds, fun_args=None, paramNames=None, optimizeM
             else:
                 x[i] = xPart[j]
                 j += 1
+        return x
+
+    def minFun(xPart, axis1, axis2):
+        x = addFixedParams(xPart, axis1, axis2)
         return fun(x) if fun_args is None else fun(x, *fun_args)
+
+    def transformConstrain(c, axis1, axis2):
+        if isinstance(c, dict): # nonlinear constrain
+            return lambda xPart: c(addFixedParams(xPart, axis1, axis2))
+        elif isinstance(c, scipy.optimize.LinearConstraint):
+            coef = [c.A[axisInds[0]], c.A[axisInds[1]]]
+            A = np.array([c.A[i] for i in range(len(c.A)) if i not in axisInds])
+            lb = c.lb - coef[0]*axis1
+            ub = c.ub - coef[1]*axis2
+            return scipy.optimize.LinearConstraint(A, lb, ub, keep_feasible=c.keep_feasible)
+        else: assert False, str(c)
+
     indOther = np.setdiff1d(np.arange(dim), axisInds)
     arg0 = xmin[indOther]
     boundsOther = [bounds[i] for i in indOther]
     paramNamesOther = [paramNames[i] for i in indOther]
 
     funcValues = np.zeros(param1mesh.shape)
+    insideConstrains = np.ones(param1mesh.shape, dtype=bool)
     k = 0
     for i0 in range(NN[0]):
         for i1 in range(NN[1]):
+            inside = checkConstrains(forEvaluation[k], constraints)
+            if not inside:
+                insideConstrains[i0, i1] = False
+                continue
             if calMapMethod == 'fast':
                 funcValues[i0, i1] = fun(forEvaluation[k]) if fun_args is None else fun(forEvaluation[k], *fun_args)
             else:
-                funcValues[i0, i1], _ = minimize(minFun, arg0, boundsOther, fun_args=(param1mesh[i0, i1], param2mesh[i0, i1]), paramNames=paramNamesOther, method=optimizeMethod)
+                constraints1 = tuple(transformConstrain(c, param1mesh[i0, i1], param2mesh[i0, i1]) for c in constraints)
+                funcValues[i0, i1], _ = minimize(minFun, arg0, boundsOther, constraints=constraints1, fun_args=(param1mesh[i0, i1], param2mesh[i0, i1]), paramNames=paramNamesOther, method=optimizeMethod)
                 # print(k,'done of',NN[0]*NN[1])
             k += 1
-
-    fig = plt.figure()
+    # param1mesh = param1mesh[insideConstrains]   - contourf works only for 2D grid
+    # param2mesh = param2mesh[insideConstrains]
+    funcValues[~insideConstrains] = np.max(funcValues)
+    fig, ax = plt.subplots()
     CS = plt.contourf(param1mesh, param2mesh, funcValues, cmap='plasma')
     plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=30, inline=False)
+    if extra_plot_func is not None:
+        extra_plot_func(ax, axisNames)
     # plt.clabel(CS, inline=1, fontsize=10)
     plt.xlabel(axisNames[0])
     plt.ylabel(axisNames[1])
-    plotTitle = 'Map '+arg2string(xmin, paramNames)
+    plotTitle = utils.wrap('Map '+arg2string(xmin, paramNames), 100)
+    ax.set_title(plotTitle)
     plt.title(plotTitle)
     fig.set_size_inches((16 / 3 * 2, 9 / 3 * 2))
     fig.savefig(folder + '/' + axisNames[0] + '_' + axisNames[1] + postfix + '_contour.png')

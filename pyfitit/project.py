@@ -36,13 +36,28 @@ class LimitedDictClass(dict):
     def __init__(self, allowedKeys=None, userSetitemHook=None):
         if allowedKeys is None: allowedKeys = []
         self._keys = list(allowedKeys)
+        for key in self._keys: self[key] = None
         self.userSetitemHook = userSetitemHook
-        for key in self._keys: self[key] = ''
 
     def __setitem__(self, key, val):
         if key not in self._keys: raise KeyError('Not existent key '+str(key))
         dict.__setitem__(self, key, val)
-        if self.userSetitemHook is not None: self.userSetitemHook(self, key, val)
+        if hasattr(self, 'userSetitemHook') and (self.userSetitemHook is not None):
+            self.userSetitemHook(self, key, val)
+
+    def __contains__(self, k):
+        if k not in self._keys: return False
+        if self[k] is None: return False
+        return True
+
+    def __iter__(self):
+        return (k for k in self._keys if self[k] is not None)
+
+    def __deepcopy__(self, memo):
+        result = LimitedDictClass(allowedKeys = self._keys)
+        for key in result._keys: result[key] = copy.deepcopy(self[key])
+        result.userSetitemHook = self.userSetitemHook
+        return result
 
 
 def LimitedDictProperty(propertyName):
@@ -59,18 +74,22 @@ def LimitedDictProperty(propertyName):
 
 class Project(object):
     intervalNames = ['fit_norm', 'fit_smooth', 'fit_geometry', 'plot', 'fit_exafs']
-    fdmnesCalcNames = ['Energy range', 'Green', 'radius', 'Adimp', 'Quadrupole', 'Absorber', 'Edge', 'cellSize', 'electronTransfer']
-    fdmnesSmoothNames = ['Gamma_hole', 'Ecent', 'Elarg', 'Gamma_max', 'Efermi', 'shift']
-
+    fdmnesCalcNames = ['Energy range', 'Green', 'radius', 'Adimp', 'Quadrupole', 'Absorber', 'Edge', 'cellSize', 'electronTransfer', 'additional']
+    fdmnesSmoothNames = ['Gamma_hole', 'Ecent', 'Elarg', 'Gamma_max', 'Efermi', 'shift', 'norm']
+    opticalSmoothNames = ['shift', 'norm']
+    
     # attributes of class type, but not of instances!!!
     intervals = LimitedDictProperty('intervals')
     FDMNES_calc = LimitedDictProperty('FDMNES_calc')
     FDMNES_smooth = LimitedDictProperty('FDMNES_smooth')
+    optical_smooth = LimitedDictProperty('optical_smooth')
 
     def __init__(self):
+        self.name = ''
         self._spectrum0 = None
         self._spectrum = None
         self._maxSpectrumPoints = 100
+        self._useFullSpectrum = False
 
         def setitemHookIntervals(th, key, val):
             if key not in ['fit_norm', 'fit_smooth', 'fit_geometry', 'plot']: return
@@ -81,22 +100,33 @@ class Project(object):
         self.geometryParamRanges = None
         self._FDMNES_calc = LimitedDictClass(self.fdmnesCalcNames)
         self.FDMNES_calc = {'radius':5, 'Adimp':None, 'Quadrupole':False, 'Absorber':1, 'Green':False, 'Edge':'K', 'cellSize':1.0, 'electronTransfer':None, 'Energy range':'-15 0.02 8 0.1 18 0.5 30 2 54 3 117'}
-        self.defaultSmoothParams = smoothLib.DefaultSmoothParams(0)
+        self.defaultSmoothParams = smoothLib.DefaultSmoothParams(0,0)
 
-        def setitemHookShift(th, key, val):
-            if val == '': return
-            if key == 'shift':
-                self.defaultSmoothParams['fdmnes']['shift'] = optimize.param('shift', val, [val-20, val+20], 1, 0.25)
-            else:
-                self.defaultSmoothParams['fdmnes'][key] = val
-        self._FDMNES_smooth = LimitedDictClass(self.fdmnesSmoothNames, userSetitemHook=setitemHookShift)
+        def itemHookSmooth(smooth_type):
+            def setitemHookSmooth(th, key, val):
+                if val == '': return
+                assert val is not None, 'key='+key+' val='+val
+                if key == 'shift':
+                    self.defaultSmoothParams[smooth_type]['shift'] = optimize.param('shift', val, [val-20, val+20], 1, 0.25)
+                elif key == 'norm':
+                    self.defaultSmoothParams[smooth_type].params.append(optimize.param('norm', val, [val/10, val*10], val/10, val/10))
+                else:
+                    self.defaultSmoothParams[smooth_type][key] = val
+            return setitemHookSmooth
+        self._FDMNES_smooth = LimitedDictClass(self.fdmnesSmoothNames, userSetitemHook=itemHookSmooth('fdmnes'))
+        self._optical_smooth = LimitedDictClass(self.opticalSmoothNames, userSetitemHook=itemHookSmooth('optical'))
 
     def spectrum_get(self): return self._spectrum
     def spectrum_set(self, s):
         self._spectrum0 = copy.deepcopy(s)
         if s is None: self._spectrum = None
         else:
-            self._spectrum = utils.adjustSpectrum(s, self.maxSpectrumPoints, self.intervals)
+            if self.useFullSpectrum: self._spectrum = self._spectrum0
+            else:
+                self._spectrum = utils.adjustSpectrum(s, self.maxSpectrumPoints, self.intervals)
+                Efermi = self.defaultSmoothParams['fdmnes']['Efermi']
+                if Efermi<s.energy[0]-200 or s.energy[0]>s.energy[-1]+200:
+                    self.defaultSmoothParams['fdmnes']['Efermi'] = optimize.param('Efermi', s.energy[0]+10, [s.energy[0]-20, s.energy[-1]+20], 1, 0.25)
     spectrum = property(spectrum_get, spectrum_set)
 
     def maxSpectrumPoints_get(self): return self._maxSpectrumPoints
@@ -104,6 +134,12 @@ class Project(object):
         self._maxSpectrumPoints = msp
         self.spectrum = self._spectrum0
     maxSpectrumPoints = property(maxSpectrumPoints_get, maxSpectrumPoints_set)
+
+    def useFullSpectrum_get(self): return self._useFullSpectrum
+    def useFullSpectrum_set(self, ufs):
+        self._useFullSpectrum = ufs
+        self.maxSpectrumPoints = self.maxSpectrumPoints
+    useFullSpectrum = property(useFullSpectrum_get, useFullSpectrum_set)
 
     def constructMoleculesForEdgePoints(self):
         params = list(self.geometryParamRanges.keys())

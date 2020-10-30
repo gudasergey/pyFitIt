@@ -1,29 +1,18 @@
-# ---
-# jupyter:
-#   jupytext:
-#     text_representation:
-#       extension: .py
-#       format_name: light
-#       format_version: '1.3'
-#       jupytext_version: 0.8.6
-#   kernelspec:
-#     display_name: Python 3
-#     language: python
-#     name: python3
-# ---
 
 # ## Import libraries
 
 import sys
-sys.path.append("../../../..")
+sys.path.append("../../..")
 from pyfitit import *
 import os
 def getProjectFolder(): return os.path.dirname(os.path.realpath(__file__))
 
 initPyfitit()
 
+
 # ## Structural information
 
+# +
 def moleculeConstructor(project, params):
     projectFolder = getProjectFolder()
     
@@ -69,9 +58,11 @@ def moleculeConstructor(project, params):
         print('Warning: there are atoms with distance < minDist')
     return m
 
+# -
 
 # ## Parameters of the project
 
+# +
 #Modify 1.4. Name of the file with experiment.
 def projectConstructor(expFile='exp_ground.txt'):
     project = Project()
@@ -119,6 +110,6 @@ def projectConstructor(expFile='exp_ground.txt'):
     }
     project.moleculeConstructor = MethodType(moleculeConstructor, project)
     return project
-    
+
 
 # ===============

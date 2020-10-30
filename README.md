@@ -28,6 +28,7 @@ See [examples](http://hpc.nano.sfedu.ru/pyfitit/download/examples.zip). Manual i
 - Yury Rusalev
 - Andrea Martini
 - Alexandr Algasov
+- Danil Pashkov
 - Aram Bugaev
 - Mikhail Soldatov
 

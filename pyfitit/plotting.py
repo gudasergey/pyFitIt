@@ -1,14 +1,22 @@
 from . import utils
 utils.fixDisplayError()
-import os, warnings, json, matplotlib
+import os, warnings, json, matplotlib, copy
 from . import optimize, ML
 import numpy as np
+import pandas as pd
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties
+import cycler
+
+
+def closefig(fig):
+    #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
+    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+
 
 # append = {'label':..., 'data':..., 'twinx':True} or  [{'label':..., 'data':...}, {'label':..., 'data':...}, ...]
-def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', title=''):
+def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', title='', shift=None):
     if fileName=='': fileName='xanes'
     os.makedirs(folder, exist_ok=True)
     exp_e = exp.spectrum.energy
@@ -19,29 +27,36 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     fig, ax = plt.subplots()
     fdmnes_en = smoothed_xanes.energy
     fdmnes_xan = smoothed_xanes.intensity
-    if os.path.isfile(folder+'/args_smooth.txt'):
-        with open(folder+'/args_smooth.txt', 'r') as f: smooth_params = json.load(f)
-        if type(smooth_params) is list: shift = optimize.value(smooth_params,'shift')
-        else: shift = smooth_params['shift']
-    else:
-        warnings.warn("Can't find file args_smooth.txt in folder "+folder+" use default shift from experiment fdmnes")
-        shift = optimize.value(exp.defaultSmoothParams['fdmnes'], 'shift')
-    if not shiftIsAbsolute: shift += utils.getInitialShift(exp_e, exp_xanes, fdmnes_en, fdmnes_xan, search_shift_level)
-    e_fdmnes = exp_e-shift
-    if xanes0 is not None:
-        fdmnes_xan0 =  xanes0.intensity / np.mean(xanes0.intensity[-3:]) * np.mean(exp_xanes[-3:])
-        ax.plot(xanes0.energy, fdmnes_xan0, label='initial')
-    ax.plot(e_fdmnes, fdmnes_xan, label='convolution')
-    ax.plot(e_fdmnes, exp_xanes, c='k', label="Experiment")
-    if append is not None:
-        if (type(append) is dict) and ('twinx' in append) and append['twinx']:
-            ax2 = ax.twinx()
-            ax2.plot(e_fdmnes, append['data'], c='r', label='Smooth width')
-            ax2.legend()
+    if shift is None:
+        if os.path.isfile(folder+'/args_smooth.txt'):
+            with open(folder+'/args_smooth.txt', 'r') as f: smooth_params = json.load(f)
+            if type(smooth_params) is list: shift = optimize.value(smooth_params,'shift')
+            else: shift = smooth_params['shift']
         else:
-            if type(append) is dict: append = [append]
-            for graph in append: ax.plot(e_fdmnes, graph['data'], label=graph['label'])
-    ax.set_xlim([fit_interval[0]-shift, fit_interval[1]-shift])
+            if xanes0 is not None:
+                warnings.warn("Can't find file args_smooth.txt in folder "+folder+" use default shift from experiment fdmnes")
+            shift = exp.defaultSmoothParams['fdmnes']['shift']
+        if not shiftIsAbsolute: shift += utils.getInitialShift(exp_e, exp_xanes, fdmnes_en, fdmnes_xan, search_shift_level)
+    if xanes0 is not None:
+        fdmnes_xan0 = xanes0.intensity / np.mean(xanes0.intensity[-3:]) * np.mean(exp_xanes[-3:])
+        ax.plot(xanes0.energy+shift, fdmnes_xan0, label='initial')
+    ax.plot(fdmnes_en, fdmnes_xan, label='convolution')
+    ax.plot(exp_e, exp_xanes, c='k', label="Experiment")
+    if append is not None:
+        if type(append) is dict: append = [append]
+        assert type(append) is list
+        for graph in append: 
+            assert type(graph) is dict
+            if ('twinx' in graph) and graph['twinx']:
+                ax2 = ax.twinx()
+                ax2.plot(exp_e, graph['data'], c='r', label='Smooth width')
+                ax2.legend()
+            else:
+                if 'data' in graph:
+                    ax.plot(exp_e, graph['data'], label=graph['label'])
+                else:
+                    ax.plot(graph['x'], graph['y'], label=graph['label'])
+    ax.set_xlim([fit_interval[0], fit_interval[1]])
     ymin = 0 if np.min(exp_xanes)>=0 else np.min(exp_xanes)*1.2
     ymax = np.max(exp_xanes)*1.2
     ax.set_ylim([ymin, ymax])
@@ -49,32 +64,23 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     font = FontProperties(); font.set_weight('black'); font.set_size(20)
     for fi in exp.intervals:
         if exp.intervals[fi] == '': continue
-        txt = ax.text(exp.intervals[fi][0]-shift, ax.get_ylim()[0], '[', color='green', verticalalignment='bottom', fontproperties=font)
-        txt = ax.text(exp.intervals[fi][1]-shift, ax.get_ylim()[0], ']', color='green', verticalalignment='bottom', fontproperties=font)
+        txt = ax.text(exp.intervals[fi][0], ax.get_ylim()[0], '[', color='green', verticalalignment='bottom', fontproperties=font)
+        txt = ax.text(exp.intervals[fi][1], ax.get_ylim()[0], ']', color='green', verticalalignment='bottom', fontproperties=font)
         # ax.plot(np.array(exp.intervals[fi])-shift, [0.03*i*(ymax-ymin)+ymin]*2, 'r*', ms=10); i+=1
     ax.set_xlabel("Energy")
     ax.set_ylabel("XANES")
     ax.legend()
     if title!='':
-        if len(title)>100:
-            words = title.split(' ')
-            title = ''; line = ''
-            for w in words:
-                if line != '': line += ' '
-                line += w
-                if len(line)>80:
-                    if title != '': title += "\n"
-                    title += line;
-                    line =''
-            if line != '':
-                if title != '': title += "\n"
-                title += line;
+        title = wrap(title, 100)
         ax.set_title(title)
     fig.set_size_inches((16/3*2, 9/3*2))
-    fig.savefig(folder+'/'+fileName+'.png')
-    #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
-    np.savetxt(folder+'/'+fileName+'.csv', [e_fdmnes, exp_xanes, fdmnes_xan], delimiter=',')
+    fig.savefig(folder+'/'+fileName+'.png', dpi=300)
+    closefig(fig)
+    # print(exp_e.size, exp_xanes.size, fdmnes_xan.size)
+    with open(folder+'/'+fileName+'.csv', 'a') as f:
+        np.savetxt(f, [exp_e, exp_xanes], delimiter=',')
+        np.savetxt(f, [fdmnes_en, fdmnes_xan], delimiter=',')
+
 
 # region = {paramName1:[a,b], paramName2:[c,d]}, N = {paramName1:N1, paramName2:N2}
 # estimatorInverse must be fitted to predict smoothed xanes on the same energy grid as experiment
@@ -124,9 +130,8 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
     plt.title(plotTitle)
     fig.set_size_inches((16/3*2, 9/3*2))
     postfix = '_density' if density else '_l2_norm'
-    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'_contour.png')
-    #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'_contour.png', dpi=300)
+    closefig(fig)
     #for cmap in ['inferno', 'spectral', 'terrain', 'summer']:
     cmap = 'inferno'
     fig = plt.figure()
@@ -139,22 +144,59 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
     plt.title(plotTitle)
     fig.set_size_inches((16/3*2, 9/3*2))
     # plt.legend()
-    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.png')
-    #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.png', dpi=300)
+    closefig(fig)
     data2csv = np.vstack((param1mesh.flatten(), param2mesh.flatten(), normValues.flatten())).T
     np.savetxt(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.csv', data2csv, delimiter=',')
 
+
+def wrap(s, n):
+    if len(s) <= n: return s
+    words = s.split(' ')
+    s = '';
+    line = ''
+    for w in words:
+        if line != '': line += ' '
+        line += w
+        if len(line) > 80:
+            if s != '': s += "\n"
+            s += line;
+            line = ''
+    if line != '':
+        if s != '': s += "\n"
+        s += line;
+    return s
+
+
 # x1,y1,label1,x2,y2,label2,....,filename
-def plotToFile(*p):
+def plotToFile(*p, fileName=None, save_csv=True, title='', xlim=None):
+    assert len(p)%3 == 0
     fig, ax = plt.subplots()
-    n = (len(p)-1)//3
+    n = len(p)//3
     for i in range(n):
+        # print('plotting '+p[i*3+2]+': ', p[i*3], p[i*3+1])
         ax.plot(p[i*3], p[i*3+1], label=p[i*3+2])
+    if title != '':
+        # print(title)
+        title = wrap(title, 100)
+        ax.set_title(title)
     ax.legend()
+    if xlim is not None: ax.set_xlim(xlim[0], xlim[1])
     fig.set_size_inches((16/3*2, 9/3*2))
-    fig.savefig(p[-1]+'.png')
-    plt.close(fig)
+    if fileName is None: fileName = 'graph.png'
+    folder = os.path.split(os.path.expanduser(fileName))[0]
+    if not os.path.exists(folder): os.makedirs(folder)
+    # print('saving to file: '+fileName)
+    fig.savefig(fileName, dpi=300)
+    closefig(fig)
+
+    if save_csv:
+        with open(os.path.splitext(fileName)[0]+'.csv', 'w') as f:
+            for i in range(n):
+                f.write(p[i*3+2]+' x: ')
+                np.savetxt(f, p[i*3], delimiter=',')
+                f.write(p[i*3+2]+' y: ')
+                np.savetxt(f, p[i*3+1], delimiter=',')
 
 
 def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryParams, xanes, N=20, estimator=ML.Normalize(ML.makeQuadric(ML.RidgeCV(alphas=[0.01,0.1,1,10,100])), xOnly=False) ):
@@ -190,7 +232,67 @@ def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
     plt.ylabel('Probability')
     fig.set_size_inches((16/3*2, 9/3*2))
     if not os.path.exists(folder): os.makedirs(folder)
-    fig.savefig(folder+'/'+paramName+'.png')
-    #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    fig.savefig(folder+'/'+paramName+'.png', dpi=300)
+    closefig(fig)
     np.savetxt(folder+'/'+paramName+'.csv', [barPos-h/2, barPos+h/2, predProba], delimiter=',')
+
+def truncate_colormap(cmapName, minval=0.0, maxval=1.0, n=100):
+    import matplotlib.colors as colors
+    cmap = plt.get_cmap(cmapName)
+    new_cmap = colors.LinearSegmentedColormap.from_list('trunc({n},{a:.2f},{b:.2f})'.format(n=cmapName, a=minval, b=maxval), cmap(np.linspace(minval, maxval, n)))
+    return new_cmap
+
+def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=None):
+    """Plot all spectra on the same graph colored by some parameter. Order of plotting is controled by sortByColors parameter
+
+    :param energy: energy values
+    :param spectra: 2d numpy matrix, each row is a spectrum
+    :param color_param: Values of parameter to use for color, defaults to None
+    :param sortByColors: Order of plotting: random or sorted by color parameter, defaults to False
+    :param fileName: File to save graph. If none - figure is returned 
+    """
+    assert len(energy) == spectra.shape[1]
+    if isinstance(spectra, pd.DataFrame): spectra = spectra.to_numpy()
+    nanExists = False
+    if color_param is not None:
+        indNan = np.isnan(color_param)
+        nanExists = np.any(indNan)
+        if nanExists:
+            color_param0 = color_param
+            spectra0 = spectra
+            color_param = color_param[~indNan]
+            spectra = spectra[~indNan]
+    if sortByColors:
+        assert color_param is not None
+        ind = np.argsort(color_param)
+    else:
+        ind = np.random.permutation(spectra.shape[0])
+    spectra = spectra[ind]
+
+    fig, ax = plt.subplots()
+    if color_param is not None:
+        assert len(color_param) == spectra.shape[0]
+        colors = (color_param-np.min(color_param))/(np.max(color_param)-np.min(color_param)) * 0.9
+        colors = plt.cm.hsv(colors)
+        colors = colors[ind]
+        ax.set_prop_cycle(cycler.cycler('color', colors))
+    else: colors = ['k']*spectra.shape[0]
+
+    for i in range(spectra.shape[0]):
+        ax.plot(energy, spectra[i], lw=0.5, alpha=0.8)
+    if nanExists:
+        for i in np.where(indNan)[0]:
+            ax.plot(energy, spectra0[i], color='k', lw=0.5, alpha=0.8)
+
+    fig.set_size_inches((16/3*2, 9/3*2))
+    if fileName is not None:
+        fig.savefig(fileName, dpi=300)
+        closefig(fig)
+    else: return fig
+
+
+def getPlotLim(z, gap=0.1):
+    m = np.min(z)
+    M = np.max(z)
+    d = M-m
+    return [m-d*gap, M+d*gap]

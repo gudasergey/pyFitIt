@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import sklearn, json, os, copy, gc, matplotlib, warnings
 from . import plotting, ML, smoothLib, fdmnes
-from .optimize import setValue
 from sklearn.linear_model import RidgeCV
 from sklearn.ensemble import ExtraTreesRegressor, ExtraTreesClassifier
 from sklearn.model_selection import KFold
@@ -86,7 +85,7 @@ def directCrossValidationFast(geometryParamsTest, xanesTest, estimator):
     prediction = estimator.predict(X_test)
     res = {}
     for i in range(len(paramNames)):
-        relativeToConstantError = 1-ML.scoreFast(X_test, y_test[:,i], prediction[:,i])
+        relativeToConstantError = 1-ML.scoreFast(y_test[:,i], prediction[:,i])
         RMSE = np.sqrt( np.mean( (y_test[:,i]-prediction[:,i])**2 ) )
         MAE = np.mean( np.abs(y_test[:,i]-prediction[:,i]) )
         res[paramNames[i]] = {'relToConstPredError':relativeToConstantError, 'RMSE':RMSE, 'MAE':MAE}
@@ -192,7 +191,7 @@ class Estimator:
             del self.convolutionParams['norm']
         else: self.norm = None
         for pName in self.convolutionParams:
-            setValue(self.exp.defaultSmoothParams['fdmnes'], pName, self.convolutionParams[pName])
+            self.exp.defaultSmoothParams['fdmnes'][pName] = self.convolutionParams[pName]
         self.regressor = getMethod(name, regressorParams)
         self.classifier0 = ExtraTreesClassifier(**classifierParams)
         self.normalize = normalize

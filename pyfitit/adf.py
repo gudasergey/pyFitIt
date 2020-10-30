@@ -113,7 +113,7 @@ def nearestAtomsDistChange(originalMoleculePath, logfileFolder, firstN=5):
         res = map(lambda x: {'atom':str(x['num'])+'.'+x['atom'], 'dist':distance.euclidean(getPos(x), cr)}, cycle[1:])
         return list(res)
 
-    logFname = findFile(logfileFolder, 'logfile', check=False)
+    logFname = utils.findFile(logfileFolder, 'logfile', check_unique=False)
     if logFname is None: return None
     cycles = parseLogfile(logFname)
     savexyz(cycles[0], logfileFolder+os.sep+'atoms_cycle_first.xyz')
@@ -177,7 +177,7 @@ def generateInput(molecule, cards, lowest=None, folder = ''):
 
 
 def convertRunToJob(folder):
-    runFile = findFile(folder,'.run')
+    runFile = utils.findFile(folder,'.run')
     runFile = os.path.split(runFile)[1]
     proc = subprocess.Popen(['convertRun2Job', runFile], cwd=folder, stdout=subprocess.PIPE)
     return os.path.splitext(runFile)[0]+'.job'
@@ -217,8 +217,25 @@ def parseOutFile(fileName):
     return pd.read_csv(StringIO(s), header=None, names=['N','colon', 'E', 'fmu', 'fQ', 'fm', 'fOmu', 'fMmu','ftot'], sep=r'\s+')
 
 
+def parseRunFile(fileName, xyz_result_filename):
+    with open(fileName, 'r') as f: s = f.read()
+    i = s.find('\nATOMS\n')
+    assert i >= 0
+    i += len('\nATOMS\n')
+    j = s.find('\nEND', i)
+    assert j >= 0
+    s = s[i:j]
+    p = ''
+    lines = s.split('\n')
+    for line in lines:
+        # print(line)
+        p += ' '.join(line.strip().split(' ')[1:]) + '\n'
+    with open(xyz_result_filename, 'w') as xyzf:
+        xyzf.write(str(len(lines))+'\n\n'+p)
+    return 0
+
 def parse_one_folder(folder, makePiramids = False):
-    xanesFile = findFile(folder,'.out', check = False)
+    xanesFile = utils.findFile(folder,'.out', check_unique = False)
     if xanesFile is None:
         raise Exception('Error: in folder '+folder+' there is no output file')
     try:
@@ -241,7 +258,7 @@ def parse_all_folders(parentFolder, printOutput=True):
     badFolders = []; allXanes = {}
     for i in range(len(subfolders)):
         d = subfolders[i]
-        xanesFile = findFile(os.path.join(parentFolder, d),'.out', check = False)
+        xanesFile = utils.findFile(os.path.join(parentFolder, d),'.out', check_unique = False)
         if xanesFile is None:
             print('Error: in folder '+d+' there is no output file')
             badFolders.append(d)
@@ -316,10 +333,11 @@ def nextLine(s, i0):
     return i
 
 
-def parseExcitations(folder, MOcount, printOutput=False):
+def parseExcitations_DOS(folder, MOcount, fragment, printOutput=False):
     fnames = glob.glob(folder+os.sep+'*.out')
-    fnames.sort()
-
+    fnames = natsorted(fnames)
+    print(fnames)
+     
     for filename in fnames:
         if printOutput: print('File', filename)
         with open(filename, 'r') as file: output = file.read()
@@ -351,8 +369,7 @@ def parseExcitations(folder, MOcount, printOutput=False):
         df['Number'] = np.array(number)
         df['Spin'] = np.array(spin)
         df['MO'] = np.array(MO)
-        # print(df)
-
+        
         i = output.rfind("List of all MOs, ordered by energy, with the most significant SFO gross populations")
         i = output.find(" *** SPIN 1 ***", i)
         for l in range(6): i = nextLine(output, i)
@@ -362,7 +379,9 @@ def parseExcitations(folder, MOcount, printOutput=False):
         assert word == '***'
         assert output[i+1:i+7] == 'SPIN 2'
         for l in range(6): i = nextLine(output, i)
-        k = output.find("\n \n", i)
+        k1 = output.find("\n \n", i)
+        k2 = output.find("\n  pauli", i)
+        k = min(k1,k2)
         spin_str.append(output[i:k])
         spin_df = []
         for s in spin_str:
@@ -378,10 +397,19 @@ def parseExcitations(folder, MOcount, printOutput=False):
                 # if i > 100000: break
             s = s.tostring()[::4].decode()
             data = pd.read_csv(StringIO(s), sep=r'\s+', header=None, skipinitialspace=True, names=['E1','Occ1','MO_N', 'MO_A', 'percent', 'SFO_N', 'SFO_L', 'E2', 'Occ2', 'Fragment_N', 'Fragment_L'])
+            for c in data.columns:
+                if np.sum(pd.isna(data[c]))>0:
+                    ind = np.where(pd.isna(data[c]))[0][0]
+                    print('There is NaN in column '+c+'. Last good lines:')
+                    print(data.loc[ind-3:ind+3])
+                    exit(1)
             spin_df.append(data)
-            # print(data)
+#        print(spin_df[1])
 
         orbitals = ["D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2"]
+        #initialize arrays to store energies and occupations for MOs
+        energy = np.zeros(df.shape[0])
+        occ = np.zeros(df.shape[0])
         for orb in orbitals:
             n = df.shape[0]
             percent = np.zeros(n)
@@ -396,12 +424,19 @@ def parseExcitations(folder, MOcount, printOutput=False):
                 # ind0 = (sdf['MO_N'] == mo_n) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb)
                 # if np.sum(ind0) > 0:
                 #     print(sdf.loc[ind0])
-                ind = (sdf['MO_N'] == mo_n) & (sdf['MO_A'] == mo_a) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb) & (sdf['Fragment_L'] == 'Cr')
+                ind = (sdf['MO_N'] == mo_n) & (sdf['MO_A'] == mo_a) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb) & (sdf['Fragment_L'] == 'Cr') & (sdf['Fragment_N'] == fragment)
                 sum_ind = np.sum(ind)
                 assert sum_ind <= 1
                 if sum_ind == 1:
                     p = sdf['percent'][ind].values[0]
                     percent[i] = float(p[:-1])
+                    e = sdf['E1'][ind].values[0]
+                    o = sdf['Occ1'][ind].values[0]
+                    assert (energy[i]==0) or (energy[i]==e)
+                    energy[i] = e
+                    occ[i] = o
+                else:
+                    assert sum_ind==0, str(sdf.loc[ind])
                 if printOutput:
                     pdone = i*100 // (n-1)
                     if pdone != (i-1)*100 // (n-1):
@@ -409,7 +444,52 @@ def parseExcitations(folder, MOcount, printOutput=False):
                         if pdone > 0:
                             print('Orbital ' + orb +'.', pdone,'% done. Left: ',(100-pdone)*(t-t0)//pdone,'s')
             df[orb] = percent
+        df['E'] = energy
+        df['Occ'] = occ
+        #change order of columns
+        df = df[['E', 'Number', 'Spin', 'MO', "D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2",'Occ']]
+        df.loc[df['Spin'] == 'Beta', orbitals] = -df.loc[df['Spin'] == 'Beta', orbitals]
+        df.to_csv(filename[:-4]+'_DOS_3d.csv', index=False)
+        #df.to_csv(os.path.splitext(filename)[0]+'_DOS_3d.csv', index=False)
 
-        df.to_csv(os.path.splitext(filename)[0]+'_excitations.csv', index=False)
-
-
+def parse_ADFEmis(fileName, returnDOS=False):
+    with open(fileName, 'r') as f: s = f.read()
+    s = s.strip()
+    lines = s.split('\n')
+    header = lines[0]
+    words = header.strip().split(' ')
+    energyCol = words.index('E_ADFEmis')
+    intensityCol = words.index('Intensity')
+    DOS_exists = 'd_DOS' in words
+    if DOS_exists:
+        dosEnCol = words.index('E_DOS')
+        dosCol = words.index('d_DOS')
+    lines = lines[1:]
+    energy = []; intensity = []; DOS_en = []; DOS = []
+    for l in lines:
+        words = l.strip().split(' ')
+        if len(words)<4: break
+        energy.append(float(words[energyCol]))
+        intensity.append(float(words[intensityCol]))
+        if DOS_exists and len(words)>max(dosEnCol,dosCol):
+            DOS_en.append(float(words[dosEnCol]))
+            DOS.append(float(words[dosCol]))
+    spectrum = utils.Spectrum(np.array(energy), np.array(intensity))
+    dos_sp = None
+    if DOS_exists:
+        DOS_en = np.array(DOS_en); DOS = np.array(DOS)
+        DOS_en_unique = np.unique(DOS_en)
+        DOS_unique = np.zeros(len(DOS_en_unique))
+        for i in range(len(DOS_en_unique)):
+            DOS_unique[i] = np.sum(DOS[DOS_en == DOS_en_unique[i]])
+        # make bars
+        de = np.min(DOS_en_unique[1:]-DOS_en_unique[:-1])
+        DOS_en_unique = np.concatenate((DOS_en_unique, DOS_en_unique-de/3, DOS_en_unique+de/3))
+        DOS_unique = np.concatenate((DOS_unique, np.zeros(len(DOS_unique)), np.zeros(len(DOS_unique))))
+        ind = np.argsort(DOS_en_unique)
+        DOS_en_unique = DOS_en_unique[ind]
+        DOS_unique = DOS_unique[ind]
+        
+        dos_sp = utils.Spectrum(DOS_en_unique, DOS_unique)
+    if returnDOS: return spectrum, dos_sp
+    else: return spectrum

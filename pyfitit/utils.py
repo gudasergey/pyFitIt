@@ -1,15 +1,24 @@
-import parser, scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, traceback, copy, glob
+import parser, scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, traceback, copy, glob, sklearn
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 from notebook import notebookapp
+import time
 
 
 class Spectrum:
-    def __init__(self, energy, intensity, molecula=None, copy=False):
+    def __init__(self, energy, intensity, molecula=None, copy=True):
+        """Spectrum class
+
+        :param energy: energy
+        :param intensity: intensity
+        :param molecula: molecule, defaults to None
+        :param copy: copy params or assign as reference, defaults to False
+        """
+        assert len(energy) == len(intensity)
         if copy:
-            self.energy = np.copy(energy)
-            self.intensity = np.copy(intensity)
+            self.energy = np.copy(energy).reshape(-1)
+            self.intensity = np.copy(intensity).reshape(-1)
         else:
             self.energy = energy
             self.intensity = intensity
@@ -25,11 +34,88 @@ class Spectrum:
     def clone(self):
         return Spectrum(self.energy, self.intensity, self.molecula, copy=True)
 
+    def limit(self, interval):
+        e, inten = limit(interval, self.energy, self.intensity)
+        return Spectrum(e, inten, self.molecula, copy=True)
+
 
 class Exafs:
     def __init__(self, k, chi):
         self.k = k
         self.chi = chi
+
+
+class SpectrumCollection:
+    def __init__(self):
+        self.labels = []
+        self.params = None
+        self.spectra = None
+        self.energyColumn = 0
+
+    def setSpectra(self, dataframe):
+        self.spectra = dataframe
+        # assuming that the first column is energy, and the rest are spectra
+        self.labels = list(dataframe.columns[1:])
+
+    def setLabel(self, index, label):
+        if index < 0 or index >= len(self.labels):
+            raise Exception('Wrong label: ' + index)
+        self.labels[index] = label
+
+    def getSpectrumByLabel(self, label):
+        index = self.labels.index(label)
+        energy = self.spectra[self.spectra.columns[self.energyColumn]]
+        intensity = self.spectra[self.spectra.columns[index + 1]]
+        return Spectrum(energy.values, intensity.values)
+
+    def getSpectrumByParam(self, param):
+        assert self.params is not None, "You need too call parseLabels first"
+        assert param in self.params, 'Param = '+str(param)+' not known values: '+str(self.params)
+        indexes = np.where(self.params == param)[0]
+        assert len(indexes) == 1
+        index = indexes[0]
+        energy = self.spectra[self.spectra.columns[self.energyColumn]]
+        intensity = self.spectra[self.spectra.columns[index + 1]]
+        # print(energy)
+        return Spectrum(energy.values, intensity.values)
+
+    def interpolate(self, exp_e):
+        dataframe = self.spectra
+        newData = {'energy':exp_e}
+        for column in dataframe.columns[1:]:
+            newData[column] = np.interp(
+                exp_e,
+                dataframe[dataframe.columns[self.energyColumn]].values,
+                dataframe[column].values)
+
+        self.spectra = pd.DataFrame(newData)
+
+    def parseLabels(self):
+        self.params = np.array([float(l) for l in self.labels])
+        assert len(np.unique(self.params)) == len(self.labels), "Duplicate param values!"
+
+
+def readSpectra(fileName, header=True, skiprows=0, energyColumn=0, intensityColumns=None, separator=r'\s+', decimal="."):
+    fileName = fixPath(fileName)
+    data = pd.read_csv(fileName, sep=separator, decimal=decimal, skiprows=skiprows, header=0 if header else None)
+    collection = SpectrumCollection()
+    columnsToExport = []
+
+    if data.shape[1] < energyColumn:
+        raise Exception('Data in file contains '+str(data.shape[1])+' only columns. But you specify energyColumn = '+str(energyColumn))
+    columnsToExport.append(data.columns[energyColumn])
+
+    if intensityColumns is None:
+        intensityColumns = list(range(energyColumn + 1, data.shape[1]))
+    for column in intensityColumns:
+        if data.shape[1] <= column:
+            raise Exception('Data in file contains '+str(data.shape[1])+' only columns. But you specify intensityColumns = '+str(intensityColumns))
+        columnsToExport.append(data.columns[column])
+
+    # saving only desired spectra, first column - energy
+    collection.setSpectra(data[columnsToExport])
+
+    return collection
 
 
 def readSpectrum(fileName, skiprows=0, energyColumn=0, intensityColumn=1, separator=r'\s+', decimal="."):
@@ -57,8 +143,10 @@ def adjustSpectrum(s, maxSpectrumPoints, intervals):
     m = np.min([intervals['fit_norm'][0], intervals['fit_smooth'][0], intervals['fit_geometry'][0], intervals['plot'][0]])
     M = np.max([intervals['fit_norm'][1], intervals['fit_smooth'][1], intervals['fit_geometry'][1], intervals['plot'][1]])
     res = copy.deepcopy(s)
+    if m > M: return res
     ind = (res.energy>=m) & (res.energy<=M)
     res.energy = res.energy[ind]
+    assert len(res.energy)>2, 'Too few energies are situated in the intervals ['+str(m)+', '+str(M)+']. Energy = '+str(s.energy)
     res.intensity = res.intensity[ind]
     if res.energy.size <= maxSpectrumPoints: return res
     var = np.cumsum(np.abs(res.intensity[1:]-res.intensity[:-1]))
@@ -72,59 +160,20 @@ def adjustSpectrum(s, maxSpectrumPoints, intervals):
 
 
 def integral(x,y):
-    my = (y[1:]+y[:-1])/2
-    dx = x[1:]-x[:-1]
-    return np.sum(my*dx)
+    assert len(x.shape) == 1
+    dx = x[1:] - x[:-1]
+    if len(y.shape) == 1:
+        my = (y[1:]+y[:-1])/2
+    else:
+        assert len(y.shape) == 2
+        assert y.shape[1] == len(x)
+        # one spectrum - one row
+        my = (y[:,1:] + y[:,:-1]) / 2
+    return np.dot(my, dx)
 
 
 def norm_lp(x, y, p):
     return integral(x, np.abs(y)**p) ** (1/p)
-
-
-# возвращает [b,a] из модели y=ax+b
-def linearReg(x,y,de):
-    N = np.sum(de)
-    sumX = np.sum(x*de)
-    sumX2 = np.sum(x*x*de)
-    sumY = np.sum(y*de)
-    sumXY = np.sum(x*y*de)
-    det = N*sumX2-sumX*sumX
-    if det == 0:
-        nn = abs(sumX)+abs(N)
-        return [-sumX/nn, N/nn]
-    return [(sumY*sumX2-sumXY*sumX)/det, (N*sumXY-sumX*sumY)/det]
-
-
-def linearReg_mult_only(x,y,de):
-    sumX2 = np.sum(x*x*de)
-    sumXY = np.sum(x*y*de)
-    if (sumX2 == 0) or np.isnan(sumX2) or np.isnan(sumXY): return 0
-    return sumXY/sumX2
-
-
-def fit_by_regression_mult_only(exp_e, exp_xanes, fdmnes_xan, fitEnergyInterval):
-    ind = (fitEnergyInterval[0]<=exp_e) & (exp_e<=fitEnergyInterval[1])
-    e = exp_e[ind]
-    ex = exp_xanes[ind]
-    fx = fdmnes_xan[ind]
-    mex = (ex[1:]+ex[:-1])/2
-    mfx = (fx[1:]+fx[:-1])/2
-    de = e[1:]-e[:-1]
-    w = linearReg_mult_only(mfx, mex, de)
-    return w*fdmnes_xan
-
-
-def fit_to_experiment_by_norm_or_regression_mult_only(exp_e, exp_xanes, fit_interval, fdmnes_en, fdmnes_xan, shift, norm = None):
-    fdmnes_en = fdmnes_en + shift
-    fdmnes_xan = np.interp(exp_e, fdmnes_en, fdmnes_xan)
-    if norm is None:
-        fdmnes_xan1 = fit_by_regression_mult_only(exp_e, exp_xanes, fdmnes_xan, fit_interval)
-        s = np.sum(fdmnes_xan1)
-        if s != 0: norm = np.sum(fdmnes_xan)/s
-        else: norm = 0
-        # print(norm)
-        return fdmnes_xan1, norm
-    else: return fdmnes_xan/norm, norm
 
 
 def findNextMinimum(y, i0):
@@ -147,17 +196,6 @@ def findNextMaximum(y, i0):
         i += 1
         if i>=n-1: return i
     return i
-
-
-def findExpEfermi(exp_e, exp_xanes, search_shift_level):
-    ind = np.where(exp_xanes>=search_shift_level)[0][0]
-    exp_Efermi_left = exp_e[ind]
-    i = ind
-    while exp_xanes[i]<=exp_xanes[i+1]: i += 1
-    exp_Efermi_peak = exp_e[i]
-    while exp_xanes[i]>=exp_xanes[i+1]: i += 1
-    exp_Efermi_right = exp_e[i]
-    return exp_Efermi_left, exp_Efermi_peak, exp_Efermi_right
 
 
 def getInitialShift(exp_e, exp_xanes, fdmnes_en, fdmnes_xan, search_shift_level):
@@ -237,7 +275,9 @@ def this_notebook():
             sessions = json.load(req)
             for sess in sessions:
                 if sess['kernel']['id'] == kernel_id:
-                    return os.path.join(srv['notebook_dir'],sess['notebook']['path'])
+                    np = sess['notebook']['path']
+                    if np[0] == '/': np = np[1:]
+                    return os.path.join(srv['notebook_dir'], np)
         # except Exception as exc:
         #     print(traceback.format_exc())
         except:
@@ -275,11 +315,12 @@ def fixPath(p):
 
 
 def fixDisplayError():
-    if (os.name != 'nt') and ('DISPLAY' not in os.environ):
+    if (os.name != 'nt') and ('DISPLAY' not in os.environ) and not isJupyterNotebook():
         matplotlib.use('Agg')
 
 
 def zfill(i, n):
+    assert n>0
     return str(i).zfill(1+math.floor(0.5+math.log(n,10)))
 
 
@@ -311,3 +352,41 @@ def wrap(s, maxLineLen):
         i = i_last + maxLineLen
     res += '\n' + s[i_last:]
     return res
+
+
+def safePredict(estimator, x_for_predict, x_train, y_train):
+    try:
+        result = estimator.predict(x_for_predict)
+    except:
+        estimator.fit(x_train, y_train)
+        result = estimator.predict(x_for_predict)
+    return result
+
+
+def profile(name, fun):
+    start = time.time()
+    fun()
+    end = time.time()
+    print(name, end - start)
+
+
+def limit(interval,x,*ys):
+    """Limit x and all y to the given interval of x
+    """
+    a,b = interval[0], interval[1]
+    i = (a<=x) & (x<=b)
+    res = (x[i],)
+    for y in ys:
+        assert len(y) == len(x)
+        res += (y[i],)
+    return res
+
+
+def getEnergy(spectraDataframe):
+    e_names = spectraDataframe.columns
+    energy = np.array([float(e_names[i][2:]) for i in range(e_names.size)])
+    return energy
+
+
+def makeDataFrame(energy, spectra):
+    return pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])

@@ -107,22 +107,38 @@ class Molecule:
         # partsData should be a 2d-array, each of inner array contains indices of atoms that belong to the corresponding part
         # e.g. partsData[i] has all the indices of atoms from part <i>
         self.partsData = list(map(partsParser.parse, parts))
-        
+
         self.assignParts()
 
     def assignParts(self):
         f = lambda i: MoleculePart(self, i)
         self.part = list(map(f, range(len(self.partsData))))
 
+    def copy(self):
+        return copy.deepcopy(self)
+
     def rotate(self, axis, center, angle):
         self.rotate__Impl(axis, center, angle, range(len(self.atom)))
-    
+
     def rotate_xyz_axes(self, center, angles):
         self.rotate_xyz_axes__Impl(center, angles, range(len(self.atom)))
 
     def shift(self, shift):
         for i in range(len(self.partsData)):
             self.shift__Impl(shift, i)
+
+    def tween(self, start, final, percent):
+        """
+        Perform linear motion tween of self using atom shifts final-start
+        :param start: Start molecule with the same atom sequence as self
+        :param final: Final molecule with the same atom sequence as self
+        :param percent: tween percent. 0 (self), 1 (final). May be negative or > 1
+        """
+        assert np.all(self.az == final.az)
+        assert np.all(self.az == start.az)
+        shifts = final.atom - start.atom
+        self.atom += percent*shifts
+
 
     def rotate__Impl(self, axis, center, angle, atomIndices):
         # поворачивает часть молекулы вокруг оси, заданной вектором axis. Положительное направление поворота определяется по правилу закручивающегося в направлении оси буравчика
@@ -169,13 +185,13 @@ class Molecule:
     def export_xyz(self, file, cellSize=1):
         with open(file, 'w') as f:
             f.write(str(self.atom.shape[0])+'\n')
-            f.write('molecula\n')
+            f.write('\n')
             for i in range(self.atom.shape[0]):
                 a = self.atom[i]; an = atom_names[self.atomNumber[i]]
                 f.write(an.rjust(2)+'  '+str(a[0]*cellSize).rjust(10)+'  '+str(a[1]*cellSize).rjust(10)+'  '+str(a[2]*cellSize).rjust(10)+"\n")
             f.close()
 
-    def export_struct(self, file, a, b, c, alpha, beta, gamma):    
+    def export_struct(self, file, a, b, c, alpha, beta, gamma):
         sorted_coords = self.atom
         sorted_names = self.atomName
         lattice_type = 'P'
@@ -191,11 +207,11 @@ class Molecule:
         tmp = m.atom[0]
         m.atom[0] = m.atom[heaviest_atom_index]
         m.atom[heaviest_atom_index] = tmp
-        
+
         tmp = m.az[0]
         m.az[0] = m.az[heaviest_atom_index]
         m.az[heaviest_atom_index] = tmp
-        
+
         tmp = m.atomName[heaviest_atom_index]
         m.atomName[0] = m.atomName[heaviest_atom_index]
         m.atomName[heaviest_atom_index] = tmp
@@ -216,7 +232,7 @@ class Molecule:
             f.write(lattice_type + ' '*(4-len(lattice_type)) +'LATTICE,NONEQUIV.ATOMS:' + '{0:3}'.format(len(sorted_names)) + '\n')
             f.write('MODE OF CALC=RELA\n')
             f.write('{0:10.6f}{1:10.6f}{2:10.6f}{3:10.6f}{4:10.6f}{5:10.6f}\n'.format(a/0.529177, b/0.529177, c/0.529177, alpha, beta, gamma))
-            
+
             for i in range(m.atom.shape[0]):
                 f.write('ATOM{0:4}: X={1:10.8f} Y={2:10.8f} Z={3:10.8f}\n'.format(-1*(i+1), m.atom[i, 0], m.atom[i, 1], m.atom[i, 2]))
                 f.write(' '*10 + 'MULT= 1' + ' '*10 + 'ISPLIT={0:2}\n'.format(isplit))
@@ -231,7 +247,8 @@ class Molecule:
 
     def checkInteratomicDistance(self, minDist=0.8):
         dist = scipy.spatial.distance.cdist(self.atom, self.atom)
-        np.fill_diagonal(dist, minDist+1)
+        np.fill_diagonal(dist, np.max(dist))
+        # print(np.min(dist))
         return np.min(dist) >= minDist
 
     def rdf(self, r, sigma, atoms):
@@ -271,8 +288,10 @@ class Molecule:
                 adf += utils.gauss(angle, adf0, sigma)
         return adf
 
-    def getSortedDists(self, atoms):
-        if isinstance(atoms, str):
+    def getSortedDists(self, atoms=None):
+        if atoms is None:
+            ind = np.arange(len(self.az))
+        elif isinstance(atoms, str):
             atomName = atoms
             atomNumber = atom_proton_numbers[atomName]
             ind = np.where(self.atomNumber == atomNumber)[0]
@@ -286,19 +305,19 @@ class Molecule:
 
     def deleteAtomAt(self, index):
         assert isinstance(index, int), 'Expecting index to be integer'
-        assert (index <= self.atom.shape[0]) and (index > 0), 'Trying to delete atom out of indexing bounds' 
-        
+        assert (index <= self.atom.shape[0]) and (index > 0), 'Trying to delete atom out of indexing bounds'
+
         # remove from coordinates array, atom numbers & names
         self.atom = np.delete(self.atom, index, 0)
         self.atomNumber = np.delete(self.atomNumber, index, 0)
         self.atomName = np.delete(self.atomName, index, 0)
         self.az = self.atomNumber
-        
+
         # delete given index from parts & shift accordingly
         for partIndices in self.partsData:
             for i in range(len(partIndices)):
                 if i >= len(partIndices): continue
-                if partIndices[i] == index: 
+                if partIndices[i] == index:
                     del partIndices[i]
                 elif partIndices[i] > index:
                     partIndices[i] = partIndices[i] - 1
@@ -311,20 +330,20 @@ class Molecule:
 
     def unionWith(self, otherMolecule):
         # append atoms from other molecule to self atoms
-        mergedAtoms = np.append(self.atom, otherMolecule.atom, axis=0) 
+        mergedAtoms = np.append(self.atom, otherMolecule.atom, axis=0)
         mergedAtomNames = np.append(self.atomName, otherMolecule.atomName)
         mergedAtomNumbers = np.append(self.atomNumber, otherMolecule.atomNumber)
 
         # the same goes for part data
         mergedParts = copy.deepcopy(self.partsData) + copy.deepcopy(otherMolecule.partsData)
-        
+
         # add offset for each index of partData related to the second molecule
         secondPartsStartIndex = len(self.partsData)
         firstMoleculeAtomCount = self.atom.shape[0]
         for i in range(secondPartsStartIndex, len(mergedParts)):
             for atomIndex in range(len(mergedParts[i])):
                 mergedParts[i][atomIndex] += firstMoleculeAtomCount
-        
+
         # save merged data
         self.atom = mergedAtoms
         self.partsData = mergedParts
@@ -335,9 +354,7 @@ class Molecule:
         # re-assign because of new parts
         self.assignParts()
 
-    def copy(self):
-        return copy.deepcopy(self)
-    
+
 class MoleculePart:
     def __init__(self, molecule, partIndex):
         self.molecule = molecule
@@ -367,6 +384,7 @@ class MoleculePart:
 
     def shift(self, shift):
         self.molecule.shift__Impl(shift, self.partIndex)
+
 
 class AtomInfo:
     def __init__(self, molecule, partIndex):
@@ -412,7 +430,7 @@ def turn_mol_fast_xyzAxes(atoms, angles, center):
         inds = inds_[icoord]
         c = center[inds]
         sign = 1-(icoord//2)*2
-        
+
         centered = coords[:, inds] - c[None, :]
         M = np.array([
             [cphi, sphi*sign],
@@ -444,6 +462,8 @@ def rotate_to_make_close(atoms1, atoms2, closeAtomCount):
     ind1 = np.argsort(dists1); ind2 = np.argsort(dists2)
     selected_atoms1 = atoms1[ind1[:closeAtomCount+1], ...]
     selected_atoms2 = atoms2[ind2[:closeAtomCount+1], ...]
+    selected_atoms1[:, :3] -= atoms1[0, :3]
+    selected_atoms2[:, :3] -= atoms2[0, :3]
     # print('find_mol_dist(x0) =', find_mol_dist([0.0, 0.0, 0.0], selected_atoms1, selected_atoms2))
     # print(selected_atoms1)
     # print(selected_atoms2)
@@ -470,8 +490,8 @@ def compare(mol1, mol2, distThr, referenceMol):
     atoms1 = atoms1-atoms1[0]
     atoms2 = atoms2-atoms2[0]
     dists0 = np.linalg.norm(atoms0, axis=1)
-    dists1 = np.linalg.norm(atoms1, axis=1)
-    dists2 = np.linalg.norm(atoms2, axis=1)
+    # dists1 = np.linalg.norm(atoms1, axis=1)
+    # dists2 = np.linalg.norm(atoms2, axis=1)
     ind1 = np.argsort(dists0)
     ind1 = ind1[dists0[ind1] < distThr]
     ind2 = ind1 #!!!!!!!!!!!
@@ -597,4 +617,3 @@ def matchAtoms(mol1, mol2, closeAtomCountForAngleOptimizing, distThrForSymmetryC
     if dist < dist_mir:
         return matched[0], matched[1], dist
     return matched_mir[0], matched_mir[1], dist_mir
-
