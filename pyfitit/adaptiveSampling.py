@@ -1,12 +1,17 @@
 import numpy as np
 import os
 import threading
+import shutil
+import copy
+from . import utils
+import json
 from scipy.spatial import distance
 from scipy.optimize import minimize
 from multiprocessing.dummy import Pool as ThreadPool
 from scipy.optimize import basinhopping
 from pyfitit.sampling import ihs
-from pyfitit.ML import RBFWrapper
+from .ML import RBFWrapper
+from .sampling import collectResults
 
 # global modules for sampling
 from . import fdmnes, feff, adf, utils, ihs, w2auto, fdmnesTest, ML, pyGDM
@@ -357,16 +362,13 @@ class XanesInputGenerator:
         self.folderCounter = 1
 
     def getFolderForPoint(self, x):
-        import shutil
-        import copy
-        from . import utils
-        import json
 
         # TODO: actually generate unique folders for point (compare points, store folder names in dict)
         # this would work correctly only every passed x is unique
         # folder = '.'+os.path.sep+str(self.folderCounter)
         # if os.path.exists(self.folder):
         #     shutil.rmtree(self.folder)
+
         os.makedirs(self.folder, exist_ok=True)
         geometryParams = {}
         N = len(self.paramNames)
@@ -392,16 +394,20 @@ class XanesInputGenerator:
 
 class XanesCalculator(CalculationProgram):
 
-    def __init__(self, spectralProgram, inputGenerator):
+    def __init__(self, spectralProgram, inputGenerator, outputFolder):
+        self.outputFolder = outputFolder
         self.input = inputGenerator
         self.spectralProgram = spectralProgram
         self.runType = None
 
     def calculate(self, x):
+
         folder = self.input.getFolderForPoint(x)
+
         self.calculateXANES(folder)
+        ys = self.parseAndCollect(folder)
         # TODO: parse folder and return result
-        return None
+        return ys
 
     def configAll(self, runType, runCmd, nProcs, memory):
         self.runType = runType
@@ -422,6 +428,7 @@ class XanesCalculator(CalculationProgram):
         self.runType = 'local'
 
     def calculateXANES(self, folder):
+
         if self.runType == 'run-cluster':
             runCluster = getattr(globals()[self.spectralProgram], 'runCluster')
             runCluster(folder, self.memory, self.nProcs)
@@ -432,10 +439,6 @@ class XanesCalculator(CalculationProgram):
             self.runUserDefined(self.runCmd, folder)
         else: assert False, 'Wrong runType'
 
-        # TODO: process bad folders
-        parse_method = getattr(globals()[self.spectralProgram], 'parse_one_folder')
-        res = parse_method(folder)
-        return res.intensity
 
     def runUserDefined(self, cmd, folder):
         import subprocess
@@ -447,10 +450,20 @@ class XanesCalculator(CalculationProgram):
             raise Exception('Error while executing "' + cmd + '" command')
         return proc.stdout.read()
 
+    def parseAndCollect(self, folder):
+        # TODO: process bad folders
+        parse_method = getattr(globals()[self.spectralProgram], 'parse_one_folder')
+        res = parse_method(folder)
+        collectResults(self.spectralProgram, self.input.folder, self.outputFolder)
+        return res.intensity
+
 
 def sampleAdaptively(paramRanges, moleculeConstructor, maxError, spectrCalcParams, spectralProgram='fdmnes', workingFolder='sample', seed=0,
                      runType='local', runCmd='', nProcs=1, memory=5000, calcSampleInParallel=1, recalculateErrorsAttemptCount=0,
                      outputFolder='sample_result'):
+    
+    if os.path.exists(workingFolder):
+        shutil.rmtree(workingFolder)
 
     paramNames = [k for k in paramRanges]
     paramNames.sort()
@@ -458,7 +471,7 @@ def sampleAdaptively(paramRanges, moleculeConstructor, maxError, spectrCalcParam
 
     sampler = ErrorPredictingSampler(rangeValues, maxError)
     folderGen = XanesInputGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder)
-    func = XanesCalculator(spectralProgram, folderGen)
+    func = XanesCalculator(spectralProgram, folderGen, outputFolder)
     func.configAll(runType, runCmd, nProcs, memory)
     orchestrator = CalculationOrchestrator(func, calcSampleInParallel)
     generator = DatasetGenerator(sampler, orchestrator)
