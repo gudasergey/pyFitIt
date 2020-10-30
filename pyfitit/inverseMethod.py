@@ -131,13 +131,13 @@ class Estimator:
             energy = exp.spectrum.energy
 
             def plotCVres(energy, trueXan, predXan, fileName):
-                fig, ax = plt.subplots()
+                fig, ax = plt.subplots(figsize=plotting.figsize)
                 ax.plot(energy, trueXan, label="True spectrum")
                 ax.plot(energy, predXan, label="Predicted spectrum")
                 ax.legend()
                 fig.set_size_inches((16,9))
                 ax.set_title(os.path.basename(fileName))
-                plt.savefig(fileName)
+                plt.savefig(fileName, dpi=plotting.dpi)
                 # if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
                 if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
                 np.savetxt(fileName[:fileName.rfind('.')]+'.csv', [energy, trueXan, predXan], delimiter=',')
@@ -157,7 +157,7 @@ class Estimator:
     def compareDifferentMethods_old(self, sample0, folderToSaveResult, verticesNum=10, intermediatePointsNum=10, calcExactInternalPoints=False):
         folderToSaveResult = utils.fixPath(folderToSaveResult)
         sample = self.prepareSample(sample0, self.diffFrom, self.exp, self.norm)
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=plotting.figsize)
         if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
         plotData = pd.DataFrame()
         for methodName in allowedMethods:
@@ -195,7 +195,7 @@ class Estimator:
             if exact_y.size == plotData.shape[0]:
                 ax.plot(exact_x, exact_y, label='exact', lw=2, color='k') # - тоже неправильно будет строится, если поменялись длины
                 plotData['exact'] = exact_y
-                fig2, ax2 = plt.subplots()
+                fig2, ax2 = plt.subplots(figsize=plotting.figsize)
                 for methodName in allowedMethods:
                     ax2.plot(plotData[labels[0]], np.abs(plotData[methodName+'_'+labels[1]]-exact_y), label=methodName)
                 ax2.plot(edgePoints[0], np.zeros(edgePoints[0].size), 'r*', ms=10, label='exact edge points')
@@ -206,7 +206,7 @@ class Estimator:
                 ax2.set_xlabel(labels[0])
                 ax2.set_ylabel('abs('+labels[1]+'-exact)')
                 fig2.set_size_inches((16, 9))
-                fig2.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse_delta.png')
+                fig2.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse_delta.png', dpi=plotting.dpi)
             else:
                 print('Length of exact data doesn\'t match verticesNum and intermediatePointsNum')
 
@@ -217,7 +217,7 @@ class Estimator:
         fig.set_size_inches((16, 9))
         plt.show()
         plotData.to_csv(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.csv', sep=' ', index=False)
-        fig.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.png')
+        fig.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.png', dpi=plotting.dpi)
         # if not utils.isJupyterNotebook(): plt.close(fig)  #notebooks also have limit - 20 figures # - sometimes figure is not shown
         # if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
 
@@ -253,7 +253,7 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     plotData['exact'] = sampleTest.spectra[energyColumn]
     plotData.to_csv(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.csv', sep=' ', index=False)
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     for methodName in allowedMethods:
         ax.plot(plotData[geometryParam], plotData[methodName+'_'+energyColumn], label=methodName)
     ax.plot(plotData[geometryParam], sampleTest.spectra[energyColumn], label='exact', lw=2, color='k')
@@ -263,11 +263,11 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     ax.set_ylabel(energyColumn)
     fig.set_size_inches((16, 9))
     plt.show()
-    fig.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.png')
+    fig.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.png', dpi=plotting.dpi)
     # if not utils.isJupyterNotebook(): plt.close(fig)  #notebooks also have limit - 20 figures # - sometimes figure is not shown
     # if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
 
-    fig2, ax2 = plt.subplots()
+    fig2, ax2 = plt.subplots(figsize=plotting.figsize)
     for methodName in allowedMethods:
         ax2.plot(plotData[geometryParam], np.abs(plotData[methodName+'_'+energyColumn]-plotData['exact']), label=methodName)
     ax2.plot(plotData[geometryParam], np.zeros(plotData[geometryParam].size), label='exact', lw=2, color='k')
@@ -275,7 +275,7 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     ax2.set_xlabel(geometryParam)
     ax2.set_ylabel('abs('+energyColumn+'-exact)')
     fig2.set_size_inches((16, 9))
-    fig2.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse_delta.png')
+    fig2.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse_delta.png', dpi=plotting.dpi)
 
 
 def makeDictFromVector(arg, paramNames):
@@ -912,12 +912,12 @@ def buildEvolutionTrajectory(vertices, estimator, intermediatePointsNum, folderT
         molecula.export_xyz(folderToSaveResult+'/molecule'+str(i+1)+'.xyz')
 
     dM = np.max(exp.spectrum.intensity)-np.min(exp.spectrum.intensity)
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     for i in range(prediction.shape[0]):
         p = prediction.loc[i]+dM/30*(i+3)
         if i % (intermediatePointsNum+1) == 0: ax.plot(energy, p, linewidth=2, c='r')
         else: ax.plot(energy, p, linewidth=1, c='b')
     ax.plot(energy, exp.spectrum.intensity, c='k', label="Experiment")
     fig.set_size_inches((16,9))
-    plt.savefig(folderToSaveResult+'/trajectory.png')
+    plt.savefig(folderToSaveResult+'/trajectory.png', dpi=plotting.dpi)
     plt.close(fig)

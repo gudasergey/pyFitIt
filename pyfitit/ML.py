@@ -271,7 +271,8 @@ class makeQuadric:
     def __init__(self, learner):
         self.learner = learner
     def fit(self, x, y):
-        self.learner.fit(transformFeatures2Quadric(x), y)
+        x2 = transformFeatures2Quadric(x)
+        self.learner.fit(x2, y)
     def predict(self, x):
         return self.learner.predict(transformFeatures2Quadric(x))
     def score(self, x, y): return score(x,y,self.predict)
@@ -788,6 +789,6 @@ def plotPredictionError(x, y, params, method, pathToSave):
     plt.colorbar(sc)
     ax.set_xlabel(params[0])
     ax.set_ylabel(params[1])
-    fig.savefig(f"./{pathToSave}/scatter-{params[0]}-{params[1]}.png", dpi=300)
+    fig.savefig(f"./{pathToSave}/scatter-{params[0]}-{params[1]}.png", dpi=plotting.dpi)
     plt.close(fig)
     

@@ -176,7 +176,7 @@ def calcAndPlotMixtureLabelMap(data, predictByFeatures, label_names, mix_feature
                 plot_norm = np.min(np.array([plot_norm, nrm + np.linalg.norm(lab - label_grid, axis=1) / rad]), axis=0)  # result[unk_exp][label][-1].append({'norm':nrm})  # result[unk_exp][label][-1].loc[-1,predictByFeatures] = mix_desc  # for i in range(component_count):  #     result[unk_exp][label][i].append({'C':concentrations[i]})  #     result[unk_exp][label][i].loc[-1,predictByFeatures] = desc[i]
             if label_grid.shape[1] != 2:
                 assert False, 'TODO - take min by all other dimensions'
-            fig, ax = plt.subplots()
+            fig, ax = plt.subplots(figsize=plotting.figsize)
             # colorMap = truncate_colormap('hsv', minval=0, maxval=np.max(plot_norm))
             minnorm = np.min(plot_norm);
             maxnorm = np.max(plot_norm)
@@ -198,7 +198,7 @@ def calcAndPlotMixtureLabelMap(data, predictByFeatures, label_names, mix_feature
             if not conc_search:
                 ax.set_xlabel(label + ', conc = ' + ('%.2f' % concentrations[0]))
                 ax.set_ylabel(label + ', conc = ' + ('%.2f' % concentrations[1]))
-            fig.savefig(folder + os.sep + str(unk_exp) + '_' + label + '.png', dpi=300)
+            fig.savefig(folder + os.sep + str(unk_exp) + '_' + label + '.png', dpi=plotting.dpi)
             plt.close(fig)
             # save to file
             cont_data = pd.DataFrame()
@@ -322,7 +322,7 @@ def plotMixtureLabelMap(componentLabels, label_names, label_bounds, labelMaps, d
                     # result_conc_2d[k] = np.take_along_axis(result_conc_2d[k], np.expand_dims(ind, axis=-1), axis=-1)
                     # result_components_2d[k] = np.take_along_axis(result_components_2d[k], np.expand_dims(ind, axis=-1), axis=-1)
             plot_norm_2d = plot_norm_2d[:,:,0]
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=plotting.figsize)
         # colorMap = truncate_colormap('hsv', minval=0, maxval=np.max(plot_norm))
         minnorm = np.min(plot_norm_2d)
         maxnorm = np.max(plot_norm_2d)
@@ -349,7 +349,7 @@ def plotMixtureLabelMap(componentLabels, label_names, label_bounds, labelMaps, d
                     ax.scatter([lg0[i]], [lg1[i]], (300 / n) ** 2, c=[pn[i]], cmap='plasma', vmin=minnorm, vmax=maxnorm, marker='s')
         ax.set_xlabel(label)
         ax.set_ylabel(label)
-        fig.savefig(folder + os.sep + 'map_' + label + '.png', dpi=300)
+        fig.savefig(folder + os.sep + 'map_' + label + '.png', dpi=plotting.dpi)
         plt.close(fig)
         # save to file
         cont_data = pd.DataFrame()
@@ -840,14 +840,42 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
     return result
 
 
-def generateMixtureOfSample(size, sample):
+def generateMixtureOfSample(size, componentCount, sample, label_names, addDescrFunc, makeMixtureOfSpectra=None, makeMixtureOfLabel=None, dirichletAlpha=1):
+    """
+    Generates descriptor data for random mixtures of component combinations
+    :param componentCount: count of mixture components
+    :param size: mixture data size to generate
+    :param sample: initial pure sample
+    :param label_names: names of target variables that are not descriptors of spectra, calculated by addDescrFunc
+    :param addDescrFunc: function, that calculates descriptors for the given sample
+    :param makeMixtureOfSpectra: function(sample, inds, concentrations) to calculate mixture of spectra by given concentrations and spectra indices (return intensity only)
+    :param makeMixtureOfLabel: function(label_name, sample, inds, concentrations) to calculate label for mixture of spectra given concentrations and spectra indices
+    :param dirichletAlpha: parameter of dirichlet distribution of concentrations (1 - uniform, >1 - mostly equal, <1 - some components prevail)
+    :return: new mixture sample
+    """
     spectra = sample.spectra.to_numpy()
-    data = sample.params
-    c = np.random.uniform(0,1,size).reshape(-1,1)
+    data = sample.params.loc[:,label_names].to_numpy()
+    c = np.random.dirichlet(alpha=dirichletAlpha*np.ones(componentCount), size=size)
     n = spectra.shape[0]
-    ind1 = np.random.randint(0, n-1, size)
-    ind2 = np.random.randint(0, n-1, size)
-    mix_spectra = c*spectra[ind1,:] + (1-c)*spectra[ind2,:]
-    mix_data = c*data.to_numpy()[ind1,:] + (1-c)*data.to_numpy()[ind2,:]
-    mix_data = pd.DataFrame(columns=data.columns, data=mix_data, dtype=np.float)
-    return ML.Sample(mix_data, mix_spectra, energy=sample.energy)
+    all_ind = np.random.randint(low=0, high=n-1, size=(size, componentCount))
+    mix_spectra = np.zeros((size, len(sample.energy)))
+    mix_data = np.zeros((size, len(label_names)))
+    for i in range(size):
+        ind = all_ind[i]
+        if makeMixtureOfSpectra is None:
+            mix_spectra[i] = np.dot(spectra[ind,:].T, c[i])
+        else:
+            ms = makeMixtureOfSpectra(sample, ind, c[i])
+            assert len(ms) == len(sample.energy)
+            mix_spectra[i] = ms
+        if makeMixtureOfLabel is None:
+            mix_data[i] = np.dot(data[ind,:].T, c[i])
+        else:
+            for j in range(len(label_names)):
+                mix_data[i,j] = makeMixtureOfLabel(label_names[j], sample, ind, c[i])
+    mix_data = pd.DataFrame(columns=label_names, data=mix_data, dtype=np.float)
+    mix_sample = ML.Sample(mix_data, mix_spectra, energy=sample.energy)
+    addDescrFunc(mix_sample)
+    mix_sample.paramNames = mix_sample.params.columns.to_numpy()
+    assert set(mix_sample.paramNames) == set(sample.paramNames), 'Set of initial sample and mixture descriptors are not equal. Initial: '+str(sample.paramNames)+' mixture: '+str(mix_sample.paramNames)+'. May be you forget to list all labels in generateMixtureOfSample call?'
+    return mix_sample

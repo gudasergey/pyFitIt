@@ -352,7 +352,7 @@ class Estimator:
         for i in range(predictedDists.size):
             print("r_{} = {:.3g} ± {:.4g}".format(i,predictedDists[i], RMSE[i]))
             predictedRdf += utils.gauss(arg, predictedDists[i], RMSE[i])/arg**2
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=plotting.figsize)
         funcName = 'rdf'; funcParams = {'sigma':np.min(RMSE), 'atoms':atoms}
         for mname in extraMolecules:
             ax.plot(arg, getattr(extraMolecules[mname], funcName)(arg, **funcParams), lw=2, label=mname)
@@ -366,7 +366,7 @@ class Estimator:
             ax.plot(dists, np.zeros(dists.size), 'kP', ms=15, label='predicted dists')
         ax.legend()
         fig.set_size_inches((16, 9))
-        fig.savefig(folderToSaveResult + os.sep + funcName + '.png')
+        fig.savefig(folderToSaveResult + os.sep + funcName + '.png', dpi=plotting.dpi)
 
         plotData = pd.DataFrame()
         # plotData['r'] = arg
@@ -416,7 +416,7 @@ class Estimator:
         else:
             xanesAbsorb = self.prepareSpectrumForPrediction(spectrum, smooth)
         predictedRdf = regressor.predict(xanesAbsorb).reshape(-1)
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=plotting.figsize)
         ax.fill_between(arg, predictedRdf - RMSE, predictedRdf + RMSE, color='grey', label='RMSE region (by cv)')
         for mname in extraMolecules:
             ax.plot(arg, getattr(extraMolecules[mname], funcName)(arg, **funcParams), lw=2, label=mname)
@@ -427,7 +427,7 @@ class Estimator:
             ax.plot(arg, trueRdf, lw=2, color='k', label='true ' + funcName)
         ax.legend()
         fig.set_size_inches((16, 9))
-        fig.savefig(folderToSaveResult + os.sep + funcName + '.png')
+        fig.savefig(folderToSaveResult + os.sep + funcName + '.png', dpi=plotting.dpi)
 
         plotData = pd.DataFrame()
         plotData[argName] = arg
@@ -502,7 +502,7 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     plotData['exact'] = sampleTest.params[geometryParam]
     plotData.to_csv(folderToSaveResult+os.sep+'compareDifferentMethodsDirect.csv', sep=' ', index=False)
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     for methodName in allowedMethods:
         ax.plot(plotData[energyColumn], plotData[methodName+'_'+geometryParam], label=methodName)
     ax.plot(plotData[energyColumn], plotData['exact'], label='exact', lw=2, color='k')
@@ -510,10 +510,10 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     ax.set_ylabel(geometryParam)
     ax.legend()
     fig.set_size_inches((16, 9))
-    fig.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsDirect.png')
+    fig.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsDirect.png', dpi=plotting.dpi)
     # if matplotlib.get_backend() != 'nbAgg': plt.close(fig)  # - sometimes figure is not shown
 
-    fig2, ax2 = plt.subplots()
+    fig2, ax2 = plt.subplots(figsize=plotting.figsize)
     for methodName in allowedMethods:
         ax2.plot(plotData[energyColumn], np.abs(plotData[methodName+'_'+geometryParam] - plotData['exact']), label=methodName)
     ax2.plot(plotData[energyColumn], np.zeros(plotData[energyColumn].size), label='exact', lw=2, color='k')
@@ -521,5 +521,5 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     ax2.set_xlabel(energyColumn)
     ax2.set_ylabel('abs(' + geometryParam + '-exact)')
     fig2.set_size_inches((16, 9))
-    fig2.savefig(folderToSaveResult + os.sep + 'compareDifferentMethodsDirect_delta.png')
+    fig2.savefig(folderToSaveResult + os.sep + 'compareDifferentMethodsDirect_delta.png', dpi=plotting.dpi)
 

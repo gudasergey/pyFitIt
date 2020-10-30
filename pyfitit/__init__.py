@@ -160,6 +160,10 @@ fitBySlidersMixture = uiControls.XanesMixtureFittingBackend
 # params: sample, debug=True, customProcessor=None, customPlotter=None
 SampleInspector = uiControls.SampleInspector
 
+stableExtrema = descriptor.stableExtrema
+efermiDescriptor = descriptor.efermiDescriptor
+pcaDescriptor = descriptor.pcaDescriptor
+relPcaDescriptor = descriptor.relPcaDescriptor
 plot_descriptors_1d = descriptor.plot_descriptors_1d
 plot_descriptors_2d = descriptor.plot_descriptors_2d
 descriptor_quality = descriptor.descriptor_quality
@@ -207,7 +211,7 @@ def plotPCAcomponents(energy, principal_components):
         val[i]=val[i]/(np.trapz(val[i],energy))
     dv=pd.DataFrame(np.transpose(val))
     dv.index=energy
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     plotPCAcomponentsParams["Switching"] = 'Not Normalized'
     plotPCAcomponentsParams["Component"] = 1
 
@@ -259,7 +263,7 @@ def PCAcomparison(energy,data):
     u,s,vT=np.linalg.svd(data, full_matrices=False)
     PCAplot['column']=0
     PCAplot['number']=1
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     inset_ax = fig.add_axes([0.53, 0.25, 0.35, 0.2])
     def redrawf():
         ax.clear()

@@ -311,7 +311,7 @@ def isLibExists(name):
 
 
 def fixPath(p):
-  return str(pathlib.PurePath(p))
+    return str(pathlib.PurePath(p))
 
 
 def fixDisplayError():

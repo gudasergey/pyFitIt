@@ -2,7 +2,7 @@ import random, copy, json, scipy, scipy.optimize, matplotlib, warnings, os, math
 import numpy as np
 from multiprocessing.dummy import Pool as ThreadPool
 import matplotlib.pyplot as plt
-from . import utils
+from . import utils, plotting
 
 
 def arg2string(arg, paramNames=None):
@@ -614,7 +614,7 @@ def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
             funcValues[i], _ = minimize(minFun, arg0, boundsOther, constraints=constraints1, fun_args=(axisValues[i],), paramNames=paramNamesOther, method=optimizeMethod)
     axisValues = axisValues[insideConstrains]
     funcValues = funcValues[insideConstrains]
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     ax.plot(axisValues, funcValues)
     fun_val = fun(xmin) if fun_args is None else fun(xmin, *fun_args)
     ax.plot(xmin[axisInd], fun_val, marker='o', markersize=10, color="red")
@@ -705,7 +705,7 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     # param1mesh = param1mesh[insideConstrains]   - contourf works only for 2D grid
     # param2mesh = param2mesh[insideConstrains]
     funcValues[~insideConstrains] = np.max(funcValues)
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     CS = plt.contourf(param1mesh, param2mesh, funcValues, cmap='plasma')
     plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=30, inline=False)
     if extra_plot_func is not None:

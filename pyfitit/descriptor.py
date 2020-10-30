@@ -403,18 +403,20 @@ def findExtrema(sample, extremaType, energyInterval, maxRf=.1, allowExternal=Tru
             goodBadIndices.append((i, -1, 'bad'))
         # random.shuffle(goodBadIndices)
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=plotting.figsize)
+        alpha = min(1/len(goodBadIndices)*100,1)
         for (spectrum, extremum, label) in goodBadIndices:
             if label == 'good':
-                ax.plot(energy, intensities[spectrum], color='blue', lw=.3, alpha=0.3)
+                ax.plot(energy, intensities[spectrum], color='blue', lw=.3, alpha=alpha)
         for x, y in zip(extremaPoints[0], extremaPoints[1]):
-            ax.plot(x, y, marker='o', markersize=3, color="red")
+            ax.plot(x, y, marker='o', markersize=3, color="red", alpha=alpha)
         for (spectrum, extremum, label) in goodBadIndices:
             if label == 'bad':
                 ax.plot(energy, intensities[spectrum], color='black', lw=.3)
 
         fig.set_size_inches((16/3*2, 9/3*2))
-        fig.savefig(plotToFile, dpi=300)
+        plt.show()
+        fig.savefig(plotToFile, dpi=plotting.dpi)
         plotting.closefig(fig)
 
     def ensureCorrectResults(intensities, good, bad, extremaPoints, derivatives):
@@ -506,14 +508,15 @@ def findExtremumByFit(spectrum, energyInterval, fitByPolynomDegree = 2, returnPo
         return descriptors
 
 
-def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFolder=None, maxRf=.1, allowExternal=True, maxExtremumPointsDist=5, intensityNormForMaxExtremumPointsDist=1, maxAdditionIter=-1, refineExtremum=True, extremumInterpolationRadius=10):
+def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFolder=None, maxRf=.1, allowExternal=True, maxExtremumPointsDist=5, intensityNormForMaxExtremumPointsDist=1, maxAdditionIter=-1, refineExtremum=True, extremumInterpolationRadius=10, smoothRad=5):
     assert extremaType in ['min', 'max'], 'invalid extremaType'
     spectra1 = np.copy(spectra)
     for i in range(len(spectra)):
-        spectra1[i] = smoothLib.simpleSmooth(energy, spectra1[i], 5, kernel='Gauss')
+        spectra1[i] = smoothLib.simpleSmooth(energy, spectra1[i], smoothRad, kernel='Gauss')
     newSpectra, descr = findExtrema((spectra1, energy), extremaType, energyInterval, maxRf=maxRf, allowExternal=allowExternal, maxExtremumPointsDist=maxExtremumPointsDist, intensityNormForMaxExtremumPointsDist=intensityNormForMaxExtremumPointsDist, maxAdditionIter=maxAdditionIter, refineExtremum=refineExtremum, extremumInterpolationRadius=extremumInterpolationRadius, returnIndices=False, plotToFile='stableExtrema-'+extremaType+'.png')
     assert len(newSpectra) == len(spectra), f'Can\'t find {extremaType} for {len(spectra)-len(newSpectra)} spectra. Try changing search interval or expand energy interval for all spectra. See plot for details.'
     if plotResultToFolder is not None:
+        plt.ioff()
         extrema_x = descr[:,0]
         extrema_y = descr[:,1]
         for i1 in range(min(100, len(spectra))):
@@ -522,7 +525,7 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFold
                 os.makedirs(plotResultToFolder, exist_ok=True)
             # i = np.random.randint(0,len(spectra))
             i = i1
-            fig, ax = plt.subplots()
+            fig, ax = plt.subplots(figsize=plotting.figsize)
             ax.plot(energy, spectra1[i], label='stable smooth')
             ax.plot(energy, spectra[i], label='spectrum')
             d = np.max(spectra[i])-np.min(spectra[i])
@@ -530,8 +533,9 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFold
             ax.scatter([extrema_x[i]], [extrema_y[i]], 10)
             ax.legend()
             fig.set_size_inches((16/3*2, 9/3*2))
-            fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=300)
+            fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=plotting.dpi)
             plotting.closefig(fig)
+        plt.ion()
     return descr
 
 
@@ -562,7 +566,7 @@ def stableExtremaOld(spectra, energy, extremaType, energyInterval, fitByPolynomD
                 if os.path.exists(plotResultToFolder): shutil.rmtree(plotResultToFolder)
                 os.makedirs(plotResultToFolder, exist_ok=True)
             if plotBadOnly and (extrema_x[i]<energy[0] or extrema_x[i]>energy[-1]):
-                fig, ax = plt.subplots()
+                fig, ax = plt.subplots(figsize=plotting.figsize)
                 ax.plot(energy, poly(energy), label='polynom')
                 ax.plot(energy, spectra[i], label='spectrum')
                 d = np.max(spectra[i])-np.min(spectra[i])
@@ -570,7 +574,7 @@ def stableExtremaOld(spectra, energy, extremaType, energyInterval, fitByPolynomD
                 ax.scatter([extrema_x[i]], [extrema_y[i]], 10)
                 ax.legend()
                 fig.set_size_inches((16/3*2, 9/3*2))
-                fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=300)
+                fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=plotting.dpi)
                 plotting.closefig(fig)
     return np.array([extrema_x,extrema_y,extrema_sharpness]).T
 
@@ -643,12 +647,12 @@ def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names, f
         for desc_points in desc_points_names:
             ax.scatter(data[desc_points[0]], data[desc_points[1]], 10)
         ax.set_title('Spectra colored by '+label)
-        fig.savefig(folder+os.sep+'by_label'+os.sep+'xanes_spectra_'+label+'.png', dpi=300)
+        fig.savefig(folder+os.sep+'by_label'+os.sep+'xanes_spectra_'+label+'.png', dpi=plotting.dpi)
         plotting.closefig(fig)
 
         for d in descriptors:
             os.makedirs(folder+os.sep+'by_descriptor'+os.sep+d, exist_ok=True)
-            fig, ax = plt.subplots()
+            fig, ax = plt.subplots(figsize=plotting.figsize)
             # known
             ind = pd.notnull(data[label])
             ma = np.max(data.loc[ind,label]); mi = np.min(data.loc[ind,label])
@@ -664,8 +668,8 @@ def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names, f
             ax.set_xlim(plotting.getPlotLim(data.loc[ind,d]))
             ax.set_ylim(plotting.getPlotLim(data.loc[ind,label]+delta[ind]))
             fig.set_size_inches((16/3*2, 9/3*2))
-            fig.savefig(folder+os.sep+'by_descriptor'+os.sep+d+os.sep+label+'.png', dpi=300)
-            fig.savefig(folder+os.sep+'by_label'+os.sep+label+os.sep+d+'.png', dpi=300)
+            fig.savefig(folder+os.sep+'by_descriptor'+os.sep+d+os.sep+label+'.png', dpi=plotting.dpi)
+            fig.savefig(folder+os.sep+'by_label'+os.sep+label+os.sep+d+'.png', dpi=plotting.dpi)
             plotting.closefig(fig)
 
 
@@ -862,7 +866,7 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
         if doNotPlotRemoteCount > 0:
             labelData = labelData[good_ind]
         os.makedirs(folder2+os.sep+label, exist_ok=True)
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=plotting.figsize)
 
         c = labelData
         assert np.all(pd.notnull(c))
@@ -926,7 +930,7 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
         if textsize>0:
             for i in range(data.shape[0]):
                 if i not in good_ind: continue
-                ind = i #data.loc[i,'Ind']
+                ind = i  # data.loc[i,'Ind']
                 ax.text(data.loc[i,descriptor_names[0]], data.loc[i,descriptor_names[1]], str(ind), ha='center', va='center', size=textsize)
 
         ax.set_xlabel(descriptor_names[0])
@@ -940,9 +944,9 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
             qs = ''
         ax.set_xlim(plotting.getPlotLim(x))
         ax.set_ylim(plotting.getPlotLim(y))
-        fig.set_size_inches((16/3*2, 9/3*2))
-        fig.savefig(folder+'/'+label+'.png', dpi=300)
-        fig.savefig(folder2+os.sep+label+os.sep+qs+descriptor_names[0]+'_'+descriptor_names[1]+'.png', dpi=300)
+        plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
+        fig.savefig(folder+'/'+label+'.png', dpi=plotting.dpi)
+        fig.savefig(folder2+os.sep+label+os.sep+qs+descriptor_names[0]+'_'+descriptor_names[1]+'.png', dpi=plotting.dpi)
         plotting.closefig(fig)
 
 

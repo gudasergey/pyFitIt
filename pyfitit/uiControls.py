@@ -2,7 +2,7 @@ import copy, types, gc, os
 from IPython.core.display import display, Javascript
 from ipywidgets import widgets, HTML
 import matplotlib.pyplot as plt
-from pyfitit import utils, smoothLib, inverseMethod, optimize, ML
+from . import utils, smoothLib, inverseMethod, optimize, ML, plotting
 from scipy.interpolate import Rbf
 import warnings, traceback, pickle, json
 import numpy as np
@@ -197,7 +197,7 @@ class ControlsManager:
         if self.saver is None:
             os.makedirs(folder, exist_ok=True)
             self.saveParams(folder+os.sep+'params.txt')
-            self.plotter.getFig().savefig(folder+os.sep+'image.png', dpi=300)
+            self.plotter.getFig().savefig(folder+os.sep+'image.png', dpi=plotting.dpi)
 
             plotData = self.context.plotData
             metrics = {}
@@ -218,7 +218,7 @@ class ControlsManager:
 
 class DefaultPlotter:
     def __init__(self):
-        self.fig, self.ax = plt.subplots()
+        self.fig, self.ax = plt.subplots(figsize=plotting.figsize)
 
     def clear(self):
         self.ax.clear()
@@ -1396,7 +1396,7 @@ class ExafsSliders:
 
 class FitSmoothPlotter:
     def __init__(self):
-        self.fig, self.ax = plt.subplots()
+        self.fig, self.ax = plt.subplots(figsize=plotting.figsize)
         self.ax2 = None
 
     def clear(self):

@@ -10,9 +10,14 @@ from matplotlib.font_manager import FontProperties
 import cycler
 
 
+figsize = (16/3*2, 9/3*2)
+dpi = 300
+matplotlib.rcParams['figure.dpi'] = dpi
+
 def closefig(fig):
     #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    if fig.number in plt.get_fignums():
+        plt.close(fig)
 
 
 # append = {'label':..., 'data':..., 'twinx':True} or  [{'label':..., 'data':...}, {'label':..., 'data':...}, ...]
@@ -24,7 +29,7 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     shiftIsAbsolute = exp.defaultSmoothParams.shiftIsAbsolute
     search_shift_level = exp.defaultSmoothParams.search_shift_level
     fit_interval = exp.intervals['plot']
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=figsize)
     fdmnes_en = smoothed_xanes.energy
     fdmnes_xan = smoothed_xanes.intensity
     if shift is None:
@@ -74,7 +79,7 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
         title = wrap(title, 100)
         ax.set_title(title)
     fig.set_size_inches((16/3*2, 9/3*2))
-    fig.savefig(folder+'/'+fileName+'.png', dpi=300)
+    fig.savefig(folder+'/'+fileName+'.png', dpi=dpi)
     closefig(fig)
     # print(exp_e.size, exp_xanes.size, fdmnes_xan.size)
     with open(folder+'/'+fileName+'.csv', 'a') as f:
@@ -130,7 +135,7 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
     plt.title(plotTitle)
     fig.set_size_inches((16/3*2, 9/3*2))
     postfix = '_density' if density else '_l2_norm'
-    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'_contour.png', dpi=300)
+    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'_contour.png', dpi=dpi)
     closefig(fig)
     #for cmap in ['inferno', 'spectral', 'terrain', 'summer']:
     cmap = 'inferno'
@@ -144,7 +149,7 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
     plt.title(plotTitle)
     fig.set_size_inches((16/3*2, 9/3*2))
     # plt.legend()
-    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.png', dpi=300)
+    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.png', dpi=dpi)
     closefig(fig)
     data2csv = np.vstack((param1mesh.flatten(), param2mesh.flatten(), normValues.flatten())).T
     np.savetxt(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.csv', data2csv, delimiter=',')
@@ -171,7 +176,7 @@ def wrap(s, n):
 # x1,y1,label1,x2,y2,label2,....,filename
 def plotToFile(*p, fileName=None, save_csv=True, title='', xlim=None):
     assert len(p)%3 == 0
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=figsize)
     n = len(p)//3
     for i in range(n):
         # print('plotting '+p[i*3+2]+': ', p[i*3], p[i*3+1])
@@ -187,7 +192,7 @@ def plotToFile(*p, fileName=None, save_csv=True, title='', xlim=None):
     folder = os.path.split(os.path.expanduser(fileName))[0]
     if not os.path.exists(folder): os.makedirs(folder)
     # print('saving to file: '+fileName)
-    fig.savefig(fileName, dpi=300)
+    fig.savefig(fileName, dpi=dpi)
     closefig(fig)
 
     if save_csv:
@@ -220,7 +225,7 @@ def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryPar
     # нарисовать график!!!!!!
 
 def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=figsize)
     classNum = predProba.size
     a = paramRange[0]; b = paramRange[1]
     h = (b-a)/classNum
@@ -232,7 +237,7 @@ def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
     plt.ylabel('Probability')
     fig.set_size_inches((16/3*2, 9/3*2))
     if not os.path.exists(folder): os.makedirs(folder)
-    fig.savefig(folder+'/'+paramName+'.png', dpi=300)
+    fig.savefig(folder+'/'+paramName+'.png', dpi=dpi)
     closefig(fig)
     np.savetxt(folder+'/'+paramName+'.csv', [barPos-h/2, barPos+h/2, predProba], delimiter=',')
 
@@ -269,7 +274,7 @@ def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=N
         ind = np.random.permutation(spectra.shape[0])
     spectra = spectra[ind]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=figsize)
     if color_param is not None:
         assert len(color_param) == spectra.shape[0]
         colors = (color_param-np.min(color_param))/(np.max(color_param)-np.min(color_param)) * 0.9
@@ -286,7 +291,7 @@ def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=N
 
     fig.set_size_inches((16/3*2, 9/3*2))
     if fileName is not None:
-        fig.savefig(fileName, dpi=300)
+        fig.savefig(fileName, dpi=dpi)
         closefig(fig)
     else: return fig
 

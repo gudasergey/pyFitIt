@@ -19,6 +19,12 @@ from . import fdmnes, feff, adf, utils, ihs, w2auto, fdmnesTest, ML, pyGDM
 
 class Sampler:
 
+    def getInitialPoints(self):
+        """
+        :returns: collection of points that should be calculated and added to dataset before calling getNewPoint method
+        """
+        pass
+
     def getNewPoint(self, dataset):
         """
         :param dataset : collection of samples (x, y). If y is unknown at this point - y is None
@@ -29,7 +35,7 @@ class Sampler:
     def isGoodEnough(self, dataset):
         """
         :param dataset : collection of samples (x, y). If y is unknown at this point - y is None
-        :returns : bool - whether given dataset meets some evaluations criterion for stopping
+        :returns : bool - whether given dataset meets some evaluation criterion for stopping
         """
         pass
 
@@ -63,6 +69,9 @@ class DatasetGenerator:
         :return: point X
         """
         return self.sampler.getNewPoint((self.xs, self.ys))
+
+    def getInitialPoints(self):
+        return self.sampler.getInitialPoints()
 
     def addResult(self, x, y):
         """
@@ -105,17 +114,25 @@ class CalculationOrchestrator:
             self.generator.addResult(x, y)
 
     def runParallel(self):
+        # calculating initial dataset
+        self.calculateInitial()
+
+        print("Done initial")
+        # calculating the rest of the points
+        self.calculateLazy(self.pointSequence())
+
+    def calculateInitial(self):
+        from multiprocessing.dummy import Pool as ThreadPool
+        threadPool = ThreadPool(self.calcSampleInParallel)
+        threadPool.map(self.addResultCalculateAndUpdate, self.generator.getInitialPoints())
+
+    def calculateLazy(self, points):
         from pyfitit.executors import LazyThreadPoolExecutor
-
-        pool = LazyThreadPoolExecutor(self.calcSampleInParallel)  # 4 threads
-        results = pool.map(self.addResultAndCalculate,  self.pointSequence())
-
+        pool = LazyThreadPoolExecutor(self.calcSampleInParallel)
+        results = pool.map(self.addResultAndCalculate, points)
         for index, y in results:
+            print('updating')
             self.generator.updateResult(index, y)
-
-        # with LazyThreadPoolExecutor(self.calcSampleInParallel) as threadPool:
-        #     for index, y in threadPool.imap(self.addResultAndCalculate, self.pointSequence(), chunksize=1):
-        #         self.generator.updateResult(index, y)
 
     def pointSequence(self):
         while not self.generator.isDatasetReady():
@@ -133,6 +150,19 @@ class CalculationOrchestrator:
         # print(f'[{timestampStr}]done calculation ' + str(x))
 
         return index, y
+
+    def addResultCalculateAndUpdate(self, x):
+        with self.lock:
+            index = self.generator.addResult(x, None)
+
+        y = self.program.calculate(x)
+
+        # from datetime import datetime
+        # dateTimeObj = datetime.now()
+        # timestampStr = dateTimeObj.strftime("%H:%M:%S.%f")
+        # print(f'[{timestampStr}]done calculation ' + str(x))
+
+        self.generator.updateResult(index, y)
 
 
 class CalculationProgram:
@@ -219,8 +249,7 @@ class ErrorPredictingSampler(Sampler):
         self.yPredictionModel = None
         self.predictedErrors = []
         self.predictedYs = []
-        # TODO: replace with IHS + [allmin, allmax]
-        self.initial = self.initialPointsGrid()
+        self.initial = self.initialPointsCorners()
         self.initialSize = self.initial.shape[0]
         self.initialMaxDist = None
 
@@ -229,7 +258,7 @@ class ErrorPredictingSampler(Sampler):
         d = distance.cdist(self.ys[:size], self.ys[:size], 'euclidean')
         return np.amax(d)
 
-    def initialPoints(self):
+    def initialPointsIHS(self):
         seed = 0
         N = len(self.paramRanges)
         sampleCount = 2 ** N
@@ -239,7 +268,7 @@ class ErrorPredictingSampler(Sampler):
 
         return points
 
-    def initialPointsGrid(self):
+    def initialPointsCorners(self):
         # points = np.dstack(np.array(np.meshgrid(self.paramRanges)).reshape(len(self.paramRanges), -1))[0]
         return np.array([self.leftBorder, self.rightBorder])
 
@@ -248,14 +277,12 @@ class ErrorPredictingSampler(Sampler):
         rightBorder = np.array([x[1] for x in self.paramRanges])
         return leftBorder, rightBorder
 
+    def getInitialPoints(self):
+        return self.initial
+
     def getNewPoint(self, dataset):
-        if self.initial.shape[0] > 0:
-            index = self.initial.shape[0] - 1
-            point = self.initial[index]
-            self.initial = np.delete(self.initial, index, axis=0)
-            self.predictedErrors.append(0)
-            self.predictedYs.append(np.zeros(20))
-            return point
+        self.xs, self.ys = dataset
+        assert self.xs.shape[0] >= len(self.initial)
 
         return self.getFromMidPoints(dataset)
         # return self.getFromGlobalMaxError(dataset)
@@ -282,7 +309,7 @@ class ErrorPredictingSampler(Sampler):
 
     def fitModel(self):
         self.yPredictionModel = RBFWrapper()
-        self.yPredictionModel.fit(self.xs, self.ys)
+        self.yPredictionModel.fit(self.xs, self.ys.reshape(self.xs.shape[0], -1))
 
     def getFromGlobalMaxError(self, dataset):
         # those are expected to be np arrays
@@ -399,14 +426,20 @@ class XanesCalculator(CalculationProgram):
         self.input = inputGenerator
         self.spectralProgram = spectralProgram
         self.runType = None
+        self.lock = threading.Lock()
 
     def calculate(self, x):
 
-        folder = self.input.getFolderForPoint(x)
+        with self.lock:
+            folder = self.input.getFolderForPoint(x)
 
         self.calculateXANES(folder)
-        ys = self.parseAndCollect(folder)
+
+        with self.lock:
+            ys = self.parseAndCollect(folder)
+
         # TODO: parse folder and return result
+        # TODO: how to interpolate xanes by common energy?
         return ys
 
     def configAll(self, runType, runCmd, nProcs, memory):
@@ -428,7 +461,6 @@ class XanesCalculator(CalculationProgram):
         self.runType = 'local'
 
     def calculateXANES(self, folder):
-
         if self.runType == 'run-cluster':
             runCluster = getattr(globals()[self.spectralProgram], 'runCluster')
             runCluster(folder, self.memory, self.nProcs)
@@ -437,8 +469,8 @@ class XanesCalculator(CalculationProgram):
             runLocal(folder)
         elif self.runType == 'user defined':
             self.runUserDefined(self.runCmd, folder)
-        else: assert False, 'Wrong runType'
-
+        else:
+            assert False, 'Wrong runType'
 
     def runUserDefined(self, cmd, folder):
         import subprocess
@@ -457,7 +489,7 @@ class XanesCalculator(CalculationProgram):
         collectResults(self.spectralProgram, self.input.folder, self.outputFolder)
         return res.intensity
 
-
+# TODO: memory/processors settings for local
 def sampleAdaptively(paramRanges, moleculeConstructor, maxError, spectrCalcParams, spectralProgram='fdmnes', workingFolder='sample', seed=0,
                      runType='local', runCmd='', nProcs=1, memory=5000, calcSampleInParallel=1, recalculateErrorsAttemptCount=0,
                      outputFolder='sample_result'):

@@ -180,7 +180,7 @@ def krigingSampling(ranges, moleculeConstructor, relativeToConstantPredictionErr
         return -sigma[0]
 
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     for i in range(params.shape[0]):
         ax.plot(list(map(lambda x: x[0], params)), list(map(lambda x: x[-1], intensities)), 'ko')
 
@@ -198,7 +198,7 @@ def krigingSampling(ranges, moleculeConstructor, relativeToConstantPredictionErr
     ax.fill_between(x, y + s, y - s)
     ax.plot(x, y - s, 'green')
     ax.plot(x, y + s, 'green')
-    fig1, ax1 = plt.subplots()
+    fig1, ax1 = plt.subplots(figsize=plotting.figsize)
     ax1.plot(x, s)
     # ax.plot(xList, y, 'ro')
 

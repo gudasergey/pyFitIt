@@ -327,7 +327,7 @@ def plotSmoothWidthToFolder(smoothType, e, args, folder):
     if sigma is None:
         print('Cant plot smooth width for smooth type '+smoothType)
         return
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=plotting.figsize)
     ax.plot(e, sigma)
     ax.set_ylim([0, 50])
     ax.set_xlabel("Energy")
