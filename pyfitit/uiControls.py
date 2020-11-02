@@ -218,7 +218,7 @@ class ControlsManager:
 
 class DefaultPlotter:
     def __init__(self):
-        self.fig, self.ax = plt.subplots(figsize=plotting.figsize)
+        self.fig, self.ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
 
     def clear(self):
         self.ax.clear()
@@ -1390,13 +1390,14 @@ class ExafsSliders:
         """
         self.update(context)
 
+
 # ====================================================
 #                       FitSmooth
 # ====================================================
 
 class FitSmoothPlotter:
     def __init__(self):
-        self.fig, self.ax = plt.subplots(figsize=plotting.figsize)
+        self.fig, self.ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
         self.ax2 = None
 
     def clear(self):
@@ -1442,7 +1443,7 @@ class FitSmoothPlotter:
         ax.set_ylabel("Intensity")
         ax.legend(loc='upper right')
         if self.ax2 is not None: self.ax2.legend('upper left')
-        self.ax.text(0.98, -0.05, metrics, transform=self.ax.transAxes, horizontalalignment='right', verticalalignment='bottom')
+        self.ax.text(0.95, -0.05, metrics, transform=self.ax.transAxes, horizontalalignment='right', verticalalignment='bottom')
 
     def plotOn(self, ax, graph):
         ax.plot(

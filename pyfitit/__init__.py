@@ -211,7 +211,7 @@ def plotPCAcomponents(energy, principal_components):
         val[i]=val[i]/(np.trapz(val[i],energy))
     dv=pd.DataFrame(np.transpose(val))
     dv.index=energy
-    fig, ax = plt.subplots(figsize=plotting.figsize)
+    fig, ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
     plotPCAcomponentsParams["Switching"] = 'Not Normalized'
     plotPCAcomponentsParams["Component"] = 1
 
@@ -263,7 +263,7 @@ def PCAcomparison(energy,data):
     u,s,vT=np.linalg.svd(data, full_matrices=False)
     PCAplot['column']=0
     PCAplot['number']=1
-    fig, ax = plt.subplots(figsize=plotting.figsize)
+    fig, ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
     inset_ax = fig.add_axes([0.53, 0.25, 0.35, 0.2])
     def redrawf():
         ax.clear()

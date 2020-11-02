@@ -275,11 +275,12 @@ class DefaultSmoothParams:
         return res
 
 
-def findEfermiOnRawSpectrum(energy, intensity):
+# searchLevel = 0.1 - close to min, 0.9 - close to max
+def findEfermiOnRawSpectrum(energy, intensity, searchLevel=0.5):
     smoothedTheorXanes = simpleSmooth(energy, intensity, 4)
-    tmx = (np.min(smoothedTheorXanes) + np.max(smoothedTheorXanes)) / 2
-    ind = np.where(smoothedTheorXanes > tmx)[0]
-    tme = energy[ind[0]]
+    tmx = np.min(smoothedTheorXanes)*(1-searchLevel) + np.max(smoothedTheorXanes)*searchLevel
+    ind = np.where(smoothedTheorXanes < tmx)[0]
+    tme = energy[ind[-1]]
     return tme, smoothedTheorXanes
 
 
@@ -294,9 +295,18 @@ def checkShift(expXanes, theorXanes, shift, spectrumType):
     ind = np.where(expXanes.intensity > emx)[0]
     eme = expXanes.energy[ind[0]]
     shiftCheck = eme-tme
-    if abs(shift-shiftCheck)>50: message = 'Warning: wrong shift detected. Recommend value near '+str(int(shiftCheck))
+    if abs(shift-shiftCheck) > 50:
+        message = 'Warning: wrong shift detected. Recommend value near '+str(int(shiftCheck))
     else: message = ''
     return message, eme, tme
+
+
+def getPreliminarySmoothParams(xanes):
+    efermi, _ = findEfermiOnRawSpectrum(xanes.energy, xanes.intensity, searchLevel=0.1)
+    efermi -= 5
+    params = {'Efermi':efermi, 'Gamma_hole':2, 'Ecent':50, 'Elarg':50, 'Gamma_max':10, 'shift':0}
+    energyInterval = [efermi, efermi+150]
+    return params, energyInterval
 
 
 def getSmoothParams(arg, names):
