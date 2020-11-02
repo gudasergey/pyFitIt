@@ -840,7 +840,7 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
     return result
 
 
-def generateMixtureOfSample(size, componentCount, sample, label_names, addDescrFunc, makeMixtureOfSpectra=None, makeMixtureOfLabel=None, dirichletAlpha=1):
+def generateMixtureOfSample(size, componentCount, sample, label_names, addDescrFunc, makeMixtureOfSpectra=None, makeMixtureOfLabel=None, dirichletAlpha=1, randomSeed=0):
     """
     Generates descriptor data for random mixtures of component combinations
     :param componentCount: count of mixture components
@@ -851,10 +851,12 @@ def generateMixtureOfSample(size, componentCount, sample, label_names, addDescrF
     :param makeMixtureOfSpectra: function(sample, inds, concentrations) to calculate mixture of spectra by given concentrations and spectra indices (return intensity only)
     :param makeMixtureOfLabel: function(label_name, sample, inds, concentrations) to calculate label for mixture of spectra given concentrations and spectra indices
     :param dirichletAlpha: parameter of dirichlet distribution of concentrations (1 - uniform, >1 - mostly equal, <1 - some components prevail)
+    :param randomSeed: random seed
     :return: new mixture sample
     """
     spectra = sample.spectra.to_numpy()
     data = sample.params.loc[:,label_names].to_numpy()
+    np.random.seed(randomSeed)
     c = np.random.dirichlet(alpha=dirichletAlpha*np.ones(componentCount), size=size)
     n = spectra.shape[0]
     all_ind = np.random.randint(low=0, high=n-1, size=(size, componentCount))

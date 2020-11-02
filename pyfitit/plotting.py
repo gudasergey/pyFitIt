@@ -14,6 +14,7 @@ figsize = (16/3*2, 9/3*2)
 dpi = 300
 matplotlib.rcParams['figure.dpi'] = dpi
 
+
 def closefig(fig):
     #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
     if fig.number in plt.get_fignums():
@@ -241,11 +242,13 @@ def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
     closefig(fig)
     np.savetxt(folder+'/'+paramName+'.csv', [barPos-h/2, barPos+h/2, predProba], delimiter=',')
 
+
 def truncate_colormap(cmapName, minval=0.0, maxval=1.0, n=100):
     import matplotlib.colors as colors
     cmap = plt.get_cmap(cmapName)
     new_cmap = colors.LinearSegmentedColormap.from_list('trunc({n},{a:.2f},{b:.2f})'.format(n=cmapName, a=minval, b=maxval), cmap(np.linspace(minval, maxval, n)))
     return new_cmap
+
 
 def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=None):
     """Plot all spectra on the same graph colored by some parameter. Order of plotting is controled by sortByColors parameter
@@ -274,7 +277,7 @@ def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=N
         ind = np.random.permutation(spectra.shape[0])
     spectra = spectra[ind]
 
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
     if color_param is not None:
         assert len(color_param) == spectra.shape[0]
         colors = (color_param-np.min(color_param))/(np.max(color_param)-np.min(color_param)) * 0.9
@@ -289,7 +292,6 @@ def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=N
         for i in np.where(indNan)[0]:
             ax.plot(energy, spectra0[i], color='k', lw=0.5, alpha=0.8)
 
-    fig.set_size_inches((16/3*2, 9/3*2))
     if fileName is not None:
         fig.savefig(fileName, dpi=dpi)
         closefig(fig)
