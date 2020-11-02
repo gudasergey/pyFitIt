@@ -82,12 +82,12 @@ class DatasetGenerator:
         """
         # print(f'New point {x}')
         self.xs = np.array([x]) if self.xs is None else np.append(self.xs, [x], axis=0)
-        self.ys = np.array([y]) if self.ys is None else np.append(self.ys, [y], axis=0)
+        self.ys = np.array([y], dtype=object) if self.ys is None else np.append(self.ys, [y], axis=0)
         return self.xs.shape[0] - 1
 
     def updateResult(self, index, y):
         assert 0 <= index < self.ys.shape[0]
-        self.ys[index] = np.array(y)
+        self.ys[index] = y
 
 
 class CalculationOrchestrator:
@@ -129,19 +129,18 @@ class CalculationOrchestrator:
     def calculateLazy(self, points):
         from pyfitit.executors import LazyThreadPoolExecutor
         pool = LazyThreadPoolExecutor(self.calcSampleInParallel)
-        results = pool.map(self.addResultAndCalculate, points)
+        results = pool.map(self.calculate, points)
         for index, y in results:
-            print('updating')
             self.generator.updateResult(index, y)
 
     def pointSequence(self):
         while not self.generator.isDatasetReady():
-            yield self.generator.getNewPoint()
+            x = self.generator.getNewPoint()
+            index = self.generator.addResult(x, 'calculating')
+            yield index, x
 
-    def addResultAndCalculate(self, x):
-        with self.lock:
-            index = self.generator.addResult(x, None)
-
+    def calculate(self, pointAndIndex):
+        index, x = pointAndIndex
         y = self.program.calculate(x)
 
         # from datetime import datetime
@@ -153,7 +152,7 @@ class CalculationOrchestrator:
 
     def addResultCalculateAndUpdate(self, x):
         with self.lock:
-            index = self.generator.addResult(x, None)
+            index = self.generator.addResult(x, 'calculating')
 
         y = self.program.calculate(x)
 
@@ -161,8 +160,8 @@ class CalculationOrchestrator:
         # dateTimeObj = datetime.now()
         # timestampStr = dateTimeObj.strftime("%H:%M:%S.%f")
         # print(f'[{timestampStr}]done calculation ' + str(x))
-
-        self.generator.updateResult(index, y)
+        with self.lock:
+            self.generator.updateResult(index, y)
 
 
 class CalculationProgram:
@@ -249,7 +248,7 @@ class ErrorPredictingSampler(Sampler):
         self.yPredictionModel = None
         self.predictedErrors = []
         self.predictedYs = []
-        self.initial = self.initialPointsCorners()
+        self.initial = np.append(self.initialPointsCorners(), self.initialPointsIHS(), axis=0)
         self.initialSize = self.initial.shape[0]
         self.initialMaxDist = None
 
@@ -261,7 +260,7 @@ class ErrorPredictingSampler(Sampler):
     def initialPointsIHS(self):
         seed = 0
         N = len(self.paramRanges)
-        sampleCount = 2 ** N
+        sampleCount = N + 1
         points = (ihs.ihs(N, sampleCount, seed=seed) - 0.5) / sampleCount  # row - is one point
         for j in range(N):
             points[:, j] = self.leftBorder[j] + points[:, j] * (self.rightBorder[j] - self.leftBorder[j])
@@ -281,16 +280,32 @@ class ErrorPredictingSampler(Sampler):
         return self.initial
 
     def getNewPoint(self, dataset):
-        self.xs, self.ys = dataset
+        self.extractDataset(dataset)
         assert self.xs.shape[0] >= len(self.initial)
 
-        return self.getFromMidPoints(dataset)
+        return self.getFromMidPoints()
         # return self.getFromGlobalMaxError(dataset)
 
-    def getFromMidPoints(self, dataset):
-        self.xs, self.ys = dataset
-        xsSorted = np.sort(self.xs, axis=0)
+    def extractDataset(self, dataset):
+        xs, ys = dataset
+        # print(type(ys), ys)
+        notNone = ~utils.isObjectArraysEqual(ys, 'calculating')
+        # print('notNone=',notNone)
+        self.xs = xs[notNone]
+        self.ys = np.vstack(ys[notNone])
         self.fitModel()
+
+        self.xs = np.array(xs)
+        self.ys = np.array(ys)
+        for i, y in enumerate(ys):
+            if isinstance(y, str) and y == 'calculating':
+                x = np.array([xs[i]])
+                self.ys[i] = self.yPredictionModel.predict(x)
+
+        self.ys = np.vstack(self.ys)
+
+    def getFromMidPoints(self):
+        xsSorted = np.sort(self.xs, axis=0)
 
         candidate = None
         maxError = None
@@ -309,11 +324,11 @@ class ErrorPredictingSampler(Sampler):
 
     def fitModel(self):
         self.yPredictionModel = RBFWrapper()
-        self.yPredictionModel.fit(self.xs, self.ys.reshape(self.xs.shape[0], -1))
+        self.yPredictionModel.fit(self.xs, self.ys)
 
     def getFromGlobalMaxError(self, dataset):
         # those are expected to be np arrays
-        self.xs, self.ys = dataset
+        self.extractDataset(dataset)
         self.fitModel()
         x0 = np.mean(self.paramRanges, axis=1)
         res = basinhopping(self.getNegativeError, x0, minimizer_kwargs={'bounds': self.paramRanges}, niter=5)
@@ -352,16 +367,17 @@ class ErrorPredictingSampler(Sampler):
         return -self.getError(x0)
 
     def isGoodEnough(self, dataset):
-        return self.pointsBasedCheck(dataset)
-
-        # return self.errorBasedCheck(dataset)
+        # return self.pointsBasedCheck(dataset)
+        return self.errorBasedCheck(dataset)
 
     def errorBasedCheck(self, dataset):
-        if self.initial.shape[0] > 0:
+        xs, ys = dataset
+        if xs.shape[0] < self.initialSize:
             return False
+
         x = self.getNewPoint(dataset)
         error = self.getError(x)
-        # print(f'Error: {error}')
+        print(f'inaccuracy: {error}')
         return error <= self.minError
 
     def pointsBasedCheck(self, dataset):
@@ -390,7 +406,6 @@ class XanesInputGenerator:
 
     def getFolderForPoint(self, x):
 
-        # TODO: actually generate unique folders for point (compare points, store folder names in dict)
         # this would work correctly only every passed x is unique
         # folder = '.'+os.path.sep+str(self.folderCounter)
         # if os.path.exists(self.folder):
@@ -409,7 +424,7 @@ class XanesInputGenerator:
         generateInput = getattr(globals()[self.spectralProgram], 'generateInput')
         generateInput(molecule, folder=folderOne, **self.spectrCalcParams)
         geometryParamsToSave = [[self.paramNames[j], x[j]] for j in range(N)]
-        with open(os.path.join(folderOne,'geometryParams.txt'), 'w') as f:
+        with open(os.path.join(folderOne, 'geometryParams.txt'), 'w') as f:
             json.dump(geometryParamsToSave, f)
         print('folder=', folderOne, ' '.join([p+'={:.4g}'.format(geometryParams[p]) for p in geometryParams]))
         if hasattr(molecule, 'export_xyz'):
@@ -421,7 +436,8 @@ class XanesInputGenerator:
 
 class XanesCalculator(CalculationProgram):
 
-    def __init__(self, spectralProgram, inputGenerator, outputFolder):
+    def __init__(self, spectralProgram, inputGenerator, outputFolder, recalculateErrorsAttemptCount):
+        self.recalculateErrorsAttemptCount = recalculateErrorsAttemptCount
         self.outputFolder = outputFolder
         self.input = inputGenerator
         self.spectralProgram = spectralProgram
@@ -429,11 +445,16 @@ class XanesCalculator(CalculationProgram):
         self.lock = threading.Lock()
 
     def calculate(self, x):
-
         with self.lock:
             folder = self.input.getFolderForPoint(x)
 
-        self.calculateXANES(folder)
+        attemptsDone = 0
+        while True:
+            self.calculateXANES(folder)
+            if not self.checkIfBadFolder(folder) or attemptsDone > self.recalculateErrorsAttemptCount:
+                break
+            attemptsDone += 1
+            print(f'Folder {folder} is bad, recalculating')
 
         with self.lock:
             ys = self.parseAndCollect(folder)
@@ -482,11 +503,16 @@ class XanesCalculator(CalculationProgram):
             raise Exception('Error while executing "' + cmd + '" command')
         return proc.stdout.read()
 
+    def checkIfBadFolder(self, folder):
+        parse_method = getattr(globals()[self.spectralProgram], 'parse_all_folders')
+        _, _, badFolders = parse_method(self.input.folder, printOutput=False)
+        return os.path.basename(os.path.normpath(folder)) in badFolders
+
     def parseAndCollect(self, folder):
         # TODO: process bad folders
         parse_method = getattr(globals()[self.spectralProgram], 'parse_one_folder')
         res = parse_method(folder)
-        collectResults(self.spectralProgram, self.input.folder, self.outputFolder)
+        collectResults(self.spectralProgram, self.input.folder, self.outputFolder, printOutput=False)
         return res.intensity
 
 # TODO: memory/processors settings for local
@@ -503,7 +529,7 @@ def sampleAdaptively(paramRanges, moleculeConstructor, maxError, spectrCalcParam
 
     sampler = ErrorPredictingSampler(rangeValues, maxError)
     folderGen = XanesInputGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder)
-    func = XanesCalculator(spectralProgram, folderGen, outputFolder)
+    func = XanesCalculator(spectralProgram, folderGen, outputFolder, recalculateErrorsAttemptCount)
     func.configAll(runType, runCmd, nProcs, memory)
     orchestrator = CalculationOrchestrator(func, calcSampleInParallel)
     generator = DatasetGenerator(sampler, orchestrator)

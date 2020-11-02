@@ -219,12 +219,13 @@ def parse_all_folders(parentFolder, printOutput=True):
         for i in range(len(badFolders)): badFolders[i] = os.path.join(parentFolder, badFolders[i])
         return None, None, badFolders
     else:
-        if output != '': print(output)
+        if output != '' and printOutput: print(output)
     energyCount = np.array([ x.intensity.shape[0] for x in allXanes.values() ])
     maxEnergyCount = np.max(energyCount)
     for d in allXanes:
         if allXanes[d].intensity.shape[0] != maxEnergyCount:
-            print('Error: in folder '+d+' there are less energies '+str(allXanes[d].intensity.shape[0]))
+            if printOutput:
+                print('Error: in folder '+d+' there are less energies '+str(allXanes[d].intensity.shape[0]))
             badFolders.append(d)
     goodFolders = list(set(subfolders) - set(badFolders))
     goodFolders.sort()
@@ -256,7 +257,7 @@ def parse_all_folders(parentFolder, printOutput=True):
     return df_xanes, df_params, badFolders
 
 
-def runLocal(folder = '.'):
+def runLocal(folder='.'):
     fdmnes = 'fdmnes.exe' if os.name == 'nt' else 'fdmnes'
     proc = subprocess.Popen([fdmnes], cwd=folder, stdout=subprocess.PIPE)
     stdoutdata, stderrdata = proc.communicate()

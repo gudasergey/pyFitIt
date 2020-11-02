@@ -390,3 +390,18 @@ def getEnergy(spectraDataframe):
 
 def makeDataFrame(energy, spectra):
     return pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
+
+
+def isObjectArraysEqual(a, b):
+    assert isinstance(a, np.ndarray) or isinstance(b, np.ndarray)
+    if not isinstance(a, np.ndarray): return isObjectArraysEqual(b, a)
+    n = len(a)
+    if not isinstance(b, np.ndarray):
+        b = np.array([b] * n, dtype=object)
+    res = np.zeros(n, dtype=np.bool)
+    for i in range(n):
+        if isinstance(a[i], type(b[i])):
+            res[i] = a[i] == b[i]
+        else:
+            res[i] = False
+    return res

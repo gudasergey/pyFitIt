@@ -112,11 +112,11 @@ def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, 
         recalculateAttempt += 1
 
 
-def collectResults(spectralProgram='fdmnes', folder='sample', outputFolder='.'):
+def collectResults(spectralProgram='fdmnes', folder='sample', outputFolder='.', printOutput=True):
     assert spectralProgram in knownPrograms, 'Unknown spectral program name: '+spectralProgram
     os.makedirs(outputFolder, exist_ok=True)
     parse_all_folders = getattr(globals()[spectralProgram], 'parse_all_folders')
-    df_xanes, df_params, _ = parse_all_folders(folder)
+    df_xanes, df_params, _ = parse_all_folders(folder, printOutput=printOutput)
     if df_xanes is None:
         raise Exception('There is no output data in folder '+folder)
     df_xanes.to_csv(os.path.join(outputFolder,'spectra.txt'), sep=' ', index=False)
