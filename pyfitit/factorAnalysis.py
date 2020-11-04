@@ -115,8 +115,9 @@ def MalinowskyParameters(data, l):
     statistic.index=statistic.index+1
     return statistic, pc
 
+
 def plotTestStatistic(statistic, pc, l):
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2,figsize=(8,5))
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2,figsize=(16 * 0.5, 9 * 0.5), dpi=100)
     ax1.semilogy(pc,l,'o-',color='green')
     #ax1.set_xlabel('PCs',fontweight='bold')
     ax1.set_ylabel('Variance',fontweight='bold')
@@ -215,7 +216,7 @@ def Norm(n_spectrum,us,vt,mat_X,NumFactors,n_sliders,data,energy,min_val,max_val
         guiClass.pureConcentrations = conc
 
     if guiClass.fig is not None: plt.close(guiClass.fig)
-    fig = plt.figure(figsize=figureSize)
+    fig = plt.figure(figsize=(16 * 0.5, 9 * 0.5), dpi=100)
     guiClass.fig = fig
     axs = fig.add_subplot(121)
     axc = fig.add_subplot(122)
@@ -306,7 +307,7 @@ def unNorm(s_spectrum,us,vt,mat_X_initial,NumFactors,n_sliders,data,energy,min_v
             guiClass.pureConcentrations = conc
 
     if guiClass.fig is not None: plt.close(guiClass.fig)
-    fig = plt.figure(figsize=figureSize)
+    fig = plt.figure(figsize=(16 * 0.5, 9 * 0.5), dpi=100)
     guiClass.fig = fig
     axs = fig.add_subplot(121)
     axc = fig.add_subplot(122)

@@ -170,7 +170,8 @@ descriptor_quality = descriptor.descriptor_quality
 generateMixtureOfSample = mixture.generateMixtureOfSample
 
 def plot_data(energy,data):
-    _=plt.plot(energy,data)
+    fig, axes = plt.subplots(figsize=(16 * 0.5, 9 * 0.5), dpi=100)
+    axes.plot(energy, data)
     axes = plt.gca()
     axes.set_xlim([min(energy),max(energy)])
     plt.xlabel('Energy',fontweight='bold')

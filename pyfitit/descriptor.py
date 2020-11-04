@@ -415,7 +415,7 @@ def findExtrema(sample, extremaType, energyInterval, maxRf=.1, allowExternal=Tru
                 ax.plot(energy, intensities[spectrum], color='black', lw=.3)
 
         fig.set_size_inches((16/3*2, 9/3*2))
-        plt.show()
+        if utils.isJupyterNotebook(): plt.show()
         fig.savefig(plotToFile, dpi=plotting.dpi)
         plotting.closefig(fig)
 
@@ -516,7 +516,7 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFold
     newSpectra, descr = findExtrema((spectra1, energy), extremaType, energyInterval, maxRf=maxRf, allowExternal=allowExternal, maxExtremumPointsDist=maxExtremumPointsDist, intensityNormForMaxExtremumPointsDist=intensityNormForMaxExtremumPointsDist, maxAdditionIter=maxAdditionIter, refineExtremum=refineExtremum, extremumInterpolationRadius=extremumInterpolationRadius, returnIndices=False, plotToFile='stableExtrema-'+extremaType+'.png')
     assert len(newSpectra) == len(spectra), f'Can\'t find {extremaType} for {len(spectra)-len(newSpectra)} spectra. Try changing search interval or expand energy interval for all spectra. See plot for details.'
     if plotResultToFolder is not None:
-        plt.ioff()
+        if utils.isJupyterNotebook(): plt.ioff()
         extrema_x = descr[:,0]
         extrema_y = descr[:,1]
         for i1 in range(min(100, len(spectra))):
@@ -535,7 +535,7 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFold
             fig.set_size_inches((16/3*2, 9/3*2))
             fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=plotting.dpi)
             plotting.closefig(fig)
-        plt.ion()
+        if utils.isJupyterNotebook(): plt.ion()
     return descr
 
 
