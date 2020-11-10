@@ -29,7 +29,7 @@ sampleAdaptively(paramRanges=project.geometryParamRanges,
                  spectralProgram='fdmnes',
                  workingFolder=folder,
                  runType='local',
-                 calcSampleInParallel=16,
+                 calcSampleInParallel=4,
                  outputFolder=folder+'_result')
 
 # ## 2.3 Generate input files for supplementary XANES training set (compare different machine learning methods)

@@ -10,16 +10,35 @@ from matplotlib.font_manager import FontProperties
 import cycler
 
 
-figsize = (16/3*2, 9/3*2)
-dpi = 300
-matplotlib.rcParams['figure.dpi'] = dpi
+def createfig(interactive=False, figsize=None, figdpi=None, **kwargs):
+    if not interactive: plt.ioff()
+    else:
+        if utils.isJupyterNotebook(): plt.ion()
+    if interactive:
+        if figsize is None: figsize = (16 * 0.5, 9 * 0.5)
+        if figdpi is None: figdpi = 100
+    else:
+        if figsize is None: figsize = (16 / 3 * 2, 9 / 3 * 2)
+        if figdpi is None: figdpi = 300
+    fig, ax = plt.subplots(figsize=figsize, dpi=figdpi, **kwargs)
+    return fig, ax
+
+
+def savefig(fileName, fig, figdpi=None):
+    if figdpi is None:
+        figdpi = 300
+    fig.savefig(fileName, dpi=figdpi)
 
 
 def closefig(fig):
+    if matplotlib.get_backend() == 'nbAgg': return
     #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
     if fig.number in plt.get_fignums():
+        if utils.isJupyterNotebook(): plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
         plt.close(fig)
-
+    else:
+        print('Warning: can\'t close not existent figure')
+    if utils.isJupyterNotebook(): plt.ion()
 
 # append = {'label':..., 'data':..., 'twinx':True} or  [{'label':..., 'data':...}, {'label':..., 'data':...}, ...]
 def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', title='', shift=None):
@@ -30,7 +49,7 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     shiftIsAbsolute = exp.defaultSmoothParams.shiftIsAbsolute
     search_shift_level = exp.defaultSmoothParams.search_shift_level
     fit_interval = exp.intervals['plot']
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = createfig()
     fdmnes_en = smoothed_xanes.energy
     fdmnes_xan = smoothed_xanes.intensity
     if shift is None:
@@ -79,8 +98,7 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     if title!='':
         title = wrap(title, 100)
         ax.set_title(title)
-    fig.set_size_inches((16/3*2, 9/3*2))
-    fig.savefig(folder+'/'+fileName+'.png', dpi=dpi)
+    savefig(folder+'/'+fileName+'.png', fig)
     closefig(fig)
     # print(exp_e.size, exp_xanes.size, fdmnes_xan.size)
     with open(folder+'/'+fileName+'.csv', 'a') as f:
@@ -126,7 +144,7 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
                 normValues[i0,i1] = np.sqrt(utils.integral(exp.spectrum.energy[ind], (xanesPredicted[k][ind]-exp.spectrum.intensity[ind])**2))
             k += 1
 
-    fig = plt.figure()
+    fig, _ = createfig()
     CS = plt.contourf(param1mesh, param2mesh, normValues, cmap='plasma')
     plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=30, inline=False)
     # plt.clabel(CS, inline=1, fontsize=10)
@@ -134,13 +152,12 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
     plt.ylabel(axisNames[1])
     plotTitle = 'Probability density for project '+exp.name if density else 'L2-distance from project '+exp.name
     plt.title(plotTitle)
-    fig.set_size_inches((16/3*2, 9/3*2))
     postfix = '_density' if density else '_l2_norm'
-    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'_contour.png', dpi=dpi)
+    savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'_contour.png', fig)
     closefig(fig)
     #for cmap in ['inferno', 'spectral', 'terrain', 'summer']:
     cmap = 'inferno'
-    fig = plt.figure()
+    fig, _ = createfig()
     ax = fig.gca(projection='3d')
     # cmap = 'summer'
     ax.plot_trisurf(param1mesh.flatten(), param2mesh.flatten(), normValues.flatten(), linewidth=0.2, antialiased=True, cmap=cmap)
@@ -148,9 +165,8 @@ def plot3DL2Norm(region, otherParamValues, estimatorInverse, paramNames, exp, N=
     plt.xlabel(axisNames[0])
     plt.ylabel(axisNames[1])
     plt.title(plotTitle)
-    fig.set_size_inches((16/3*2, 9/3*2))
     # plt.legend()
-    fig.savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.png', dpi=dpi)
+    savefig(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.png', fig)
     closefig(fig)
     data2csv = np.vstack((param1mesh.flatten(), param2mesh.flatten(), normValues.flatten())).T
     np.savetxt(folder+'/'+axisNames[0]+'_'+axisNames[1]+postfix+'.csv', data2csv, delimiter=',')
@@ -177,7 +193,7 @@ def wrap(s, n):
 # x1,y1,label1,x2,y2,label2,....,filename
 def plotToFile(*p, fileName=None, save_csv=True, title='', xlim=None):
     assert len(p)%3 == 0
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = createfig()
     n = len(p)//3
     for i in range(n):
         # print('plotting '+p[i*3+2]+': ', p[i*3], p[i*3+1])
@@ -193,7 +209,7 @@ def plotToFile(*p, fileName=None, save_csv=True, title='', xlim=None):
     folder = os.path.split(os.path.expanduser(fileName))[0]
     if not os.path.exists(folder): os.makedirs(folder)
     # print('saving to file: '+fileName)
-    fig.savefig(fileName, dpi=dpi)
+    savefig(fileName, fig)
     closefig(fig)
 
     if save_csv:
@@ -226,7 +242,7 @@ def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryPar
     # нарисовать график!!!!!!
 
 def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = createfig()
     classNum = predProba.size
     a = paramRange[0]; b = paramRange[1]
     h = (b-a)/classNum
@@ -236,9 +252,8 @@ def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
     ax.set_title('Prediction of '+paramName+' = {:.2g}'.format(predRegr))
     ax.legend()
     plt.ylabel('Probability')
-    fig.set_size_inches((16/3*2, 9/3*2))
     if not os.path.exists(folder): os.makedirs(folder)
-    fig.savefig(folder+'/'+paramName+'.png', dpi=dpi)
+    savefig(folder+'/'+paramName+'.png', fig)
     closefig(fig)
     np.savetxt(folder+'/'+paramName+'.csv', [barPos-h/2, barPos+h/2, predProba], delimiter=',')
 
@@ -277,7 +292,7 @@ def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=N
         ind = np.random.permutation(spectra.shape[0])
     spectra = spectra[ind]
 
-    fig, ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
+    fig, ax = createfig(interactive=True)
     if color_param is not None:
         assert len(color_param) == spectra.shape[0]
         colors = (color_param-np.min(color_param))/(np.max(color_param)-np.min(color_param)) * 0.9
@@ -293,7 +308,7 @@ def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=N
             ax.plot(energy, spectra0[i], color='k', lw=0.5, alpha=0.8)
 
     if fileName is not None:
-        fig.savefig(fileName, dpi=dpi)
+        savefig(fileName, fig)
         closefig(fig)
     else: return fig
 

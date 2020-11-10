@@ -7,7 +7,7 @@ import math, copy, os, time, gc, warnings
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from pyfitit.enhancedGpr import EnhancedGaussianProcessRegressor
-from . import geometry, utils
+from . import geometry, utils, plotting
 from sklearn.linear_model import LogisticRegression, RidgeCV
 import sklearn
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -784,11 +784,11 @@ def plotPredictionError(x, y, params, method, pathToSave):
     
     cv_result = cross_val_predict(method, x, y, cv=sklearn.model_selection.LeaveOneOut())
     L2_norm = np.linalg.norm(cv_result - y, axis=1)
-    fig, ax = plt.subplots(1)
+    fig, ax = plotting.createfig()
     sc = ax.scatter(x[params[0]], x[params[1]], cmap='plasma', c=L2_norm, alpha=0.5, norm=LogNorm())
     plt.colorbar(sc)
     ax.set_xlabel(params[0])
     ax.set_ylabel(params[1])
-    fig.savefig(f"./{pathToSave}/scatter-{params[0]}-{params[1]}.png", dpi=plotting.dpi)
-    plt.close(fig)
+    plotting.savefig(f"./{pathToSave}/scatter-{params[0]}-{params[1]}.png", fig)
+    plotting.closefig(fig)
     

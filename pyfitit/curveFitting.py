@@ -74,9 +74,10 @@ def findEfermiByArcTan(energy, intensity):
     :param intensity:
     :return: best_params = {'a':..., 'x0':...}, arctan_y
     """
-    efermi0, _, _ = findExpEfermi(energy, intensity, 0.5*np.mean(intensity[-5:]))
+    last = np.mean(intensity[-5:])
+    efermi0, _, _ = findExpEfermi(energy, intensity, 0.5*last)
     mod = ExpressionModel('b/(1+exp(-a*(x - x0)))+c')
-    params = mod.make_params(a=1, x0=efermi0, b=1, c=1)  # - стартовые
+    params = mod.make_params(a=0.3, x0=efermi0, b=last, c=0)  # - стартовые
     params['a'].set(min=0)
     params['b'].set(min=0)
     result = mod.fit(intensity, params, x=energy)

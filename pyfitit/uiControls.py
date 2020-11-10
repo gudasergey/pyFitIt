@@ -197,7 +197,7 @@ class ControlsManager:
         if self.saver is None:
             os.makedirs(folder, exist_ok=True)
             self.saveParams(folder+os.sep+'params.txt')
-            self.plotter.getFig().savefig(folder+os.sep+'image.png', dpi=plotting.dpi)
+            plotting.savefig(folder+os.sep+'image.png', self.plotter.getFig())
 
             plotData = self.context.plotData
             metrics = {}
@@ -218,7 +218,7 @@ class ControlsManager:
 
 class DefaultPlotter:
     def __init__(self):
-        self.fig, self.ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
+        self.fig, self.ax = plotting.createfig(interactive=True)
 
     def clear(self):
         self.ax.clear()
@@ -1115,7 +1115,7 @@ class CachedEstimator:
 
 class ExafsPlotter:
     def __init__(self):
-        self.fig, [self.axMain, self.axFourier] = plt.subplots(nrows=2)
+        self.fig, [self.axMain, self.axFourier] = plotting.createfig(interactive=True, nrows=2)
 
     def clear(self):
         self.axMain.clear()
@@ -1397,7 +1397,7 @@ class ExafsSliders:
 
 class FitSmoothPlotter:
     def __init__(self):
-        self.fig, self.ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
+        self.fig, self.ax = plotting.createfig(interactive=True)
         self.ax2 = None
 
     def clear(self):
@@ -1884,7 +1884,7 @@ class SampleInspector:
 
 class SinCosPlotter:
     def __init__(self):
-        self.fig, [self.axMain, self.axSnapshot] = plt.subplots(nrows=2)
+        self.fig, [self.axMain, self.axSnapshot] = plotting.createfig(interactive=True, nrows=2)
 
     def clear(self):
         self.axMain.clear()

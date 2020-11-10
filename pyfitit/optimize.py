@@ -614,17 +614,15 @@ def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
             funcValues[i], _ = minimize(minFun, arg0, boundsOther, constraints=constraints1, fun_args=(axisValues[i],), paramNames=paramNamesOther, method=optimizeMethod)
     axisValues = axisValues[insideConstrains]
     funcValues = funcValues[insideConstrains]
-    fig, ax = plt.subplots(figsize=plotting.figsize)
+    fig, ax = plotting.createfig()
     ax.plot(axisValues, funcValues)
     fun_val = fun(xmin) if fun_args is None else fun(xmin, *fun_args)
     ax.plot(xmin[axisInd], fun_val, marker='o', markersize=10, color="red")
     
     plt.xlabel(axisName)
     plt.title(utils.wrap('Map 1d '+arg2string(xmin, paramNames), 100))
-    fig.set_size_inches((16 / 3 * 2, 9 / 3 * 2))
-    fig.savefig(folder + '/' + axisName + postfix + '.png')
-    # if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    plotting.savefig(folder + '/' + axisName + postfix + '.png', fig)
+    plotting.closefig(fig)
     data2csv = np.vstack((axisValues, funcValues)).T
     np.savetxt(folder + '/' + axisName + postfix + '.csv', data2csv, delimiter=',')
 
@@ -705,7 +703,7 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     # param1mesh = param1mesh[insideConstrains]   - contourf works only for 2D grid
     # param2mesh = param2mesh[insideConstrains]
     funcValues[~insideConstrains] = np.max(funcValues)
-    fig, ax = plt.subplots(figsize=plotting.figsize)
+    fig, ax = plotting.createfig()
     CS = plt.contourf(param1mesh, param2mesh, funcValues, cmap='plasma')
     plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=30, inline=False)
     if extra_plot_func is not None:
@@ -716,13 +714,11 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     plotTitle = utils.wrap('Map '+arg2string(xmin, paramNames), 100)
     ax.set_title(plotTitle)
     plt.title(plotTitle)
-    fig.set_size_inches((16 / 3 * 2, 9 / 3 * 2))
-    fig.savefig(folder + '/' + axisNames[0] + '_' + axisNames[1] + postfix + '_contour.png')
-    # if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    plotting.savefig(folder + '/' + axisNames[0] + '_' + axisNames[1] + postfix + '_contour.png', fig)
+    plotting.closefig(fig)
     # for cmap in ['inferno', 'spectral', 'terrain', 'summer']:
     cmap = 'inferno'
-    fig = plt.figure()
+    fig, _ = plotting.createfig()
     ax = fig.gca(projection='3d')
     # cmap = 'summer'
     ax.plot_trisurf(param1mesh.flatten(), param2mesh.flatten(), funcValues.flatten(), linewidth=0.2, antialiased=True, cmap=cmap)
@@ -730,10 +726,8 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     plt.xlabel(axisNames[0])
     plt.ylabel(axisNames[1])
     plt.title(plotTitle)
-    fig.set_size_inches((16 / 3 * 2, 9 / 3 * 2))
     # plt.legend()
-    fig.savefig(folder + '/' + axisNames[0] + '_' + axisNames[1] + postfix + '.png')
-    # if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
-    if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
+    plotting.savefig(folder + '/' + axisNames[0] + '_' + axisNames[1] + postfix + '.png', fig)
+    plotting.closefig(fig)
     data2csv = np.vstack((param1mesh.flatten(), param2mesh.flatten(), funcValues.flatten())).T
     np.savetxt(folder + '/' + axisNames[0] + '_' + axisNames[1] + postfix + '.csv', data2csv, delimiter=',')

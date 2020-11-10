@@ -7,7 +7,7 @@ from IPython.utils.syspathcontext import prepended_to_syspath
 from scipy.optimize import minimize, basinhopping
 
 from pyfitit.smoothLib import findEfermiOnRawSpectrum
-from . import fdmnes, feff, adf, utils, ihs, w2auto, fdmnesTest, ML, pyGDM
+from . import fdmnes, feff, adf, utils, ihs, w2auto, fdmnesTest, ML, pyGDM, plotting
 
 
 knownPrograms = ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM']
@@ -180,7 +180,7 @@ def krigingSampling(ranges, moleculeConstructor, relativeToConstantPredictionErr
         return -sigma[0]
 
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=plotting.figsize)
+    fig, ax = plotting.createfig()
     for i in range(params.shape[0]):
         ax.plot(list(map(lambda x: x[0], params)), list(map(lambda x: x[-1], intensities)), 'ko')
 
@@ -198,7 +198,7 @@ def krigingSampling(ranges, moleculeConstructor, relativeToConstantPredictionErr
     ax.fill_between(x, y + s, y - s)
     ax.plot(x, y - s, 'green')
     ax.plot(x, y + s, 'green')
-    fig1, ax1 = plt.subplots(figsize=plotting.figsize)
+    fig1, ax1 = plotting.createfig()
     ax1.plot(x, s)
     # ax.plot(xList, y, 'ro')
 

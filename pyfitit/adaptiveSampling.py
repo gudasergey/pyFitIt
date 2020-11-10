@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import os
 import threading
 import shutil
@@ -10,8 +11,10 @@ from scipy.optimize import minimize
 from multiprocessing.dummy import Pool as ThreadPool
 from scipy.optimize import basinhopping
 from pyfitit.sampling import ihs
-from .ML import RBFWrapper
+from .ML import RBF, RBFWrapper, Sample
 from .sampling import collectResults
+from .smoothLib import getPreliminarySmoothParams, smooth_fdmnes
+from .inverseMethod import inverseCrossValidation
 
 # global modules for sampling
 from . import fdmnes, feff, adf, utils, ihs, w2auto, fdmnesTest, ML, pyGDM
@@ -47,6 +50,7 @@ class DatasetGenerator:
         self.sampler = sampler
         self.xs = None
         self.ys = None
+        self.additionalData = []
 
     def generate(self):
         """
@@ -61,19 +65,19 @@ class DatasetGenerator:
         Returns True if dataset is ready, otherwise - False
         :return: bool
         """
-        return self.sampler.isGoodEnough((self.xs, self.ys))
+        return self.sampler.isGoodEnough((self.xs, self.ys, self.additionalData))
 
     def getNewPoint(self):
         """
 
         :return: point X
         """
-        return self.sampler.getNewPoint((self.xs, self.ys))
+        return self.sampler.getNewPoint((self.xs, self.ys, self.additionalData))
 
     def getInitialPoints(self):
         return self.sampler.getInitialPoints()
 
-    def addResult(self, x, y):
+    def addResult(self, x, y, additionalData=None):
         """
         Adds new pair (x, y) to the dataset
         :param x: point "x"
@@ -83,10 +87,12 @@ class DatasetGenerator:
         # print(f'New point {x}')
         self.xs = np.array([x]) if self.xs is None else np.append(self.xs, [x], axis=0)
         self.ys = np.array([y], dtype=object) if self.ys is None else np.append(self.ys, [y], axis=0)
+        self.additionalData.append(additionalData)
         return self.xs.shape[0] - 1
 
-    def updateResult(self, index, y):
+    def updateResult(self, index, y, additionalData=None):
         assert 0 <= index < self.ys.shape[0]
+        self.additionalData[index] = additionalData
         self.ys[index] = y
 
 
@@ -130,8 +136,8 @@ class CalculationOrchestrator:
         from pyfitit.executors import LazyThreadPoolExecutor
         pool = LazyThreadPoolExecutor(self.calcSampleInParallel)
         results = pool.map(self.calculate, points)
-        for index, y in results:
-            self.generator.updateResult(index, y)
+        for index, y, additionalData in results:
+            self.generator.updateResult(index, y, additionalData)
 
     def pointSequence(self):
         while not self.generator.isDatasetReady():
@@ -141,35 +147,26 @@ class CalculationOrchestrator:
 
     def calculate(self, pointAndIndex):
         index, x = pointAndIndex
-        y = self.program.calculate(x)
+        y, additionalData = self.program.calculate(x)
 
-        # from datetime import datetime
-        # dateTimeObj = datetime.now()
-        # timestampStr = dateTimeObj.strftime("%H:%M:%S.%f")
-        # print(f'[{timestampStr}]done calculation ' + str(x))
-
-        return index, y
+        return index, y, additionalData
 
     def addResultCalculateAndUpdate(self, x):
         with self.lock:
             index = self.generator.addResult(x, 'calculating')
 
-        y = self.program.calculate(x)
+        y, additionalData = self.program.calculate(x)
 
-        # from datetime import datetime
-        # dateTimeObj = datetime.now()
-        # timestampStr = dateTimeObj.strftime("%H:%M:%S.%f")
-        # print(f'[{timestampStr}]done calculation ' + str(x))
         with self.lock:
-            self.generator.updateResult(index, y)
+            self.generator.updateResult(index, y, additionalData)
 
 
 class CalculationProgram:
-    """Does the actual calculation. Provided with point "x" returns corresponding "y"
+    """Does the actual calculation. Provided with point "x" returns corresponding "y" and additional data
     """
 
     def calculate(self, x):
-        return None
+        return None, None
 
 
 """
@@ -245,6 +242,7 @@ class ErrorPredictingSampler(Sampler):
         self.leftBorder, self.rightBorder = self.getParamBorders()
         self.xs = None
         self.ys = None
+        self.additionalData = None
         self.yPredictionModel = None
         self.predictedErrors = []
         self.predictedYs = []
@@ -287,12 +285,13 @@ class ErrorPredictingSampler(Sampler):
         # return self.getFromGlobalMaxError(dataset)
 
     def extractDataset(self, dataset):
-        xs, ys = dataset
+        xs, ys, additionalData = dataset
         # print(type(ys), ys)
         notNone = ~utils.isObjectArraysEqual(ys, 'calculating')
         # print('notNone=',notNone)
         self.xs = xs[notNone]
         self.ys = np.vstack(ys[notNone])
+        self.additionalData = additionalData
         self.fitModel()
 
         self.xs = np.array(xs)
@@ -371,12 +370,35 @@ class ErrorPredictingSampler(Sampler):
         return self.errorBasedCheck(dataset)
 
     def errorBasedCheck(self, dataset):
-        xs, ys = dataset
+        xs, _, additionalData = dataset
         if xs.shape[0] < self.initialSize:
             return False
 
-        x = self.getNewPoint(dataset)
-        error = self.getError(x)
+        xaneses = []
+        first = True
+        ind = []
+        for i, spectrum in enumerate(additionalData):
+            if spectrum is None:
+                continue
+
+            params, energyInterval = getPreliminarySmoothParams(spectrum)
+            if first:
+                energy = spectrum.energy[(energyInterval[0] <= spectrum.energy) & (spectrum.energy <= energyInterval[1])]
+                first = False
+            del params['shift']
+            # print('Before smooth: ', spectrum.intensity)
+            _, smoothedXanes = smooth_fdmnes(
+                np.array(spectrum.energy),
+                np.array(spectrum.intensity),
+                energy,
+                **params)
+            xaneses.append(smoothedXanes)
+            ind.append(i)
+            # print('After smooth: ', smoothedXanes)
+
+        sample = Sample(pd.DataFrame(data=xs[ind,:]), np.array(xaneses), energy)
+        res = inverseCrossValidation(RBF(), sample, 20)
+        error = res[0]['relToConstPredError']
         print(f'inaccuracy: {error}')
         return error <= self.minError
 
@@ -457,11 +479,9 @@ class XanesCalculator(CalculationProgram):
             print(f'Folder {folder} is bad, recalculating')
 
         with self.lock:
-            ys = self.parseAndCollect(folder)
+            ys, additionalData = self.parseAndCollect(folder)
 
-        # TODO: parse folder and return result
-        # TODO: how to interpolate xanes by common energy?
-        return ys
+        return ys, additionalData
 
     def configAll(self, runType, runCmd, nProcs, memory):
         self.runType = runType
@@ -513,7 +533,8 @@ class XanesCalculator(CalculationProgram):
         parse_method = getattr(globals()[self.spectralProgram], 'parse_one_folder')
         res = parse_method(folder)
         collectResults(self.spectralProgram, self.input.folder, self.outputFolder, printOutput=False)
-        return res.intensity
+        return res.intensity, res
+
 
 # TODO: memory/processors settings for local
 def sampleAdaptively(paramRanges, moleculeConstructor, maxError, spectrCalcParams, spectralProgram='fdmnes', workingFolder='sample', seed=0,

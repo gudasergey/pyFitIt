@@ -167,12 +167,12 @@ relPcaDescriptor = descriptor.relPcaDescriptor
 plot_descriptors_1d = descriptor.plot_descriptors_1d
 plot_descriptors_2d = descriptor.plot_descriptors_2d
 descriptor_quality = descriptor.descriptor_quality
+addDescriptors = descriptor.addDescriptors
 generateMixtureOfSample = mixture.generateMixtureOfSample
 
 def plot_data(energy,data):
-    fig, axes = plt.subplots(figsize=(16 * 0.5, 9 * 0.5), dpi=100)
+    fig, axes = plotting.createfig(interactive=True)
     axes.plot(energy, data)
-    axes = plt.gca()
     axes.set_xlim([min(energy),max(energy)])
     plt.xlabel('Energy',fontweight='bold')
     plt.ylabel('Absorption',fontweight='bold')
@@ -212,7 +212,7 @@ def plotPCAcomponents(energy, principal_components):
         val[i]=val[i]/(np.trapz(val[i],energy))
     dv=pd.DataFrame(np.transpose(val))
     dv.index=energy
-    fig, ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
+    fig, ax = plotting.createfig(interactive=True)
     plotPCAcomponentsParams["Switching"] = 'Not Normalized'
     plotPCAcomponentsParams["Component"] = 1
 
@@ -264,7 +264,7 @@ def PCAcomparison(energy,data):
     u,s,vT=np.linalg.svd(data, full_matrices=False)
     PCAplot['column']=0
     PCAplot['number']=1
-    fig, ax = plt.subplots(figsize=(16*0.5, 9*0.5), dpi=100)
+    fig, ax = plotting.createfig(interactive=True)
     inset_ax = fig.add_axes([0.53, 0.25, 0.35, 0.2])
     def redrawf():
         ax.clear()

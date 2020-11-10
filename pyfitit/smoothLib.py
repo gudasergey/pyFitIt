@@ -97,8 +97,10 @@ def simpleSmooth(e, xanes, sigma, kernel='Cauchy'):
 
 def smooth_fdmnes(e, xanes, exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     # print(len(e), len(xanes), len(exp_e))
+    assert xanes.size>=2
     xanes = np.copy(xanes)
     lastValueInd = xanes.size - int(xanes.size*0.05)
+    lastValueInd = min(xanes.size-2, lastValueInd)
     lastValue = utils.integral(e[lastValueInd:], xanes[lastValueInd:])/(e[-1] - e[lastValueInd])
     E_interval = e[-1] - e[0]
     xanes[e<Efermi] = 0
@@ -337,14 +339,13 @@ def plotSmoothWidthToFolder(smoothType, e, args, folder):
     if sigma is None:
         print('Cant plot smooth width for smooth type '+smoothType)
         return
-    fig, ax = plt.subplots(figsize=plotting.figsize)
+    fig, ax = plotting.createfig()
     ax.plot(e, sigma)
     ax.set_ylim([0, 50])
     ax.set_xlabel("Energy")
     ax.set_ylabel("Width")
-    fig.set_size_inches((16/3*2, 9/3*2))
-    fig.savefig(folder+'/smooth_width.png')
-    plt.close(fig)
+    plotting.savefig(folder+'/smooth_width.png', fig)
+    plotting.close(fig)
 
 
 # ============================================================================================================================

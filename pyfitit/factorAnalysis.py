@@ -1,16 +1,14 @@
+from . import utils
+utils.fixDisplayError()
 import numpy as np
 import pandas as pd
-import matplotlib, os
-if (os.name != 'nt') and ('DISPLAY' not in os.environ): matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import scipy.integrate as integrate
 from scipy.stats import f
-from ipywidgets import interact
 from ipywidgets import widgets #
 from IPython.display import display, Javascript
-from IPython.display import Math, Latex
-from ipywidgets import Button
 from numpy.linalg import matrix_rank
+from . import plotting
 
 
 figureSize = None
@@ -117,7 +115,7 @@ def MalinowskyParameters(data, l):
 
 
 def plotTestStatistic(statistic, pc, l):
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2,figsize=(16 * 0.5, 9 * 0.5), dpi=100)
+    fig, ((ax1, ax2), (ax3, ax4)) = plotting.createfig(interactive=True, nrows=2, ncols=2)
     ax1.semilogy(pc,l,'o-',color='green')
     #ax1.set_xlabel('PCs',fontweight='bold')
     ax1.set_ylabel('Variance',fontweight='bold')
@@ -215,10 +213,9 @@ def Norm(n_spectrum,us,vt,mat_X,NumFactors,n_sliders,data,energy,min_val,max_val
         guiClass.pureSpectra = sp
         guiClass.pureConcentrations = conc
 
-    if guiClass.fig is not None: plt.close(guiClass.fig)
-    fig = plt.figure(figsize=(16 * 0.5, 9 * 0.5), dpi=100)
+    if guiClass.fig is not None: plotting.closefig(guiClass.fig)
+    fig, axs = plotting.createfig(interactive=True)
     guiClass.fig = fig
-    axs = fig.add_subplot(121)
     axc = fig.add_subplot(122)
     # Setup Widgets
     controls=[]
@@ -306,10 +303,9 @@ def unNorm(s_spectrum,us,vt,mat_X_initial,NumFactors,n_sliders,data,energy,min_v
             guiClass.pureSpectra = sp
             guiClass.pureConcentrations = conc
 
-    if guiClass.fig is not None: plt.close(guiClass.fig)
-    fig = plt.figure(figsize=(16 * 0.5, 9 * 0.5), dpi=100)
+    if guiClass.fig is not None: plotting.closefig(guiClass.fig)
+    fig, axs = plotting.createfig(interactive=True)
     guiClass.fig = fig
-    axs = fig.add_subplot(121)
     axc = fig.add_subplot(122)
     # Setup Widgets
     controls=[]

@@ -30,7 +30,7 @@ def plotting_spectra(sample, to_delete, centering, normalize):
     def Range(s):
         v1 = s[0]
         v2 = s[1]
-        fig,ax = plt.subplots(figsize=(13,5))
+        fig,ax = pplotting.createfig(interactive=True, figsize=(13,5))
         ax.plot(energy[v1:v2], spectra[v1:v2], linewidth=0.1, color='blue')
         ax.set_xlabel('Energy', fontweight='bold')
         ax.set_ylabel('Absorption', fontweight='bold')
@@ -67,7 +67,7 @@ def error(spectra,nPCs):
 
 
 def plot_error(s,error_plot):
-    fig,ax=plt.subplots(nrows=1, ncols=2,figsize=(13,5))
+    fig,ax = plotting.createfig(interactive=True, nrows=1, ncols=2, figsize=(13,5))
     ax[0].plot(np.arange(1,21),s[0:20],'-o',label='Scree Plot',color='blue')
     ax[0].set_xlabel('PCs',fontweight='bold')
     ax[0].set_ylabel('Singular Values',fontweight='bold')
@@ -145,7 +145,7 @@ def plot_training_error(descriptor, parameters, clf):
         y = descriptor[:,i]
         pred = cross_val_predict(clf[i], parameters, y)
         graf.append(sklearn.metrics.r2_score(y, pred)*100)
-    fig,ax=plt.subplots(figsize=(13,5))
+    fig,ax = plotting.createfig(interactive=True, figsize=(13,5))
     ax.plot(np.arange(1,number+1),graf,'-o')
     ax.set_ylabel('Quality %',fontweight='bold')
     ax.set_xlabel('PCs',fontweight='bold')
@@ -228,7 +228,7 @@ def find_isosurface(param,min_val,max_val,clf,iso_param):
     return p_values
 
 def plot_isosurfaces(g1,g2,iso_param_1,iso_param_2,param):
-    fig,ax=plt.subplots(nrows=1, ncols=3,figsize=(13,5))
+    fig,ax=plotting.createfig(interactive=True, nrows=1, ncols=3, figsize=(13,5))
     if iso_param_1[2] != iso_param_2[2] or iso_param_1[3] != iso_param_2[3]: print('Error Not common parameters chosen for the plot')
     else:
         ax[0].set_title('PC:'+str(iso_param_1[0]))
@@ -403,7 +403,7 @@ def findExtrema(sample, extremaType, energyInterval, maxRf=.1, allowExternal=Tru
             goodBadIndices.append((i, -1, 'bad'))
         # random.shuffle(goodBadIndices)
 
-        fig, ax = plt.subplots(figsize=plotting.figsize)
+        fig, ax = plotting.createfig()
         alpha = min(1/len(goodBadIndices)*100,1)
         for (spectrum, extremum, label) in goodBadIndices:
             if label == 'good':
@@ -413,10 +413,7 @@ def findExtrema(sample, extremaType, energyInterval, maxRf=.1, allowExternal=Tru
         for (spectrum, extremum, label) in goodBadIndices:
             if label == 'bad':
                 ax.plot(energy, intensities[spectrum], color='black', lw=.3)
-
-        fig.set_size_inches((16/3*2, 9/3*2))
-        if utils.isJupyterNotebook(): plt.show()
-        fig.savefig(plotToFile, dpi=plotting.dpi)
+        plotting.savefig(plotToFile, fig)
         plotting.closefig(fig)
 
     def ensureCorrectResults(intensities, good, bad, extremaPoints, derivatives):
@@ -513,10 +510,10 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFold
     spectra1 = np.copy(spectra)
     for i in range(len(spectra)):
         spectra1[i] = smoothLib.simpleSmooth(energy, spectra1[i], smoothRad, kernel='Gauss')
-    newSpectra, descr = findExtrema((spectra1, energy), extremaType, energyInterval, maxRf=maxRf, allowExternal=allowExternal, maxExtremumPointsDist=maxExtremumPointsDist, intensityNormForMaxExtremumPointsDist=intensityNormForMaxExtremumPointsDist, maxAdditionIter=maxAdditionIter, refineExtremum=refineExtremum, extremumInterpolationRadius=extremumInterpolationRadius, returnIndices=False, plotToFile='stableExtrema-'+extremaType+'.png')
-    assert len(newSpectra) == len(spectra), f'Can\'t find {extremaType} for {len(spectra)-len(newSpectra)} spectra. Try changing search interval or expand energy interval for all spectra. See plot for details.'
+    newSpectra, descr, goodSpectrumIndices = findExtrema((spectra1, energy), extremaType, energyInterval, maxRf=maxRf, allowExternal=allowExternal, maxExtremumPointsDist=maxExtremumPointsDist, intensityNormForMaxExtremumPointsDist=intensityNormForMaxExtremumPointsDist, maxAdditionIter=maxAdditionIter, refineExtremum=refineExtremum, extremumInterpolationRadius=extremumInterpolationRadius, returnIndices=True, plotToFile='stableExtrema-'+extremaType+'.png')
+    if len(newSpectra) != len(spectra):
+        warnings.warn(f'Can\'t find {extremaType} for {len(spectra)-len(newSpectra)} spectra. Try changing search interval or expand energy interval for all spectra. See plot for details.')
     if plotResultToFolder is not None:
-        if utils.isJupyterNotebook(): plt.ioff()
         extrema_x = descr[:,0]
         extrema_y = descr[:,1]
         for i1 in range(min(100, len(spectra))):
@@ -525,18 +522,16 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotResultToFold
                 os.makedirs(plotResultToFolder, exist_ok=True)
             # i = np.random.randint(0,len(spectra))
             i = i1
-            fig, ax = plt.subplots(figsize=plotting.figsize)
+            fig, ax = plotting.createfig()
             ax.plot(energy, spectra1[i], label='stable smooth')
             ax.plot(energy, spectra[i], label='spectrum')
             d = np.max(spectra[i])-np.min(spectra[i])
             ax.set_ylim(np.min(spectra[i])-d*0.1, np.max(spectra[i])+d*0.1)
             ax.scatter([extrema_x[i]], [extrema_y[i]], 10)
             ax.legend()
-            fig.set_size_inches((16/3*2, 9/3*2))
-            fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=plotting.dpi)
+            plotting.savefig(plotResultToFolder+os.sep+str(i)+'.png', fig)
             plotting.closefig(fig)
-        if utils.isJupyterNotebook(): plt.ion()
-    return descr
+    return descr, goodSpectrumIndices
 
 
 def stableExtremaOld(spectra, energy, extremaType, energyInterval, fitByPolynomDegree=2, plotResultToFolder=None, plotBadOnly=True):
@@ -566,15 +561,14 @@ def stableExtremaOld(spectra, energy, extremaType, energyInterval, fitByPolynomD
                 if os.path.exists(plotResultToFolder): shutil.rmtree(plotResultToFolder)
                 os.makedirs(plotResultToFolder, exist_ok=True)
             if plotBadOnly and (extrema_x[i]<energy[0] or extrema_x[i]>energy[-1]):
-                fig, ax = plt.subplots(figsize=plotting.figsize)
+                fig, ax = plotting.createfig()
                 ax.plot(energy, poly(energy), label='polynom')
                 ax.plot(energy, spectra[i], label='spectrum')
                 d = np.max(spectra[i])-np.min(spectra[i])
                 ax.set_ylim(np.min(spectra[i])-d*0.1, np.max(spectra[i])+d*0.1)
                 ax.scatter([extrema_x[i]], [extrema_y[i]], 10)
                 ax.legend()
-                fig.set_size_inches((16/3*2, 9/3*2))
-                fig.savefig(plotResultToFolder+os.sep+str(i)+'.png', dpi=plotting.dpi)
+                plotting.savefig(plotResultToFolder+os.sep+str(i)+'.png', fig)
                 plotting.closefig(fig)
     return np.array([extrema_x,extrema_y,extrema_sharpness]).T
 
@@ -620,7 +614,68 @@ def efermiDescriptor(spectra, energy):
         d[i] = [arcTanParams['x0'], arcTanParams['a']]
     return d
 
-    
+
+def addDescriptors(sample, descriptors):
+    """
+    :param sample: Sample instance
+    :param descriptors: list of str (descriptor type) or dict{'type':.., 'columnName':.., 'arg1':.., 'arg2':.., ...}. Possible descriptor types: 'stableExtrema' (params - see. stableExtrema function), 'efermi', 'pca', 'rel_pca'
+    :return: new sample with descriptors
+    """
+    # canonizations
+    newD = []
+    for d in descriptors:
+        if isinstance(d, str): newD.append({'type':d})
+        else: newD.append(d)
+    descriptors = newD
+    spectra = sample.spectra.to_numpy()
+    energy = sample.energy
+    data = sample.params
+    for d in descriptors:
+        typ = d['type']
+        params = copy.deepcopy(d)
+        del params['type']
+        if typ == 'stableExtrema':
+            assert 'extremaType' in params
+            name = params['columnName'] if 'columnName' in params else params['extremaType']
+            ext_e = name+'_e'
+            ext_int = name+'_int'
+            ext_d2 = name+'_d2'
+            assert (ext_e not in data.columns) and (ext_int not in data.columns) and (ext_d2 not in data.columns), f'Duplicate descriptor names while adding {ext_e}, {ext_int}, {ext_d2} to {data.columns}. Use columnName argument in descriptor parameters'
+            ext, goodSpectrumIndices = stableExtrema(spectra, energy, **params)
+            assert np.all(np.diff(goodSpectrumIndices) >= 0)
+            if len(goodSpectrumIndices) != data.shape[0]:
+                unknown = np.any(np.isnan(data.to_numpy()), axis=1).reshape(-1)
+                unknown = np.where(unknown)[0]
+                common = np.intersect1d(unknown, goodSpectrumIndices)
+                assert len(common) == len(unknown), f"Can\'t find {params['extremaType']} for unknown spectra. Try changing search energy interval or expand energy interval for all spectra. See plot for details."
+                data = data.loc[goodSpectrumIndices].reset_index(drop=True)
+                spectra = spectra[goodSpectrumIndices,:]
+            data[ext_e] = ext[:, 0]
+            data[ext_int] = ext[:, 1]
+            data[ext_d2] = ext[:, 2]
+        elif typ == 'efermi':
+            efermi = efermiDescriptor(spectra, energy)
+            data['efermi'] = efermi[:, 0]
+            data['efermiRate'] = efermi[:, 1]
+        elif typ == 'pca':
+            count = params['count'] if 'count' in params else 3
+            pca = pcaDescriptor(spectra, count)
+            data['pca1'] = pca[:, 0]
+            data['pca2'] = pca[:, 1]
+            data['pca3'] = pca[:, 2]
+        elif typ == 'rel_pca':
+            count = params['count'] if 'count' in params else 3
+            if 'efermi' not in data.columns:
+                efermi = efermiDescriptor(spectra, energy)
+                efermi = efermi[:, 0]
+            else: efermi = data['efermi']
+            relpca = relPcaDescriptor(spectra, energy, efermi, count)
+            data['rel_pca1'] = relpca[:, 0]
+            data['rel_pca2'] = relpca[:, 1]
+            data['rel_pca3'] = relpca[:, 2]
+    return ML.Sample(data, spectra, energy)
+
+
 def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names, folder):
     """Plot 1d graphs of descriptors vs labels
     
@@ -647,12 +702,12 @@ def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names, f
         for desc_points in desc_points_names:
             ax.scatter(data[desc_points[0]], data[desc_points[1]], 10)
         ax.set_title('Spectra colored by '+label)
-        fig.savefig(folder+os.sep+'by_label'+os.sep+'xanes_spectra_'+label+'.png', dpi=plotting.dpi)
+        plotting.savefig(folder+os.sep+'by_label'+os.sep+'xanes_spectra_'+label+'.png', fig)
         plotting.closefig(fig)
 
         for d in descriptors:
             os.makedirs(folder+os.sep+'by_descriptor'+os.sep+d, exist_ok=True)
-            fig, ax = plt.subplots(figsize=plotting.figsize)
+            fig, ax = plotting.createfig()
             # known
             ind = pd.notnull(data[label])
             ma = np.max(data.loc[ind,label]); mi = np.min(data.loc[ind,label])
@@ -667,9 +722,8 @@ def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names, f
             ax.set_ylabel(label)
             ax.set_xlim(plotting.getPlotLim(data.loc[ind,d]))
             ax.set_ylim(plotting.getPlotLim(data.loc[ind,label]+delta[ind]))
-            fig.set_size_inches((16/3*2, 9/3*2))
-            fig.savefig(folder+os.sep+'by_descriptor'+os.sep+d+os.sep+label+'.png', dpi=plotting.dpi)
-            fig.savefig(folder+os.sep+'by_label'+os.sep+label+os.sep+d+'.png', dpi=plotting.dpi)
+            plotting.savefig(folder+os.sep+'by_descriptor'+os.sep+d+os.sep+label+'.png', fig)
+            plotting.savefig(folder+os.sep+'by_label'+os.sep+label+os.sep+d+'.png', fig)
             plotting.closefig(fig)
 
 
@@ -844,10 +898,6 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
     if not plot_data_only:
         quality, predictions, models, _ = getQuality(data, descriptor_names, label_names, m=1, cv_count=cv_count, returnModels=True)
 
-    def get_color(c):
-        c = (c-np.min(c)) / (np.max(c) - np.min(c))
-        c = c*0.9
-        return c
     colorMap = plotting.truncate_colormap('hsv', minval=0, maxval=0.9)
     x = data[descriptor_names[0]].to_numpy()
     y = data[descriptor_names[1]].to_numpy()
@@ -866,7 +916,7 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
         if doNotPlotRemoteCount > 0:
             labelData = labelData[good_ind]
         os.makedirs(folder2+os.sep+label, exist_ok=True)
-        fig, ax = plt.subplots(figsize=plotting.figsize)
+        fig, ax = plotting.createfig()
 
         c = labelData
         assert np.all(pd.notnull(c))
@@ -944,9 +994,8 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
             qs = ''
         ax.set_xlim(plotting.getPlotLim(x))
         ax.set_ylim(plotting.getPlotLim(y))
-        plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
-        fig.savefig(folder+'/'+label+'.png', dpi=plotting.dpi)
-        fig.savefig(folder2+os.sep+label+os.sep+qs+descriptor_names[0]+'_'+descriptor_names[1]+'.png', dpi=plotting.dpi)
+        plotting.savefig(folder+'/'+label+'.png', fig)
+        plotting.savefig(folder2+os.sep+label+os.sep+qs+descriptor_names[0]+'_'+descriptor_names[1]+'.png', fig)
         plotting.closefig(fig)
 
 
@@ -978,6 +1027,19 @@ def getLinearAnalyticModel(data, features, label, l1_ratio, try_alpha=None, cv_c
 
 @ignore_warnings(category=ConvergenceWarning)
 def getAnalyticFormulasForGivenFeatures(data0, features0, label_names, l1_ratio=1, try_alpha=None, cv_count=10, normalize=True, output_file='formulas.txt'):
+    """
+    Finds analytical formulas for labels in terms of linear and quadratic functions of features. Data is normilized to zero mean and std=1.
+    Algorithm. For each label we check whether the label can be expressed in terms of features using general nonlinear model (ExtraTreesRegressor). If score>0.5 we try to build linear model using feature selecting algoritm Elastic Net. If its score>0.5 we print it. The linear formula returned by Elastic Net is also heavy, so we sort coefficients by absolute value and try to build linear model based on subsets of features with the largest absolute coeffitients. The attempts are done for subsets of each size: 1, 2, 3, ...
+    :param data0: data frame
+    :param features0: feature names
+    :param label_names:
+    :param l1_ratio:
+    :param try_alpha:
+    :param cv_count:
+    :param normalize:
+    :param output_file:
+    :return:
+    """
     if try_alpha is None: try_alpha = [0.001, 0.01, 0.1, 1, 10, 100, 1000]
     data0 = data0.sample(frac=1).reset_index(drop=True)
     if isinstance(features0, list):
@@ -1011,7 +1073,7 @@ def getAnalyticFormulasForGivenFeatures(data0, features0, label_names, l1_ratio=
 
             if score > 0.5:
                 # get simple models
-                ind = np.argsort(model.coef_)
+                ind = np.argsort(np.abs(model.coef_))
                 max_print_num = 5
                 print_num = 0
                 for i in range(len(ind)-1):
@@ -1023,3 +1085,5 @@ def getAnalyticFormulasForGivenFeatures(data0, features0, label_names, l1_ratio=
                         print_num += 1
                         if print_num > max_print_num: break
     result_file.close()
+
+
