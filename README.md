@@ -1,13 +1,13 @@
 ![Logo](http://hpc.nano.sfedu.ru/pyfitit/assets/logo.png)
 # pyFitIt
-Python implementation of FitIt software to fit X-ray absorption near edge structure (XANES). The python version is extended with additional features: machine learning, automatic component analysis, joint convolution fitting and others.
+Python implementation of FitIt software to fit X-ray absorption near edge structure (XANES) and other spectra. The python version is extended with additional features: machine learning, automatic component analysis, joint convolution fitting and others.
 
 [PyFitIt website](http://hpc.nano.sfedu.ru/pyfitit/)
 
 ## Features
 - Uses ipywidgets to construct the portable GUI
-- Calculates XANES by [FDMNES](http://neel.cnrs.fr/spip.php?rubrique1007&lang=en) or [FEFF](http://monalisa.phys.washington.edu/)
-- Interpolates XANES in order to speedup fitting. Support different types of interpolation point generation: grid, random, [IHS](http://people.sc.fsu.edu/~jburkardt/cpp_src/ihs/ihs.html) and various interpolation methods including machine learning algorithms
+- Calculates spectra by [FDMNES](http://neel.cnrs.fr/spip.php?rubrique1007&lang=en) or [FEFF](http://monalisa.phys.washington.edu/) or [ADF](https://www.scm.com/product/adf/) or [pyGDM](https://wiechapeter.gitlab.io/pygdm/2018-01-15-pygdm/)
+- Interpolates spectra in order to speedup fitting. Support different types of interpolation point generation: grid, random, [IHS](http://people.sc.fsu.edu/~jburkardt/cpp_src/ihs/ihs.html), adaptive and various interpolation methods including machine learning algorithms
 - Using multidimensional interpolation approximation you can vary parameters by sliders and see immediately theoretical spectrum, which corresponds to this geometry. Fitting can be performed on the basis of visual comparison with experiment or using automatic procedure and quantitative criteria.
 - Supports direct prediction of geometry parameters by machine learning
 - Includes automatic and semi-automatic component analysis
@@ -16,7 +16,7 @@ Python implementation of FitIt software to fit X-ray absorption near edge struct
 pip install pyfitit
 
 ## Usage
-See examples in [PyFitIt github repository](https://github.com/gudasergey/pyFitIt).
+See examples folder in this repository.
 
 ### This project is developing thanks to
 - Grigory Smolentsev
