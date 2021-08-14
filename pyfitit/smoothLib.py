@@ -1,12 +1,14 @@
 from . import utils
 utils.fixDisplayError()
-import math, copy, os, json, hashlib, gc
+import math, copy, os, json, hashlib, gc, scipy
 from . import fdmnes, optimize, plotting, curveFitting
 import numpy as np
 import pandas as pd
 from .optimize import param, arg2string, VectorPoint
 import matplotlib.pyplot as plt
 from scipy import interpolate
+from matplotlib.font_manager import FontProperties
+
 
 # ============================================================================================================================
 # ============================================================================================================================
@@ -16,7 +18,9 @@ from scipy import interpolate
 
 def kernelCauchy(x, a, sigma): return sigma/2/math.pi/((x-a)**2+sigma**2/4)
 
+
 def kernelGauss(x, a, sigma): return 1/sigma/math.sqrt(2*math.pi)*np.exp(-(x-a)**2/2/sigma**2)
+
 
 def YvesWidth(e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     ee = (e-Efermi)/Ecent
@@ -26,10 +30,12 @@ def YvesWidth(e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     w[ind] = Gamma_hole
     return w
 
+
 def lam(e, group, alpha1, alpha2, alpha3):
     # return (28-4)/(2000-100)*(e-100) + 5 + 2000/e**2*(group/11)
     if e==0: e = 1e-5
     return 0.01263*e*(1+alpha1) + 3.74*(1+alpha2) + group*182/e**2*(1+alpha3)
+
 
 def MullerWidth(e0, group, Gamma_hole, Efermi, alpha1, alpha2, alpha3):
     sigma = np.zeros(e0.shape)
@@ -43,6 +49,7 @@ def MullerWidth(e0, group, Gamma_hole, Efermi, alpha1, alpha2, alpha3):
         sigma[i] = Gx
     return sigma
 
+
 def multi_piecewise_width(e, g0,e1,g1,e2,g2,e3,g3):
     sigma = np.zeros(e.shape) + g0
     sigma[(e1<e)&(e<=e2)] = g1
@@ -50,6 +57,7 @@ def multi_piecewise_width(e, g0,e1,g1,e2,g2,e3,g3):
     sigma[e>e3] = g3
     sigma = simpleSmooth(e, sigma, 3)
     return sigma
+
 
 def spline_width(e, Efermi, *g):
     n = len(g)
@@ -68,18 +76,22 @@ def spline_width(e, Efermi, *g):
     sigma[sigma<=0] = 1e-5
     return sigma
 
-def simpleSmooth(e, xanes, sigma, kernel='Cauchy'):
+
+def simpleSmooth(e, xanes, sigma, kernel='Cauchy', sigma2percent=0.1, gaussWeight=0.2):
     new_xanes = np.zeros(e.shape)
     for i in range(e.size):
         if kernel == 'Cauchy':
             kern = kernelCauchy(e, e[i], sigma)
         elif kernel == 'Gauss':
             kern = kernelGauss(e, e[i], sigma)
+        elif kernel == 'C+G':
+            kern = kernelCauchy(e, e[i], sigma) + gaussWeight*kernelGauss(e, e[i], sigma*sigma2percent)
         else: assert False, 'Unknown kernel name'
         norm = utils.integral(e, kern)
         if norm == 0: norm = 1
         new_xanes[i] = utils.integral(e, xanes*kern)/norm
     return new_xanes
+
 
 # def smooth_fdmnes(e, xanes, exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
 #     xanes = np.copy(xanes)
@@ -244,7 +256,12 @@ class DefaultSmoothParams:
         self.params = {'fdmnes':\
             [param('Gamma_hole', 1.5, [0.1,10], 0.4, 0.1), param('Ecent', 26, [1,100], 3, 0.5),\
              param('Elarg', 39, [1,100], 5, 0.5), param('Gamma_max', 15, [5,25], 1, 0.2), efermiParam\
-            ], 'linear':\
+            ], 'simple_Gauss': [param('sigma', 1.5, [0.1,10], 0.1, 0.01)],
+               'simple_Cauchy': [param('sigma', 1.5, [0.1,10], 0.1, 0.01)],
+               'simple_C+G':\
+            [param('sigma', 1.5, [0.1, 10], 0.1, 0.01), param('sigma2percent', 0.1, [0.01, 2], 0.1, 0.01), param('gaussWeight', 0.1, [0.01, 10], 0.1, 0.01)],
+               'simple_Cauchy_then_Gauss': [param('sigma_G', 0.1, [0.01,2], 0.1, 0.01), param('sigma_C', 1.5, [0.1,10], 0.1, 0.01)],
+               'linear':\
             [param('Gamma_hole', -1, [-20,20], 1, 0.1), param('Gamma_max', 22, [-30,50], 2, 0.5), efermiParam\
             ], 'Muller':\
             [param('group', 8, [1,18], 1, 1), param('Gamma_hole', 1, [0.01,5], 0.02, 0.002), efermiParam,\
@@ -371,19 +388,32 @@ def funcFitSmoothHelper(smooth_params, spectrum, smoothType, exp, norm=None):
     return smoothInterpNorm(smooth_params, spectrum, smoothType, exp.spectrum, exp.intervals['fit_norm'], norm)
 
 
-def smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, fit_norm_interval, norm=None):
+def smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, fit_norm_interval=None, norm=None, normType='multOnly'):
+    assert smoothType in ['fdmnes', 'fdmnes_notconv', 'adf', 'simple_Gauss', 'simple_Cauchy', 'simple_Cauchy_then_Gauss', 'simple_C+G', 'linear', 'Muller', 'piecewise', 'multi_piecewise', 'spline', 'optical']
+    if norm is None and 'norm' in smooth_params: norm = smooth_params['norm']
+    if 'normFixType' in smooth_params: normType = smooth_params['normFixType']
     shift = smooth_params['shift']
     spectrum_energy = spectrum.energy + shift
     # t1 = time.time()
-    if (smoothType == 'fdmnes') or (smoothType == 'fdmnes_notconv') or (smoothType == 'adf'):
+    if smoothType in ['fdmnes', 'fdmnes_notconv', 'adf']:
         Gamma_hole, Ecent, Elarg, Gamma_max, Efermi = smooth_params['Gamma_hole'], smooth_params['Ecent'], smooth_params['Elarg'], smooth_params['Gamma_max'], smooth_params['Efermi']
         if not fdmnes.useEpsiiShift: Efermi += shift
-        if smoothType == 'fdmnes':
+        if smoothType in ['fdmnes','fdmnes with linear norm']:
             fdmnes_en1, res = smooth_fdmnes(spectrum_energy, spectrum.intensity, exp_spectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
         elif smoothType == 'fdmnes_notconv':
             fdmnes_en1, res = smooth_fdmnes_notconv(spectrum_energy, spectrum.intensity, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
         else: # adf
             fdmnes_en1, res = smooth_adf(spectrum_energy, spectrum.intensity, exp_spectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi, smooth_params['reflect'])
+    elif smoothType in ['simple_Gauss', 'simple_Cauchy', 'simple_Cauchy_then_Gauss', 'simple_C+G']:
+        if smoothType == 'simple_Cauchy_then_Gauss':
+            res = simpleSmooth(spectrum_energy, spectrum.intensity, smooth_params['sigma_C'], kernel='Cauchy')
+            res = simpleSmooth(spectrum_energy, res, smooth_params['sigma_G'], kernel='Gauss')
+        else:
+            if smoothType == 'simple_C+G':
+                res = simpleSmooth(spectrum_energy, spectrum.intensity, smooth_params['sigma'], kernel='C+G', sigma2percent=smooth_params['sigma2percent'], gaussWeight=smooth_params['gaussWeight'])
+            else:
+                res = simpleSmooth(spectrum_energy, spectrum.intensity, smooth_params['sigma'], kernel=smoothType[7:])
+        fdmnes_en1 = spectrum_energy
     elif smoothType == 'linear':
         Gamma_hole, Gamma_max, Efermi = getSmoothParams(smooth_params, ['Gamma_hole', 'Gamma_max', 'Efermi'])
         fdmnes_en1, res = smooth_linear_conv(spectrum_energy, spectrum.intensity, Gamma_hole, Gamma_max, Efermi)
@@ -405,12 +435,130 @@ def smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, fit_norm
     else: assert False, 'Unknown smooth type '+smoothType
     # t2 = time.time()
     # print("Smooth time=", t2 - t1)
+    if fit_norm_interval is None: fit_norm_interval = [spectrum_energy[0], spectrum_energy[-1]]
     fit_norm_interval = copy.deepcopy(fit_norm_interval)
     if spectrum_energy[0] > fit_norm_interval[0]: fit_norm_interval[0] = spectrum_energy[0]
     if spectrum_energy[-1] < fit_norm_interval[-1]: fit_norm_interval[-1] = spectrum_energy[-1]
-    res, norm = curveFitting.fit_to_experiment_by_norm_or_regression_mult_only(exp_spectrum.energy, exp_spectrum.intensity, fit_norm_interval, fdmnes_en1, res, 0, norm)
-    # if smoothType == 'adf': print(norm)
-    return utils.Spectrum(exp_spectrum.energy,res), norm
+    res, norm = curveFitting.fit_to_experiment_by_norm_or_regression(exp_spectrum.energy, exp_spectrum.intensity, fit_norm_interval, fdmnes_en1, res, 0, norm, normType=normType)
+    return utils.Spectrum(exp_spectrum.energy, res), norm
+
+
+def fitSmoothSimple(spectrum, smoothType, exp_spectrum, initialData=None, fixedParams=None, fit_smooth_interval=None, userBounds=None, plotFileName=None, printDebug=True, smoothInterpNormParams=None):
+    """
+    Find best smooth params
+    :param spectrum: spectrum to smooth
+    :param smoothType: string: 'fdmnes', 'adf', 'optical', ... (see DefaultSmoothParams)
+    :param exp_spectrum:
+    :param initialData: data to initialize DefaultSmoothParams (Efermi, shift)
+    :param fixedParams: dict
+    :param fit_smooth_interval:
+    :param userBounds: dict - user defined intervals for smooth param search
+    :param plotFileName: if None - do not plot
+    :param printDebug:
+    :param smoothInterpNormParams:
+    :return: smooth_params, smoothed_spectrum, best_rFactor
+    """
+    if fixedParams is None: fixedParams = {}
+    if userBounds is None: userBounds = {}
+    if smoothInterpNormParams is None: smoothInterpNormParams = {}
+    if 'norm' not in fixedParams: fixedParams['norm'] = None
+    if initialData is None:
+        if 'shift' in fixedParams: shift = fixedParams['shift']
+        else:
+            shift = 0
+            _, eme, tme = checkShift(exp_spectrum, spectrum, shift, smoothType)
+            shift = eme-tme
+        initialData = {'Efermi': spectrum.energy[0], 'shift': shift}
+    default = DefaultSmoothParams(initialData['Efermi'], initialData['shift'])
+    params = default[smoothType]
+    paramNames = [p['paramName'] for p in params]
+    bounds0 = [[p['leftBorder'], p['rightBorder']] for p in params]
+    bounds = []
+    varParamNames = []
+    for i,p in enumerate(paramNames):
+        if p in fixedParams:
+            v = fixedParams[p]
+            a,b = bounds0[i]
+            assert a <= v <= b, f'{p} not in [{a}; {b}]'
+        else:
+            if p in userBounds:
+                assert userBounds[p][0] < userBounds[p][1]
+                bounds.append(userBounds[p])
+            else:
+                bounds.append(bounds0[i])
+            varParamNames.append(p)
+
+    def makeParams(arg):
+        smooth_params = {}
+        i = 0
+        for p in paramNames:
+            if p in fixedParams: smooth_params[p] = fixedParams[p]
+            else:
+                smooth_params[p] = arg[i]
+                i += 1
+        return smooth_params
+
+    def targetFunc(arg):
+        smooth_params = makeParams(arg)
+        sp, _ = smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, **smoothInterpNormParams)
+        if fit_smooth_interval is None:
+            return utils.rFactor(exp_spectrum.energy, sp.intensity, exp_spectrum.intensity)
+        else:
+            a,b = fit_smooth_interval
+            ind = (a <= exp_spectrum.energy) & (exp_spectrum.energy <= b)
+            return utils.rFactor(exp_spectrum.energy[ind], sp.intensity[ind], exp_spectrum.intensity[ind])
+
+    if len(varParamNames) > 0:
+        x0 = [(b[0]+b[1])/2 for b in bounds]
+        res = scipy.optimize.minimize(targetFunc, x0, bounds=bounds)
+        fmin, xmin = res.fun, res.x
+    else:
+        xmin = []
+        fmin = targetFunc(xmin)
+    smooth_params = makeParams(xmin)
+    if printDebug:
+        for i in range(len(xmin)):
+            a,b = bounds[i]
+            d = b-a
+            x = xmin[i]
+            if abs(x-a)<0.01*d or abs(x-b)<0.01*d:
+                print(f'Parameter {varParamNames[i]} = {x} is near bound [{a};{b}]')
+
+    sp, _ = smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, **smoothInterpNormParams)
+    if plotFileName is not None:
+        sigma = getSmoothWidth(smoothType, sp.energy, smooth_params)
+
+        def plotSmoothWidth(ax):
+            intervals = []
+            colors = []
+            if 'fit_norm_interval' in smoothInterpNormParams:
+                intervals.append(smoothInterpNormParams['fit_norm_interval'])
+                colors.append('blue')
+            if fit_smooth_interval is not None:
+                intervals.append(fit_smooth_interval)
+                colors.append('red')
+            ddd = 0
+            font = FontProperties();
+            font.set_weight('black');
+            font.set_size(20)
+            for color, interval in zip(colors, intervals):
+                txt = ax.text(interval[0], ax.get_ylim()[0] + ddd, '[', color=color, verticalalignment='bottom', fontproperties=font)
+                txt = ax.text(interval[1], ax.get_ylim()[0] + ddd, ']', color=color, verticalalignment='bottom', fontproperties=font)
+                ddd += 0.05
+            if smoothType in ['simple_Gauss', 'simple_Cauchy', 'simple_Cauchy_then_Gauss', 'simple_C+G']: return
+            ax2 = ax.twinx()
+            ax2.plot(exp_spectrum.energy, sigma, c='r', label='Smooth width')
+            ax2.legend()
+
+        title = 'rFactor = %.2g ' % fmin
+        for p in smooth_params: title += (p+'=%.2g ' % smooth_params[p])
+        sp0 = spectrum.clone()
+        if 'shift' in smooth_params: sp0.energy += smooth_params['shift']
+        mi = np.min(exp_spectrum.intensity)
+        ma = np.max(exp_spectrum.intensity)
+        dy = ma-mi
+        plotting.plotToFile(sp0.energy, sp0.intensity, 'initial theory', exp_spectrum.energy, exp_spectrum.intensity, 'exp', sp.energy, sp.intensity, 'theory', fileName=plotFileName, plotMoreFunction=plotSmoothWidth, title=title, ylim=[mi-0.1*dy, ma+0.1*dy])
+    return smooth_params, sp, fmin
 
 
 def createArg(expList, smoothType, fixParamNames, commonParams):
@@ -452,16 +600,18 @@ def getOneArg(argsOfList, exp, smoothType):
                 arg['value'] = found[0]['value']
     return args
 
-def getNorm(normType, argsOfList, arg):
-    if normType == 'variablePrivate': norm = None
+
+def getNorm(normFixType, argsOfList, arg):
+    if normFixType == 'variablePrivate': norm = None
     else:
-        if normType == 'variableCommon': norm = value(argsOfList, 'norm')
+        if normFixType == 'variableCommon': norm = argsOfList['norm']
         else:
-            norm = value(arg, 'norm') # normType == 'fixed' => норма должна сидеть в параметрах по умолчанию
+            norm = arg['norm'] # normFixType == 'fixed' => норма должна сидеть в параметрах по умолчанию
             assert norm is not None, 'When norm is fixed it must be included in deafault smooth parameters'
     return norm
 
-def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, normType, fitDiffFrom):
+
+def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, normFixType, fitDiffFrom):
     l2 = []
     diffs = []
     es = []
@@ -471,7 +621,7 @@ def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, no
     for j in range(len(expList)):
         exp = expList[j]
         arg = getOneArg(argsOfList, exp, smoothType)
-        norm = getNorm(normType, argsOfList, arg)
+        norm = getNorm(normFixType, argsOfList, arg)
         smoothed_xanes, normOut = funcFitSmoothHelper(arg, xanesList[j], smoothType, exp, norm)
         # print(normOut)
         i = (exp.intervals['fit_smooth'][0]<=exp.spectrum.energy) & (exp.spectrum.energy<=exp.intervals['fit_smooth'][1])
@@ -500,16 +650,21 @@ def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, no
         return np.sqrt(utils.integral(e, maxDiff))
     else: assert False, 'Unknown target func'
 
+
 # fixParamNames - массив фиксируемых параметров (значения берутся из значений по умолчанию в экспериментах)
 # commonParams0 - ассоциативный массив начальных значений общих параметров (интервалы поиска берутся из первого эксперимента)
 # норма может быть: фиксированной (тогда она должна быть задана в параметрах каждого эксперимента), подбираемой: общей или частными
 # fitDiffFrom = {'exp':exp, 'xanes':xanes}
-def fitSmooth(expList, xanesList0, smoothType='fdmnes', fixParamNames=[], commonParams0={}, targetFunc='l2(max)', crossValidationExp=None, crossValidationXanes=None, fitDiffFrom=None, optimizeWithoutPlot=False, folder='result'):
+def fitSmooth(expList, xanesList0, smoothType='fdmnes', normType='multOnly', fixParamNames=None, commonParams0=None, targetFunc='l2(max)', crossValidationExp=None, crossValidationXanes=None, fitDiffFrom=None, optimizeWithoutPlot=False, folder='result'):
+    if fixParamNames is None: fixParamNames = []
+    if commonParams0 is None: commonParams0 = {}
+    expNames = [exp.name for exp in expList]
+    assert len(np.unique(expNames)) == len(expList), 'Duplicate project names!\n'+str(expNames)
     xanesList = copy.deepcopy(xanesList0)
-    if 'norm' in fixParamNames: normType = 'fixed'
+    if 'norm' in fixParamNames: normFixType = 'fixed'
     else:
-        if 'norm' in commonParams0: normType = 'variableCommon'
-        else: normType = 'variablePrivate'
+        if 'norm' in commonParams0: normFixType = 'variableCommon'
+        else: normFixType = 'variablePrivate'
     if not optimizeWithoutPlot:
         for i in range(len(expList)):
             os.makedirs(folder+'/'+expList[i].name, exist_ok=True)
@@ -526,13 +681,13 @@ def fitSmooth(expList, xanesList0, smoothType='fdmnes', fixParamNames=[], common
         res = funcFitSmoothList(arg, *params)
         return res
 
-    fmin, smooth_params_vec = optimize.minimize(funcFitSmoothList1, arg0_1, bounds, fun_args=(expList, xanesList, smoothType, targetFunc, normType, fitDiffFrom), method='scipy')
+    fmin, smooth_params_vec = optimize.minimize(funcFitSmoothList1, arg0_1, bounds, fun_args=(expList, xanesList, smoothType, targetFunc, normFixType, fitDiffFrom), method='scipy')
     # print(fmin)
     smooth_params = copy.deepcopy(arg0)
     for i in range(len(arg0)): smooth_params[i]['value'] = smooth_params_vec[i]
     if optimizeWithoutPlot: return smooth_params
     with open(folder+'/func_smooth_value.txt', 'w') as f: json.dump(fmin, f)
-    with open(folder+'/args_smooth.txt', 'w') as f: json.dump(smooth_params, f)
+    with open(folder+'/args_smooth.txt', 'w') as f: json.dump(smooth_params.__dict__, f)
     with open(folder+'/args_smooth_human.txt', 'w') as f: f.write(optimize.arg2string(smooth_params))
     # выдаем предостережение, если достигли границы одного из параметров
     for p in smooth_params:
@@ -545,16 +700,15 @@ def fitSmooth(expList, xanesList0, smoothType='fdmnes', fixParamNames=[], common
     for j in range(len(expList)):
         exp = expList[j]
         arg = getOneArg(argsOfList, exp, smoothType)
-        norm = getNorm(normType, argsOfList, arg)
+        norm = getNorm(normFixType, argsOfList, arg)
         fdmnes_xan, _ = funcFitSmoothHelper(arg, xanesList[j], smoothType, exp, norm)
         smoothed_xanes.append(fdmnes_xan)
-        arg
         with open(folder+'/'+expList[j].name+'/args_smooth.txt', 'w') as f: json.dump(arg.to_dict(), f)
         with open(folder+'/'+expList[j].name+'/args_smooth_human.txt', 'w') as f: f.write(arg2string(arg))
-        shift = value(arg,'shift')
+        shift = arg['shift']
         plotting.plotToFolder(folder+'/'+expList[j].name, exp, xanesList[j], fdmnes_xan, append = {'data':getSmoothWidth(smoothType, exp.spectrum.energy, arg), 'label':'smooth width', 'twinx':True}, fileName='xanes')
         if fitDiffFrom is not None:
-            purity = value(arg, 'purity')
+            purity = arg['purity']
             fitDiffFromExpXanes = fitDiffFrom['exp'].xanes
             fitDiffFromXanes = fitDiffFrom['xanes']
             fitDiffFromExpXanes_absorb = np.interp(exp.spectrum.energy, fitDiffFromExpXanes.energy, fitDiffFromExpXanes.intensity)
@@ -599,6 +753,7 @@ def deconvolve(e, xanes, smooth_params):
 # параметры размазки и новый диапазон энергии беруться из эксперимента. norm - можно задавать, а можно писать None для автоопределения
 # cacheStatus = True if read from cache
 def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_interval, norm=None, folder=None, returnCacheStatus=False, energy=None):
+    assert len(exp_spectrum.energy) > 0
     xanes_df_is_dataframe = isinstance(xanes_df, pd.DataFrame)
     if folder is not None:
         folder = utils.fixPath(folder)

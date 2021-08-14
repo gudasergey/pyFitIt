@@ -34,6 +34,7 @@ def createPartialProject(name = None, expSpectrum = None, intervals = None, fdmn
 
 class LimitedDictClass(dict):
     def __init__(self, allowedKeys=None, userSetitemHook=None):
+        super().__init__()
         if allowedKeys is None: allowedKeys = []
         self._keys = list(allowedKeys)
         for key in self._keys: self[key] = None
@@ -58,6 +59,9 @@ class LimitedDictClass(dict):
         for key in result._keys: result[key] = copy.deepcopy(self[key])
         result.userSetitemHook = self.userSetitemHook
         return result
+
+    def __delitem__(self, k):
+        dict.__setitem__(self, k, None)
 
 
 def LimitedDictProperty(propertyName):
@@ -105,11 +109,13 @@ class Project(object):
         def itemHookSmooth(smooth_type):
             def setitemHookSmooth(th, key, val):
                 if val == '': return
-                assert val is not None, 'key='+key+' val='+val
+                assert val is not None, 'key='+key+' val='+str(val)
                 if key == 'shift':
                     self.defaultSmoothParams[smooth_type]['shift'] = optimize.param('shift', val, [val-20, val+20], 1, 0.25)
                 elif key == 'norm':
                     self.defaultSmoothParams[smooth_type].params.append(optimize.param('norm', val, [val/10, val*10], val/10, val/10))
+                elif key == 'Efermi':
+                    self.defaultSmoothParams[smooth_type]['Efermi'] = optimize.param('Efermi', val, [val - 20, val + 20], 1, 0.25)
                 else:
                     self.defaultSmoothParams[smooth_type][key] = val
             return setitemHookSmooth
@@ -207,7 +213,7 @@ def checkProject(projectConstructor, checkProjectParameters = {}, checkMoleculaP
     display(Javascript('$(this.element).addClass("fitBySlidersOutput");'))
 
 
-def saveAsProject(fileName = 'project.py'):
+def saveAsProject(fileName='project.py'):
     if not utils.isJupyterNotebook():
         print('Can\'t save, because the script is running not from Jupyter notebook system')
         return

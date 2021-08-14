@@ -1,7 +1,7 @@
-from . import utils, plotting, optimize, ML
+from . import utils, plotting, optimize, ML, descriptor
 import numpy as np
 import pandas as pd
-import scipy, os, shutil, itertools, copy, warnings
+import scipy, os, shutil, itertools, copy, warnings, sklearn, logging, sys
 import matplotlib.pyplot as plt
 
 
@@ -14,8 +14,27 @@ def findConcentrations(energy, xanesArray, expXanes, fixConcentrations=None):
     :param fixConcentrations: {index:value,...}
     :return: array of concentrations
     """
-    assert len(xanesArray.shape) == 2
-    n = xanesArray.shape[0]
+    def distToUnknown(mixture):
+        return utils.rFactor(energy, mixture, expXanes)
+
+    def makeMixture(c):
+        return np.sum(xanesArray * c.reshape(-1, 1), axis=0)
+
+    return findConcentrationsAbstract(distToUnknown, len(xanesArray), makeMixture, fixConcentrations=fixConcentrations)
+
+
+def findConcentrationsAbstract(distToUnknown, componentCount, makeMixture, startConcentrations=None, fixConcentrations=None, trysCount=1):
+    """
+    Concentration search
+    :param distToUnknown: function(mixture) to return distance to unknown experiment
+    :param componentCount: component count
+    :param makeMixture: function(concentrations) to calculate mixture spectrum/descriptors
+    :param startConcentrations: start point for optimization
+    :param fixConcentrations: {index:value,...}
+    :param trysCount: 'all pure' or number. if 'all pure', try starting from all pure components and one - with all equal concentrations. If number - try starting from random concentrations. Choose best
+    :return: array of optimized concentrations
+    """
+    n = componentCount
     assert n >= 2
     fn = 0 if fixConcentrations is None else len(fixConcentrations)
     fixInd = np.sort(np.array(list(fixConcentrations.keys()))) if fn>0 else np.array([])
@@ -27,6 +46,11 @@ def findConcentrations(energy, xanesArray, expXanes, fixConcentrations=None):
 
     notFixInd = np.sort(np.setdiff1d(np.arange(n), fixInd))
 
+    if startConcentrations is not None:
+        assert len(startConcentrations) == componentCount
+        if fn > 0: assert np.all(startConcentrations[fixInd] == fixVal)
+        startConcentrations = startConcentrations[notFixInd][:-1]
+
     def expand(partial_c):
         full_c = np.zeros(n)
         full_c[notFixInd[:-1]] = partial_c
@@ -36,8 +60,8 @@ def findConcentrations(energy, xanesArray, expXanes, fixConcentrations=None):
         return full_c
 
     def func0(c):
-        approxXanes = np.sum(xanesArray*c.reshape(-1,1), axis=0)
-        return np.sqrt(utils.integral(energy, (approxXanes-expXanes)**2))
+        mixture = makeMixture(c)
+        return distToUnknown(mixture)
 
     def func(partial_c):
         c = expand(partial_c)
@@ -56,199 +80,62 @@ def findConcentrations(energy, xanesArray, expXanes, fixConcentrations=None):
     if m >= 3:
         a = np.ones(m-1)
         constrains = (scipy.optimize.LinearConstraint(a, 0, upperBound, keep_feasible=True),)
-    result = scipy.optimize.minimize(func, np.ones(m-1)*upperBound/m, bounds=[[0,upperBound]]*(m-1), constraints=constrains)
-    if not result.success:
-        warnings.warn("scipy.optimize.minimize can't find optimum. Result = "+str(result))
+    if trysCount == 'all pure':
+        assert startConcentrations is None
+        results = []
+        for i in range(m-1):
+            startConcentrations = np.zeros(m-1)
+            startConcentrations[i] = upperBound
+            result = scipy.optimize.minimize(func, startConcentrations, bounds=[[0, upperBound]] * (m - 1), constraints=constrains)
+            results.append(result)
+        results.append(scipy.optimize.minimize(func, np.zeros(m - 1), bounds=[[0, upperBound]] * (m - 1), constraints=constrains))
+        results.append(scipy.optimize.minimize(func, np.ones(m-1)*upperBound/m, bounds=[[0, upperBound]] * (m - 1), constraints=constrains))
+        best_i = np.argmin([r.fun for r in results])
+        result = results[best_i]
+    else:
+        assert isinstance(trysCount, int)
+        c = np.random.dirichlet(alpha=1 * np.ones(m), size=trysCount)
+        for try_i in range(trysCount):
+            if startConcentrations is None:
+                if trysCount == 1:
+                    sConcentrations = np.ones(m-1)*upperBound/m
+                else:
+                    sConcentrations = (c[try_i]/upperBound)[:-1]
+            else:
+                assert np.sum(sConcentrations) <= upperBound
+                assert trysCount == 1, 'When start concentration is not None - all trys give the same result'
+            result = scipy.optimize.minimize(func, sConcentrations, bounds=[[0,upperBound]]*(m-1), constraints=constrains)
+    # if not result.success:
+    #     warnings.warn("scipy.optimize.minimize can't find optimum. Result = "+str(result))
     c = result.x
     c = expand(c)
     return result.fun, c
 
 
-def calcAndPlotMixtureLabelMap(data, predictByFeatures, label_names, mix_features_func, concentrations, folder, use):
-    """For every label plot 2d map (label x label) with color - minimal distance between unknown row and mixture of knowns
-
-    :param data: data base of descriptor values
-    :param predictByFeatures: list of predictors to use for distance calculation
-    :param label_names: names of data columns which are labels
-    :param mix_features_func: f(component_descriptors, concentrations) -> descriptors for mixture (component_descriptors[component][descr_ind])
-    :param concentrations: array or component count - to find best
-    :param folder: [description]
-    :param use: 'exp&theory', 'unknown', 'exp'
-    """
-    nMean = data.loc[:, predictByFeatures].mean(axis=0).to_numpy()
-    nStd = data.loc[:, predictByFeatures].std(axis=0).to_numpy()
-
-    def normalize(x): return (x - nMean) / nStd
-
-    unk_ind = np.isin(data.Ind, unknownExperiments)
-    unknownData = data.loc[unk_ind].reset_index(drop=True)
-    data = data.loc[~unk_ind]
-    data.reset_index(drop=True, inplace=True)
-
-    if os.path.exists(folder): shutil.rmtree(folder)
-    os.makedirs(folder, exist_ok=True)
-
-    labels = {}
-    if use == 'unknown':
-        m = np.min(data.loc[:, predictByFeatures], axis=0)
-        M = np.max(data.loc[:, predictByFeatures], axis=0)
-        m, M = m - 0.2 * (M - m), M + 0.2 * (M - m)
-        linspaces = []
-        for i in range(len(m)): linspaces.append(np.linspace(m[i], M[i], 10))
-        grid = list(np.meshgrid(*linspaces))
-        for i in range(len(grid)): grid[i] = grid[i].reshape(-1)
-        descriptor_values = np.array(grid).T
-        quality, predictions, models = getQuality(data, predictByFeatures, m=5, returnModels=True)
-        for label in label_names:
-            if label not in data.columns: continue
-            labels[label] = models[label].predict(descriptor_values)
-    elif use in ['exp&theory', 'exp']:
-        ind = np.arange(data.shape[0]) if use == 'exp&theory' else data.Ind < 25
-        descriptor_values = data.loc[ind, predictByFeatures].to_numpy()
-        names = data.loc[ind, 'Ind'].to_numpy()
-        for label in label_names:
-            if label not in data.columns: continue
-            labels[label] = data.loc[ind, label].to_numpy()
-    else: assert False, 'Unknown use value'
-
-    if isinstance(concentrations, int) and concentrations > 1:
-        component_count = concentrations
-        concentrations = None
-        conc_search = True
-    else:
-        component_count = len(concentrations)
-        conc_search = False
-        assert abs(np.sum(concentrations) - 1) < 1e-6
-    result = {}
-    for unk_exp in unknownExperiments:
-        if unk_exp not in result: result[unk_exp] = {}
-        unk_desc = unknownData.loc[unknownData.Ind == unk_exp, predictByFeatures].to_numpy()
-        for label in labels:
-            if label not in result[unk_exp]:
-                result[unk_exp][label] = [pd.DataFrame(columns=predictByFeatures + ['C']) for i in range(component_count)] + [pd.DataFrame(columns=predictByFeatures + ['norm'])]
-            m = np.min(data[label])
-            M = np.max(data[label])
-            d = (M - m) / 10
-            linspaces = []
-            for i in range(component_count):
-                if isClassification(data, label):
-                    linspaces.append(np.unique(data[label]))
-                else:
-                    linspaces.append(np.linspace(m - d, M + d, 50))
-            grid = list(np.meshgrid(*linspaces))
-            grid_shape = grid[0].shape
-            for i in range(len(grid)): grid[i] = grid[i].reshape(-1)
-            label_grid = np.array(grid).T
-            plot_norm = np.zeros(label_grid.shape[0]) + 100
-            sl = np.sort(data[label])
-            rad = np.mean(sl[1:] - sl[:-1]) * 2
-            print(label, 'rad =', rad)
-
-            if conc_search:
-                result_conc = np.zeros(plot_norm.shape)
-                result_components = np.zeros((plot_norm.shape[0], component_count), dtype=np.int)
-            # permutations - because concentrations are sorted in descending order
-            combinations = itertools.permutations(range(len(descriptor_values)), component_count)
-            for ic in combinations:
-                ic = list(ic)
-                desc = descriptor_values[ic, :]
-                lab = labels[label][ic]
-                if conc_search:
-                    assert component_count == 2, 'TODO'
-                    large_conc = np.linspace(0.5, 1, 10)
-                    concentrations = np.zeros(component_count)
-                    nrms = np.zeros(large_conc.size)
-                    for i in range(len(large_conc)):
-                        concentrations[0] = large_conc[i]
-                        concentrations[1] = 1 - concentrations[0]
-                        mix_desc = mix_features_func(desc, concentrations)
-                        nrms[i] = np.linalg.norm(normalize(unk_desc) - normalize(mix_desc))
-                    best_i = np.argmin(nrms)
-                    concentrations[0] = large_conc[best_i]
-                    concentrations[1] = 1 - concentrations[0]
-                mix_desc = mix_features_func(desc, concentrations)
-                nrm = np.linalg.norm(normalize(unk_desc) - normalize(mix_desc))
-                if conc_search:
-                    ind = np.argmin(np.array([plot_norm, nrm + np.linalg.norm(lab - label_grid, axis=1) / rad]), axis=0)
-                    result_conc[ind == 1] = concentrations[0]
-                    for k in range(len(ic)):
-                        result_components[ind == 1, k] = names[ic[k]]
-                plot_norm = np.min(np.array([plot_norm, nrm + np.linalg.norm(lab - label_grid, axis=1) / rad]), axis=0)  # result[unk_exp][label][-1].append({'norm':nrm})  # result[unk_exp][label][-1].loc[-1,predictByFeatures] = mix_desc  # for i in range(component_count):  #     result[unk_exp][label][i].append({'C':concentrations[i]})  #     result[unk_exp][label][i].loc[-1,predictByFeatures] = desc[i]
-            if label_grid.shape[1] != 2:
-                assert False, 'TODO - take min by all other dimensions'
-            fig, ax = plotting.createfig()
-            # colorMap = truncate_colormap('hsv', minval=0, maxval=np.max(plot_norm))
-            minnorm = np.min(plot_norm);
-            maxnorm = np.max(plot_norm)
-            maxnorm = minnorm + 0.3 * (maxnorm - minnorm)  # 0.3*(maxnorm - minnorm)
-            CF = ax.contourf(label_grid[:, 0].reshape(grid_shape), label_grid[:, 1].reshape(grid_shape), plot_norm.reshape(grid_shape), cmap='plasma', extend='both', vmin=minnorm, vmax=maxnorm)
-            cbar = fig.colorbar(CF, ax=ax, extend='max', orientation='vertical')
-            if label in labelMaps:
-                cbarTicks = [None] * len(labelMaps[label])
-                for name in labelMaps[label]:
-                    cbarTicks[labelMaps[label][name]] = name
-                ax.set_xticks(sorted(list(labelMaps[label].values())))
-                ax.set_yticks(sorted(list(labelMaps[label].values())))
-                ax.set_xticklabels(cbarTicks)
-                ax.set_yticklabels(cbarTicks)
-            if isClassification(data, label):
-                n = len(np.unique(data[label]))
-                for i in range(len(plot_norm)):
-                    ax.scatter([label_grid[i, 0]], [label_grid[i, 1]], (300 / n) ** 2, c=[plot_norm[i]], cmap='plasma', vmin=minnorm, vmax=maxnorm, marker='s')
-            if not conc_search:
-                ax.set_xlabel(label + ', conc = ' + ('%.2f' % concentrations[0]))
-                ax.set_ylabel(label + ', conc = ' + ('%.2f' % concentrations[1]))
-            plotting.savefig(folder + os.sep + str(unk_exp) + '_' + label + '.png', fig)
-            plotting.closefig(fig)
-            # save to file
-            cont_data = pd.DataFrame()
-            cont_data['1_' + label + '_' + ('%.2f' % concentrations[0])] = label_grid[:, 0]
-            cont_data['2_' + label + '_' + ('%.2f' % concentrations[1])] = label_grid[:, 1]
-            cont_data['norm'] = plot_norm
-            if conc_search:
-                cont_data['main_concentration'] = result_conc
-                for k in range(component_count):
-                    cont_data[f'component_{k}'] = result_components[:, k]
-                best_mixtures = {}
-                ind = np.argsort(plot_norm)
-                i = 0
-                while i < len(plot_norm):
-                    ii = ind[i]
-                    mixture = ''
-                    for k in range(component_count):
-                        mixture += f'{result_components[ii, k]}({label_grid[ii, k]})'
-                        if k != component_count - 1: mixture += ' + '
-                    if mixture not in best_mixtures: best_mixtures[mixture] = plot_norm[ii]
-                    if len(best_mixtures) > 5: break
-                    i += 1
-                best_mixtures = [{'norm': best_mixtures[m], 'mixture': m} for m in best_mixtures]
-                best_mixtures = sorted(best_mixtures, key=lambda p: p['norm'])
-                with open(folder + os.sep + str(unk_exp) + '_' + label + '_best_mix.txt', 'w') as f:
-                    f.write('norm: mixture = n1(label1) + n2(label2)\n')
-                    for p in best_mixtures:
-                        f.write(str(p['norm']) + ': ' + p['mixture'] + '\n')
-            cont_data.to_csv(folder + os.sep + str(unk_exp) + '_' + label + '.csv', index=False)  # if label=='Type of ligands_new': exit(0)
-
-
-def plotMixtureLabelMap(componentLabels, label_names, label_bounds, labelMaps, distsToExp, concentrations, componentNames, folder):
+def plotMixtureLabelMap(componentLabels, label_names, label_bounds, labelMaps, distsToExp, concentrations, componentNames, folder, fileNamePostfix=''):
     """For every label plot 2d map (label x label) with color - minimal distance between unknown experiment and mixture of knowns
 
     :param componentLabels: array of label tables (for each component - one table) with size componentCount x spectraCount x labelCount
     :param label_names: list of names of labels
     :param label_bounds: list of pairs [label_min, label_max]
     :param labelMaps: strings for values of categorical labels. dict labelName:{valueName:value,...}
-    :param distsToExp: distance to experiment for each row of componentLabels tables (spectra count values)
+    :param distsToExp: array of distances to experiment for each row of componentLabels tables (spectraCount values)
     :param concentrations: 2d array spectraCount x componentCount
     :param componentNames: 2d array spectraCount x componentCount
     :param folder: folder to save plots
+    :param fileNamePostfix: to save plots
     """
-
+    if labelMaps is None: labelMaps = {}
     os.makedirs(folder, exist_ok=True)
+    spectraCount = concentrations.shape[0]
     component_count = concentrations.shape[1]
     assert np.all(np.abs(np.sum(concentrations, axis=1) - 1) < 1e-6), "Bad concentrations array: "+str(concentrations)
     assert len(label_bounds) == len(label_names)
-    assert componentLabels.shape[-1] == len(label_names)
+    assert len(componentLabels.shape) == 3
+    assert componentLabels.shape[-1] == len(label_names), f'{componentLabels.shape[-1]} != {len(label_names)}'
+    assert componentLabels.shape[1] == spectraCount
     assert componentLabels.shape[0] == component_count
+    assert len(distsToExp) == spectraCount
     # sort concentrations in descending order
     concentrations = np.copy(concentrations)
     componentNames = np.copy(componentNames)
@@ -322,7 +209,7 @@ def plotMixtureLabelMap(componentLabels, label_names, label_bounds, labelMaps, d
                     # result_conc_2d[k] = np.take_along_axis(result_conc_2d[k], np.expand_dims(ind, axis=-1), axis=-1)
                     # result_components_2d[k] = np.take_along_axis(result_components_2d[k], np.expand_dims(ind, axis=-1), axis=-1)
             plot_norm_2d = plot_norm_2d[:,:,0]
-        fig, ax = plotting.createfig()
+        fig, ax = plotting.createfig(figsize=(6.2,4.8))
         # colorMap = truncate_colormap('hsv', minval=0, maxval=np.max(plot_norm))
         minnorm = np.min(plot_norm_2d)
         maxnorm = np.max(plot_norm_2d)
@@ -349,43 +236,65 @@ def plotMixtureLabelMap(componentLabels, label_names, label_bounds, labelMaps, d
                     ax.scatter([lg0[i]], [lg1[i]], (300 / n) ** 2, c=[pn[i]], cmap='plasma', vmin=minnorm, vmax=maxnorm, marker='s')
         ax.set_xlabel(label)
         ax.set_ylabel(label)
-        plotting.savefig(folder + os.sep + 'map_' + label + '.png', fig)
+        if fileNamePostfix == '': fileNamePostfix1 = '_' + label
+        else: fileNamePostfix1 = fileNamePostfix
+        plotting.savefig(folder + os.sep + 'map' + fileNamePostfix1 + '.png', fig, figdpi=300)
         plotting.closefig(fig)
         # save to file
         cont_data = pd.DataFrame()
         cont_data['1_' + label] = label_grid[:, 0]
         cont_data['2_' + label] = label_grid[:, 1]
         cont_data['norm'] = plot_norm
-        cont_data.to_csv(folder + os.sep + 'map_' + label + '.csv', index=False)  # if label=='Type of ligands_new': exit(0)
         for k in range(component_count):
             cont_data[f'concentration_{k}'] = result_conc[:,k]
             cont_data[f'component_{k}'] = result_components[:, k]
-        cont_data.to_csv(folder + os.sep + 'map_' + label + '.csv', index=False)  # if label=='Type of ligands_new': exit(0)
+        cont_data.to_csv(folder + os.sep + 'map' + fileNamePostfix1 + '.csv', index=False)
+
+        def makeMixtureString(labels, componentNames, concentrations):
+            mixture = ''
+            for k in range(component_count):
+                lab = labels[k]
+                if label in labelMaps:
+                    lab = invLabelMaps[label][lab]
+                else:
+                    if lab == int(lab): lab = int(lab)
+                    else: lab = f'{lab:.2}'
+                mixture += f'{componentNames[k]}({lab})*{concentrations[k]:.2}'
+                if k != component_count - 1: mixture += ' + '
+            return mixture
 
         best_mixtures = {}
         ind = np.argsort(plot_norm)
         i = 0
         while i < len(plot_norm):
             ii = ind[i]
-            mixture = ''
-            for k in range(component_count):
-                lab = label_grid[ii, k]
-                if label in labelMaps:
-                    lab = invLabelMaps[label][lab]
-                mixture += f'{result_components[ii, k]}({lab})'
-                if k != component_count - 1: mixture += ' + '
+            mixture = makeMixtureString(label_grid[ii], result_components[ii], result_conc[ii])
             if mixture not in best_mixtures: best_mixtures[mixture] = plot_norm[ii]
             if len(best_mixtures) > 5: break
             i += 1
         best_mixtures = [{'norm': best_mixtures[m], 'mixture': m} for m in best_mixtures]
         best_mixtures = sorted(best_mixtures, key=lambda p: p['norm'])
-        with open(folder + os.sep + 'best_mix_' + label + '.txt', 'w') as f:
-            f.write('norm: mixture = n1(label1) + n2(label2)\n')
+
+        best_mixtures2 = []
+        # add more results
+        ind = np.argsort(distsToExp)
+        ind = ind[:100]
+        for i in ind:
+            mixture = makeMixtureString(componentLabels[:,i,i_lab], componentNames[i], concentrations[i])
+            best_mixtures2.append({'norm':distsToExp[i], 'mixture':mixture})
+
+        with open(folder + os.sep + 'best_mix' + fileNamePostfix1 + '.txt', 'w') as f:
+            f.write('norm: mixture = n1(label1)*c1')
+            for j in range(2,component_count+1): f.write(f' + n{j}(label{j})*c{j}')
+            f.write('\n')
             for p in best_mixtures:
+                f.write(str(p['norm']) + ': ' + p['mixture'] + '\n')
+            f.write('\n')
+            for p in best_mixtures2:
                 f.write(str(p['norm']) + ': ' + p['mixture'] + '\n')
 
 
-def tryAllMixtures(unknownExp, componentCandidates, componentCount, energyRange, outputFolder, rFactorToleranceMultiplier=1.1, maxGraphNumToPlot=50, plotMixtureLabelMapParam=None):
+def tryAllMixtures_old(unknownExp, componentCandidates, componentCount, energyRange, outputFolder, rFactorToleranceMultiplier=1.1, maxGraphNumToPlot=50, plotMixtureLabelMapParam=None):
     """
     Try to fit unknown spectrum by all possible linear combinations of componentCount spectra from componentCandidates. Plots sorted best results in outputFolder.
 
@@ -606,6 +515,219 @@ def tryAllMixturesAbstract(distToExperiment, makeMixture, componentCandidates, c
     return data
 
 
+def tryAllMixtures(unknownCharacterization, componentCount, mixtureTrysCount, optimizeConcentrations, optimizeConcentrationsTrysCount, singleComponentData, label_names, folder, fileNamePostfix='', spectraFolderPostfix='', labelMapsFolderPostfix='', label_bounds=None, labelMaps=None, componentNameColumn=None, calcDescriptorsForSingleSpectrumFunc=None, randomSeed=0, makeMixtureOfSpectra=None, plotSpectrumType=None, maxSpectraCountToPlot=50, unknownSpectrumToPlot=None):
+    """
+    Try to fit unknown spectrum/descriptors by all possible linear combinations of componentCount spectra from componentCandidates using different label values. Plots mixture label map, best mixture spectra
+
+    :param unknownCharacterization: dict('type', ...)
+                1) 'type':'distance function',  'function': function(mixtureSpectrum, mixtureDescriptors) to return distance to unknown experiment. mixtureDescriptors - result of calcDescriptorsForSingleSpectrumFunc
+                2) 'type':'spectrum', 'spType': type of spectrum from singleComponentData sample (default - default), 'spectrum':unknownSpectrum (intensity only, len == len(energy[spType] in singleComponentData)
+                3) 'type':'descriptors', 'paramNames':list of descriptor names to use for distance, 'paramValues':array of unknown spectrum descriptor values
+    :param componentCount: >=1 number of components to compose the mixture
+    :param mixtureTrysCount: string 'all combinations of singles', 'all combinations for each label' or number or dict {label:number}. In case of a number mixtures are chosen with uniform label distribution in a loop for each label
+    :param optimizeConcentrations: bool. False - choose random concentrations, True - find optimal by minimizing distance to unknown
+    :param optimizeConcentrationsTrysCount: 'all pure' or number. if 'all pure', try starting from all pure components and one - with all equal concentrations. If number - try starting from random concentrations. Choose best
+    :param singleComponentData: Sample of different single component spectra and descriptors and labels
+    :param label_names: list of names of labels
+    :param folder: folder to save plots
+    :param fileNamePostfix: to save plots
+    :param labelMapsFolderPostfix:
+    :param spectraFolderPostfix:
+    :param label_bounds: list of pairs [label_min, label_max]. If None, derive from  singleComponentData
+    :param labelMaps: strings for values of categorical labels. dict labelName:{valueName:value,...}
+    :param componentNameColumn: if None use index
+    :param calcDescriptorsForSingleSpectrumFunc: function(spectrum) used when unknownCharacterization type is 'descriptors'. Should return array of the same length as 'paramValues' or dict of descriptors (should contain subset paramValues). spectrum - one spectrum or dict of spectra for different spTypes (depends on singleComponentData)
+    :param randomSeed: random seed
+    :param makeMixtureOfSpectra: function(inds, concentrations) to calculate mixture of spectra by given concentrations and spectra indices (returns intensity only or dict {spType: intensity only} for multiple spectra types)
+    :param plotSpectrumType: 'all' or name of spType inside sample to plot (when unknownCharacterization['type']=='spectrum' default to plot unknownCharacterization['spType'] only)
+    :param maxSpectraCountToPlot: plot not more than maxSpectraCountToPlot spectra
+    :param unknownSpectrumToPlot: Spectrum or array of the same length as singleComponentData or dict spType: Spectrum or array
+    """
+    assert 'default' not in label_names
+    n = singleComponentData.getLength()
+    if componentNameColumn is not None: assert len(np.unique(singleComponentData.params[componentNameColumn])) == n, 'Duplicate names'
+    np.random.seed(randomSeed)
+    # =================== setup runType and mixtureTrysCount ===================
+    runType = 'each label'
+    if mixtureTrysCount == 'all combinations of singles':
+        runType = 'one'
+        mixtureTrysCount = {'default': int(scipy.special.comb(n, componentCount, repetition=True))}
+    elif mixtureTrysCount == 'all combinations for each label':
+        mixtureTrysCount = {}
+        for label in label_names:
+            if ML.isClassification(singleComponentData.params, label):
+                all_label_values = np.unique(singleComponentData.params[label])
+                mixtureTrysCount[label] = int(scipy.special.comb(len(all_label_values), componentCount, repetition=True))
+            else:
+                mixtureTrysCount[label] = 100 if optimizeConcentrations else 1000
+    elif isinstance(mixtureTrysCount, str):
+        assert False, f'Unknown mixtureTrysCount string: {mixtureTrysCount}. It sholud be "all combinations of singles" or "all combinations for each label"'
+    elif isinstance(mixtureTrysCount, int):
+        mixtureTrysCount = {label:mixtureTrysCount for label in label_names}
+    else: assert isinstance(mixtureTrysCount, dict) and len(mixtureTrysCount) == len(label_names)
+
+    # =================== generate mixtures ===================
+    label_names_surrogate = ['default'] if runType == 'one' else label_names
+    if componentCount == 1:
+        if runType == 'one':
+            assert mixtureTrysCount <= n
+            all_ind = {'default': np.random.choice(n, mixtureTrysCount, replace=False).reshape(-1,1)}
+        else:
+            all_ind = {label: generateUniformLabelDistrib(mixtureTrysCount, componentCount, label, singleComponentData) for label in label_names}
+        mixtureData = {label: singleComponentData.takeRows(all_ind[label].reshape(-1)) for label in label_names_surrogate}
+    else:
+        mixtureData = {}; componentLabels = {}; concentrations = {}; componentNames = {}
+        for label in label_names_surrogate:
+            makeUniformLabelDistrib = None if runType == 'one' else label
+            mixtureData[label], componentLabels[label], concentrations[label], componentNames[label] = generateMixtureOfSample(mixtureTrysCount[label], componentCount, singleComponentData, label_names, addDescrFunc=None, makeMixtureOfSpectra=makeMixtureOfSpectra, makeMixtureOfLabel=None, dirichletAlpha=1, randomSeed=np.random.randint(1000000), returnNotMixLabels=True, componentNameColumn=componentNameColumn, makeUniformLabelDistrib=makeUniformLabelDistrib)
+
+    # =================== concentration optimization ===================
+    distsToExp = {label: np.zeros((mixtureTrysCount[label],1)) for label in label_names_surrogate}
+    if unknownCharacterization['type'] == 'descriptors':
+        std = np.std(singleComponentData.params.loc[:, unknownCharacterization['paramNames']].to_numpy(), axis=0).reshape(1, -1)
+        # print('std = ', std, unknownCharacterization['paramNames'])
+        assert set(unknownCharacterization['paramNames']) <= set(singleComponentData.paramNames)
+
+    def distToUnknown(mixture):
+        if isinstance(mixture, tuple):
+            mixtureSpectrum, mixtureDescriptors = mixture
+        else:
+            mixtureSpectrum = mixture
+            assert unknownCharacterization['type'] == 'spectrum'
+        if unknownCharacterization['type'] == 'distance function':
+            return unknownCharacterization['function'](mixtureSpectrum, mixtureDescriptors)
+        elif unknownCharacterization['type'] == 'spectrum':
+            spType = unknownCharacterization['spType'] if 'spType' in unknownCharacterization else singleComponentData.getDefaultSpType()
+            unk_spectrum = unknownCharacterization['spectrum']
+            energy = singleComponentData.getEnergy(spType)
+            assert len(unk_spectrum) == len(energy), f'{len(unk_spectrum)} != {len(energy)}'
+            return utils.rFactor(energy, mixtureSpectrum[spType], unk_spectrum)
+        else:
+            assert unknownCharacterization['type'] == 'descriptors'
+            assert len(unknownCharacterization['paramValues']) == len(unknownCharacterization['paramNames'])
+            unkDescriptors = unknownCharacterization['paramValues'] / std
+            if isinstance(mixtureDescriptors, np.ndarray):
+                assert len(mixtureDescriptors) == len(unkDescriptors)
+            else:
+                assert isinstance(mixtureDescriptors, dict), 'mixtureDescriptors = '+str(mixtureDescriptors)
+                mixtureDescriptors = np.array([mixtureDescriptors[pname] for pname in unknownCharacterization['paramNames']])
+            mixtureDescriptors = mixtureDescriptors.reshape(1, -1) / std
+            # print('unkDescriptors = ', unkDescriptors)
+            # print('mixtureDescriptors = ', mixtureDescriptors)
+            # print('diff = ', np.abs(mixtureDescriptors - unkDescriptors), np.linalg.norm(mixtureDescriptors - unkDescriptors))
+            return np.linalg.norm(mixtureDescriptors - unkDescriptors)
+
+    if optimizeConcentrations:
+        assert componentCount > 1
+        spectra = {spType: singleComponentData.getSpectra(spType).to_numpy() for spType in singleComponentData._spectra}
+        if componentNameColumn is not None:
+            componentNameData = singleComponentData.params[componentNameColumn].to_numpy()
+        for label in label_names_surrogate:
+            for i in range(mixtureTrysCount[label]):
+                def makeMixture(concentrations):
+                    if componentNameColumn is None:
+                        componentInds = componentNames[label][i]
+                    else:
+                        componentInds = np.array([np.where(componentNames[label][i,j] == componentNameData)[0][0] for j in range(componentCount)])
+                    mix_spectra = {}
+                    if makeMixtureOfSpectra is None:
+                        for spType in spectra:
+                            mix_spectra[spType] = np.dot(spectra[spType][componentInds, :].T, concentrations)
+                    else:
+                        ms = makeMixtureOfSpectra(componentInds, concentrations)
+                        if isinstance(ms, dict):
+                            mix_spectra = ms
+                            assert len(ms[singleComponentData.getDefaultSpType()]) == len(singleComponentData.getEnergy())
+                        else:
+                            assert len(spectra) == 1
+                            for spType in spectra:
+                                assert len(ms) == len(singleComponentData.getEnergy(spType))
+                                mix_spectra[spType] = ms
+                    if calcDescriptorsForSingleSpectrumFunc is None:
+                        return mix_spectra
+                    else:
+                        # print('concentrations = ', concentrations)
+                        mix_spectra1 = mix_spectra if len(mix_spectra) > 1 else mix_spectra[list(mix_spectra.keys())[0]]
+                        mixtureDescriptors = calcDescriptorsForSingleSpectrumFunc(mix_spectra1)
+                        return mix_spectra, mixtureDescriptors
+                old_c = copy.deepcopy(concentrations[label][i])
+                c = copy.deepcopy(concentrations[label][i]) if optimizeConcentrationsTrysCount == 1 else None
+                old_func_value = distToUnknown(makeMixture(concentrations[label][i]))
+                distsToExp[label][i], concentrations[label][i] = findConcentrationsAbstract(distToUnknown, componentCount, makeMixture, fixConcentrations=None, trysCount=optimizeConcentrationsTrysCount, startConcentrations=c)
+                print(f'Were fun = {old_func_value}, conc = {old_c}. Now fun = {distsToExp[label][i,0]}, conc = {concentrations[label][i]}')
+                # fill new mixture spectrum
+                mix_spectra = makeMixture(concentrations[label][i])
+                if isinstance(mix_spectra, tuple): mix_spectra = mix_spectra[0]
+                for spType in mixtureData[label].spTypes():
+                    mixtureData[label].getSpectra(spType).loc[i] = mix_spectra[spType]
+                # !!!!!!!!!! Attention !!!!!!!!  Mixture descriptors we can't update, because calcDescriptorsForSingleSpectrumFunc can return not all descriptors. Also they were not calculated, because addDescrFunc=None in generateMixtureOfSample
+    else:
+        for label in label_names_surrogate:
+            for i in range(len(distsToExp[label])):
+                mixtureSpectrum = {spType:mixtureData[label].getSpectra(spType).loc[i].to_numpy() for spType in mixtureData[label].spTypes()}
+                mixtureDescriptors = calcDescriptorsForSingleSpectrumFunc(mixtureSpectrum)
+                distsToExp[label][i] = distToUnknown((mixtureSpectrum, mixtureDescriptors))
+
+    # =================== combine data for different labels ===================
+    def combine(dataDict):
+        return np.vstack(tuple(dataDict[label] for label in label_names_surrogate))
+    distsToExp = combine(distsToExp).reshape(-1)
+    if componentCount > 1:
+        componentLabels = combine(componentLabels)
+        concentrations = combine(concentrations)
+        componentNames = combine(componentNames)
+    for label in label_names_surrogate:
+        if label == label_names_surrogate[0]:
+            mixtureData1 = mixtureData[label].copy()
+        else:
+            mixtureData1.unionWith(mixtureData[label])
+    mixtureData = mixtureData1
+    sorted_order = np.argsort(distsToExp)
+
+    # =================== result spectra plotting ===================
+    if plotSpectrumType is None and unknownCharacterization['type'] == 'spectrum':
+        plotSpectrumType = unknownCharacterization['spType'] if 'spType' in unknownCharacterization else singleComponentData.getDefaultSpType()
+    if plotSpectrumType == 'all': plotSpectrumTypes = singleComponentData.spTypes()
+    else: plotSpectrumTypes = [plotSpectrumType]
+    for ii in range(len(distsToExp)):
+        i = sorted_order[ii]
+        for spType in plotSpectrumTypes:
+            energy = mixtureData.getEnergy(spType)
+            unknownSpectrum = None
+            if unknownSpectrumToPlot is None:
+                if unknownCharacterization['type'] == 'spectrum':
+                    if unknownCharacterization['spType'] == spType:
+                        unknownSpectrum = unknownCharacterization['spectrum']
+                        unknownEnergy = energy
+            else:
+                if isinstance(unknownSpectrumToPlot, dict):
+                    u = unknownSpectrumToPlot[spType]
+                else:
+                    u = unknownSpectrumToPlot
+                if isinstance(u, utils.Spectrum):
+                    unknownSpectrum = u.intensity
+                    unknownEnergy = u.energy
+                else:
+                    unknownSpectrum = u
+                    unknownEnergy = energy
+            intensity = mixtureData.getSpectra(spType).loc[i].to_numpy()
+            if unknownSpectrum is not None:
+                conc_string = ', '.join([f'C_{name}={bestConc:.2f}' for (name, bestConc) in zip(componentNames[i].reshape(-1).tolist(), concentrations[i].reshape(-1).tolist())])
+                title = f'Concentrations: {conc_string}, distsToExp: {distsToExp[i]:.4f}'
+                spectraFolder = folder + os.sep + 'spectra' + spectraFolderPostfix
+                if not os.path.exists(spectraFolder):
+                    os.makedirs(spectraFolder)
+                fileName = spectraFolder + os.sep + f'{ii}_{spType}' + fileNamePostfix + '.png'
+                plotting.plotToFile(energy, intensity, 'mixture', unknownEnergy, unknownSpectrum, 'experiment', title=title, fileName=fileName)
+        if ii >= maxSpectraCountToPlot-1: break
+
+    # =================== mixture label map plotting ===================
+    if componentCount > 1:
+        if label_bounds is None:
+            label_bounds = [[np.min(singleComponentData.params[label]), np.max(singleComponentData.params[label])] for label in label_names]
+        plotMixtureLabelMap(componentLabels=componentLabels, label_names=label_names, label_bounds=label_bounds, labelMaps=labelMaps, distsToExp=distsToExp, concentrations=concentrations, componentNames=componentNames, folder=folder+os.sep+'label_maps'+labelMapsFolderPostfix, fileNamePostfix=fileNamePostfix)
+
+
 def plotBestMixtures2d(paramsNames, paramsBounds, spectraFunc, makeMixture, distToExperiment, maxPercentToBeBest=0.1):
     """
     Creates figures of mixtures for different concentrations of several components.
@@ -693,7 +815,7 @@ def plotBestMixtures2d(paramsNames, paramsBounds, spectraFunc, makeMixture, dist
             plotting.closefig(fig)
                 
 
-def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCount, bounds,  paramNames, componentNames=None, constraints=None, folderToSaveResult='globalMinimumSearchResult', fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extra_plot_func=None):
+def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCount, bounds, paramNames, componentNames=None, constraints=None, folderToSaveResult='globalMinimumSearchResult', fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFuncContourMaps=None):
     """
     Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum.
 
@@ -709,18 +831,19 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
     :param fixParams: dict of paramName:value to fix (component params must have prefix 'componentName_')
     :param contourMapCalcMethod: 'fast' - plot contours of the target function; 'thorough' - plot contours of the min of target function by all arguments except axes
     :param plotContourMaps: 'all' or list of 1-element or 2-elements lists of axes names to plot contours of target function
-    :param extra_plot_func: user defined function to plot something on result contours: extra_plot_func(ax, axisNamesList)
+    :param extraPlotFuncContourMaps: user defined function to plot something on result contours: func(ax, axisNamesList, xminDict)
     :return: sorted list of trysCount minimums of dicts with keys 'value', 'x' (have allArgs-like format), 'x1d' (flattened array of all param values), 'paramNames1d', 'concentrations', 'spectra', 'mixtureSpectrum'
     """
     N = len(spectraFuncs)
     if fixParams is None: fixParams = {}
+    fixParams = copy.deepcopy(fixParams)
     if constraints is None: constraints = tuple()
     oneComponent = len(spectraFuncs) == 1
     if len(bounds) == N: bounds.append([])
     if len(paramNames) == N: paramNames.append([])
-    assert len(componentNames) == N
-    assert len(bounds) == N+1
-    assert len(paramNames) == N+1
+    assert len(componentNames) == N, f'{len(componentNames)} != {N}'
+    assert len(bounds) == N+1, f'{len(bounds)} != {N+1}'
+    assert len(paramNames) == N+1, f'{len(paramNames)} != {N+1}'
     if componentNames is None:
         componentNames = [f'c{i+1}' for i in range(N)]
 
@@ -738,6 +861,7 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
     notFixedConcentrations = [cn for cn in concentrationNames if cn not in fixParams]
     concentrationBound = 1 - np.sum([fixParams[c] for c in concentrationNames if c in fixParams])
     if len(notFixedConcentrations) == 1:  # fix it
+        assert notFixedConcentrations[0] not in fixParams, 'You do not need to fix concentration'
         fixParams[notFixedConcentrations[0]] = concentrationBound
         notFixedConcentrations = []
     assert (len(notFixedConcentrations) >= 2) or (len(notFixedConcentrations) == 0)
@@ -809,6 +933,8 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
         return pp
 
     def targetFunction(x):
+        # for i in range(len(x)):
+        #     assert bounds1d[i][0] <= x[i] <= bounds1d[i][1], f'{paramNames1d[i]} = {x[i]} not in {bounds1d[i]}'
         concentraitions = getAllConcentrations(x)
         spectra = []
         x_common = getCommonParams(x)
@@ -824,7 +950,7 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
         a = np.zeros(len(paramNames1d))
         a[:len(notFixedConcentrations)-1] = 1
         cons = (scipy.optimize.LinearConstraint(a, 0, concentrationBound, keep_feasible=True),)
-    result1d = optimize.findGlobalMinimum(targetFunction, trysCount, bounds1d, constraints=constraints+cons, fun_args=None, paramNames=paramNames1d, folderToSaveResult=folderToSaveResult, fixParams=fixParams1, contourMapCalcMethod=contourMapCalcMethod, plotContourMaps=plotContourMaps, extra_plot_func=extra_plot_func)
+    result1d = optimize.findGlobalMinimum(targetFunction, trysCount, bounds1d, constraints=constraints+cons, fun_args=None, paramNames=paramNames1d, folderToSaveResult=folderToSaveResult, fixParams=fixParams1, contourMapCalcMethod=contourMapCalcMethod, plotContourMaps=plotContourMaps, extraPlotFunc=extraPlotFuncContourMaps)
     result = []
     for r in result1d:
         x1d = r['x']
@@ -841,45 +967,294 @@ def findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCo
     return result
 
 
-def generateMixtureOfSample(size, componentCount, sample, label_names, addDescrFunc, makeMixtureOfSpectra=None, makeMixtureOfLabel=None, dirichletAlpha=1, randomSeed=0):
+def generateUniformLabelDistrib(size, componentCount, uniformLabelName, sample):
+    all_ind = np.zeros(shape=(size, componentCount), dtype=np.int)
+    label = sample.params.loc[:, uniformLabelName].to_numpy()
+    if ML.isClassification(sample.params, uniformLabelName):
+        label_values = np.unique(label)
+        # print(label_values, label)
+        inds_by_label_values = {lv:np.where(label == lv)[0] for lv in label_values}
+        assert componentCount <= len(label_values), f'componentCount = {componentCount} > len(label_values) = {len(label_values)}'
+        maxSize = scipy.special.comb(len(label_values), componentCount, repetition=True)
+        index_combinations = utils.comb_index(len(label_values), componentCount, repetition=True)
+        if maxSize <= size:
+            # repeat combinations
+            index_combinations = index_combinations[np.arange(size) % len(index_combinations), :]
+        else:
+            # take random subset
+            index_combinations = index_combinations[np.random.choice(maxSize, size=size, replace=False), :]
+        for i in range(size):
+            for j in range(componentCount):
+                label_value = label_values[index_combinations[i, j]]
+                # take random sepctrum from the set with same label
+                all_ind[i, j] = np.random.choice(inds_by_label_values[label_value])
+    else:
+        # label is real but not integer or nominal
+        mi = np.min(label)
+        ma = np.max(label)
+        random_labels = np.random.rand(size, componentCount) * (ma - mi) + mi
+        sorted_label_ind = np.argsort(label)
+        sorted_label = label[sorted_label_ind]
+        for i in range(size):
+            for j in range(componentCount):
+                _, idx = utils.find_nearest_in_sorted_array(sorted_label, random_labels[i, j])
+                initial_index = sorted_label_ind[idx]
+                all_ind[i, j] = initial_index
+    # print(label[all_ind])
+    return all_ind
+
+
+def generateMixtureOfSample(size, componentCount, sample, label_names, addDescrFunc=None, makeMixtureOfSpectra=None, makeMixtureOfLabel=None, dirichletAlpha=1, randomSeed=0, returnNotMixLabels=False, componentNameColumn=None, makeUniformLabelDistrib=None):
     """
     Generates descriptor data for random mixtures of component combinations
     :param componentCount: count of mixture components
     :param size: mixture data size to generate
     :param sample: initial pure sample
     :param label_names: names of target variables that are not descriptors of spectra, calculated by addDescrFunc
-    :param addDescrFunc: function(sample, allowDiscard), that calculates descriptors for the given sample
-    :param makeMixtureOfSpectra: function(sample, inds, concentrations) to calculate mixture of spectra by given concentrations and spectra indices (return intensity only)
+    :param addDescrFunc: calculates descriptors for the given sample. Optionally returns goodSpecrtrumIndices (if some specrtra were bad and descriptors couldn't be built)
+                        sample_with_descriptors, goodSpecrtrumIndices = addDescrFunc(sample)
+    :param makeMixtureOfSpectra: function(inds, concentrations) to calculate mixture of spectra by given concentrations and spectra indices (returns intensity only or dict {spType: intensity only} for multiple spectra types)
     :param makeMixtureOfLabel: function(label_name, sample, inds, concentrations) to calculate label for mixture of spectra given concentrations and spectra indices
     :param dirichletAlpha: parameter of dirichlet distribution of concentrations (1 - uniform, >1 - mostly equal, <1 - some components prevail)
     :param randomSeed: random seed
-    :return: new mixture sample
+    :param returnNotMixLabels: if true, along with mixture of labels returns:
+        componentLabels: array of label tables (for each component - one table) with size componentCount x size x labelCount
+        concentrations: 2d array size x componentCount (sorted in descendant order!!!!!!)
+        componentNames: 2d array size x componentCount
+    :param componentNameColumn: used when labels are not mixed (if None - use index)
+    :param makeUniformLabelDistrib: name of label to have uniform result distribution (in labelValues^componentCount space) in mixture sample. If None - the mixture is uniform in terms of single component indices
+    :return: new mixture sample with mixed labels and separate info about component labels if returnNotMixLabels=True
     """
-    spectra = sample.spectra.to_numpy()
+    # print('Do not use CV for one mixture sample. Instead divide pure sample into 2 parts and generate 2 mixture samples: train and test.')
     data = sample.params.loc[:,label_names].to_numpy()
+    spectra = {spType:sample.getSpectra(spType).to_numpy() for spType in sample._spectra}
+    for j in range(len(label_names)):
+        assert np.all(pd.notnull(data[:,j])), 'Null values for label '+str(label_names[j])+'\n'+str(data[:,j])
     assert np.all(pd.notnull(data))
     np.random.seed(randomSeed)
     c = np.random.dirichlet(alpha=dirichletAlpha*np.ones(componentCount), size=size)
-    n = spectra.shape[0]
-    all_ind = np.random.randint(low=0, high=n-1, size=(size, componentCount))
-    mix_spectra = np.zeros((size, len(sample.energy)))
+    c = -np.sort(-c, axis=1)
+    labelCount = len(label_names)
+    n = sample.getLength()
+
+    if makeUniformLabelDistrib is None:
+        maxSize = scipy.special.comb(n, componentCount, repetition=True)
+        if maxSize < 100000:
+            index_combinations = utils.comb_index(n, componentCount, repetition=True)
+            if maxSize <= size:
+                # repeat combinations
+                all_ind = index_combinations[np.arange(size) % len(index_combinations), :]
+            else:
+                # take random subset
+                all_ind = index_combinations[np.random.choice(maxSize, size=size, replace=False), :]
+        else:
+            all_ind = np.random.randint(low=0, high=n-1, size=(size, componentCount))
+    else:
+        all_ind = generateUniformLabelDistrib(size, componentCount, makeUniformLabelDistrib, sample)
+
+    if returnNotMixLabels:
+        componentLabels = np.zeros((componentCount, size, labelCount))
+        concentrations = np.zeros((size, componentCount))
+        componentNames = np.zeros((size, componentCount), dtype=object)
     mix_data = np.zeros((size, len(label_names)))
+    mix_spectra = {}
+    for spType in spectra:
+        mix_spectra[spType] = np.zeros((size, len(sample.getEnergy(spType))))
     for i in range(size):
         ind = all_ind[i]
         if makeMixtureOfSpectra is None:
-            mix_spectra[i] = np.dot(spectra[ind,:].T, c[i])
+            for spType in spectra:
+                mix_spectra[spType][i] = np.dot(spectra[spType][ind,:].T, c[i])
         else:
-            ms = makeMixtureOfSpectra(sample, ind, c[i])
-            assert len(ms) == len(sample.energy)
-            mix_spectra[i] = ms
+            ms = makeMixtureOfSpectra(ind, c[i])
+            if isinstance(ms, dict):
+                for spType in spectra:
+                    assert len(ms[spType]) == len(sample.getEnergy(spType))
+                    mix_spectra[spType][i] = ms[spType]
+            else:
+                assert len(spectra) == 1
+                for spType in spectra:
+                    assert len(ms) == len(sample.getEnergy(spType))
+                    mix_spectra[spType][i] = ms
         if makeMixtureOfLabel is None:
             mix_data[i] = np.dot(data[ind,:].T, c[i])
         else:
             for j in range(len(label_names)):
                 mix_data[i,j] = makeMixtureOfLabel(label_names[j], sample, ind, c[i])
+        if returnNotMixLabels:
+            for j in range(componentCount):
+                componentLabels[j,i] = data[ind[j],:]
+                componentNames[i,j] = str(ind[j]) if componentNameColumn is None else str(sample.params.loc[ind[j],componentNameColumn])
+            concentrations[i] = c[i]
+
     mix_data = pd.DataFrame(columns=label_names, data=mix_data, dtype='float64')
-    mix_sample = ML.Sample(mix_data, mix_spectra, energy=sample.energy)
-    mix_sample = addDescrFunc(mix_sample)
+    mix_sample = ML.Sample(mix_data, mix_spectra, energy=sample._energy)
+    if addDescrFunc is not None:
+        res = addDescrFunc(mix_sample)
+        if isinstance(res, tuple): mix_sample, goodSpectrumIndices = res
+        else: mix_sample = res
+    else: goodSpectrumIndices = np.arange(len(mix_data))
     mix_sample.paramNames = mix_sample.params.columns.to_numpy()
-    assert set(mix_sample.paramNames) == set(sample.paramNames), 'Set of initial sample and mixture descriptors are not equal. Initial: '+str(sample.paramNames)+' mixture: '+str(mix_sample.paramNames)+'. May be you forget to list all labels in generateMixtureOfSample call?'
-    return mix_sample
+    if addDescrFunc is not None and set(mix_sample.paramNames) != set(sample.paramNames):
+        assert set(mix_sample.paramNames) <= set(sample.paramNames), 'Set of initial sample and mixture descriptors are not equal. There are extra mixture descriptors: ' + str(set(mix_sample.paramNames)-set(sample.paramNames))+'.\nMay be you forget to list all labels in generateMixtureOfSample call?'
+        # check dtype
+        forgotten = set(sample.paramNames)-set(mix_sample.paramNames)
+        for f in forgotten:
+            assert sample.params[f].dtype != np.float64, f'Set of initial sample and mixture descriptors are not equal. Param {f} with dtype=float64 is absent in mixture data'
+    if returnNotMixLabels:
+        return mix_sample, componentLabels[:,goodSpectrumIndices,:], concentrations[goodSpectrumIndices,:], componentNames[goodSpectrumIndices,:]
+    else:
+        return mix_sample
+
+
+def score_cv(model_regr, sample, features, label, label_names, makeMixtureParams, testRatio=0.2, repetitions=5, model_class=None):
+    assert 'sample' not in makeMixtureParams
+    assert 'size' not in makeMixtureParams
+    assert 'randomSeed' not in makeMixtureParams
+    assert 'returnNotMixLabels' not in makeMixtureParams
+    assert 'makeUniformLabelDistrib' not in makeMixtureParams
+    n = sample.getLength()
+    testSize = int(n * testRatio)
+    trainSize = int(n * (1-testRatio))
+    sample = sample.copy()
+    trueAvgLabels = None; predAvgLabels = None
+    trueComponentLabels = None; predComponentLabels = None
+    trueConcentrations = None; predConcentrations = None
+    i_label = label_names.index(label)
+    for ir in range(repetitions):
+        indTrain, indTest = sklearn.model_selection.train_test_split(np.arange(n).reshape(-1,1), test_size=testRatio, random_state=ir, shuffle=True)
+        sampleTrain = sample.takeRows(indTrain)
+        sampleTest = sample.takeRows(indTest)
+        mixSampleTrain, componentLabelsTrain, concentrationsTrain, _ = generateMixtureOfSample(size=trainSize, sample=sampleTrain, label_names=label_names, randomSeed=ir, returnNotMixLabels=True, makeUniformLabelDistrib=label, **makeMixtureParams)
+        componentLabelsTrain = componentLabelsTrain[:,:,i_label].T
+        xTrain, yTrain = descriptor.getXYFromSample(mixSampleTrain, features, label)
+
+        mixSampleTest, componentLabelsTest, concentrationsTest, _ = generateMixtureOfSample(size=testSize, sample=sampleTest, label_names=label_names, randomSeed=ir, returnNotMixLabels=True, makeUniformLabelDistrib=label, **makeMixtureParams)
+        componentLabelsTest = componentLabelsTest[:,:,i_label].T
+        xTest, yTest = descriptor.getXYFromSample(mixSampleTest, features, label)
+
+        model_regr_avgLabel = copy.deepcopy(model_regr)
+        model_regr_avgLabel.fit(xTrain, yTrain)
+        if predAvgLabels is None: predAvgLabels = model_regr_avgLabel.predict(xTest)
+        else: predAvgLabels = np.append(predAvgLabels, model_regr_avgLabel.predict(xTest), axis=0)
+        if trueAvgLabels is None: trueAvgLabels = yTest
+        else: trueAvgLabels = np.append(trueAvgLabels, yTest, axis=0)
+
+        model_regr_conc = copy.deepcopy(model_regr)
+        model_regr_conc.fit(xTrain, concentrationsTrain)
+        if predConcentrations is None: predConcentrations = model_regr_conc.predict(xTest)
+        else: predConcentrations = np.append(predConcentrations, model_regr_conc.predict(xTest), axis=0)
+        if trueConcentrations is None: trueConcentrations = concentrationsTest
+        else: trueConcentrations = np.append(trueConcentrations, concentrationsTest, axis=0)
+        assert np.all(predConcentrations.shape == trueConcentrations.shape), str(predConcentrations.shape)+' != '+str(trueConcentrations.shape)
+
+        isClassification = ML.isClassification(componentLabelsTrain[:,0])
+        if isClassification:
+            assert model_class is not None
+            model_comp_labels = copy.deepcopy(model_class)
+        else:
+            model_comp_labels = copy.deepcopy(model_regr)
+        model_comp_labels.fit(xTrain, componentLabelsTrain)
+        if predComponentLabels is None: predComponentLabels = model_comp_labels.predict(xTest)
+        else: predComponentLabels = np.append(predComponentLabels, model_comp_labels.predict(xTest), axis=0)
+        if trueComponentLabels is None: trueComponentLabels = componentLabelsTest
+        else: trueComponentLabels = np.append(trueComponentLabels, componentLabelsTest, axis=0)
+
+    conc_quality = [ML.scoreFast(trueConcentrations[:,j], predConcentrations[:,j]) for j in range(trueConcentrations.shape[1])]
+    comp_quality = []
+    for j in range(trueComponentLabels.shape[1]):
+        if isClassification:
+            accuracy = np.sum(trueComponentLabels[:,j] == predComponentLabels[:,j])/trueComponentLabels.shape[0]
+            comp_quality.append(accuracy)
+        else:
+            r_score = ML.scoreFast(trueComponentLabels[:,j], predComponentLabels[:,j])
+            comp_quality.append(r_score)
+    qualities = {'avgLabels': ML.scoreFast(trueAvgLabels, predAvgLabels), 'concentrations': conc_quality, 'componentLabels': comp_quality}
+    trueVals = {'avgLabels': trueAvgLabels, 'concentrations': trueConcentrations, 'componentLabels': trueComponentLabels}
+    predVals = {'avgLabels': predAvgLabels, 'concentrations': predConcentrations, 'componentLabels': predComponentLabels}
+    models = {'avgLabels': model_regr_avgLabel, 'concentrations': model_regr_conc, 'componentLabels': model_comp_labels}
+    return qualities, trueVals, predVals, models
+
+
+def plotMixtures(ax, axesNames, calcDescriptorsFunc, sample, mixtures, componentNameColumn=None, mixtureStepCount=200):
+    """
+    Used by plot_descriptors_2d as additionalMapPlotFunc
+    :param ax: axes
+    :param axesNames: descriptor names pair of ax
+    :param calcDescriptorsForSingleSpectrumFunc: function(spectrum) should return array of the same length as 'sample.paramNames' or dict of descriptors. spectrum - one spectrum or dict of spectra for different spTypes
+    :param sample: Sample with spectra and params
+    :param mixtures: list of pairs of names (if componentNameColumn!=None) or indices
+    :param componentNameColumn: if None use index
+    """
+    n = sample.getLength()
+    componentNames = sample.params[componentNameColumn].to_numpy() if componentNameColumn is not None else np.arange(n)
+    for mix in mixtures:
+        if not isinstance(componentNames[0], type(mix[0])):
+            componentNames = componentNames.astype(type(mix[0]))
+        i1 = np.where(componentNames == mix[0])[0][0]
+        i2 = np.where(componentNames == mix[1])[0][0]
+        conc = np.linspace(0, 1, mixtureStepCount)
+        desc2 = conc * data.loc[i1, 'pre-edge area'] + (1 - conc) * data.loc[i2, 'pre-edge area']
+        a = data.loc[i1, 'pre-edge center'] * data.loc[i1, 'pre-edge area']
+        b = data.loc[i2, 'pre-edge center'] * data.loc[i2, 'pre-edge area']
+        desc1 = (conc * a + (1 - conc) * b) / desc2
+        ax.scatter(desc1, desc2, 3, c='black')
+
+
+def mcrRealization(matrix, diapFrom, diapTo, temperature, energy):
+    """
+    :param matrix: spectrum matrix
+    :param diapFrom: start of spectrum range
+    :param diapTo:  end of spectrum range
+    :param temperature: vector of temperature
+    :param energy: energy column
+
+    """
+    from pymcr.mcr import McrAR
+    from pymcr.regressors import NNLS
+    logger = logging.getLogger('pymcr')
+    logger.setLevel(logging.DEBUG)
+    stdout_handler = logging.StreamHandler(stream=sys.stdout)
+    stdout_format = logging.Formatter('%(message)s')
+    stdout_handler.setFormatter(stdout_format)
+    logger.addHandler(stdout_handler)
+    mcrar = McrAR()
+    totalComponents = len(matrix.T)
+    if ((diapFrom < 1) or (diapFrom > totalComponents) or (diapTo < 0) or (diapTo > totalComponents)):
+        print("ERROR")
+        print("invalid range")
+        print("The value must be no less than zero and no more than" + totalComponents)
+    elif (diapFrom == diapTo and diapTo != totalComponents):
+        diapTo += 1
+    elif (diapTo < diapFrom):
+        diap = diapTo
+        diapTo = diapFrom
+        diapFrom = diap
+    elif (diapFrom == diapTo and diapTo == totalComponents):
+        diapFrom -=1
+    i = 0
+    numberOfComponents = diapTo - diapFrom
+    toPlotComponents = tuple()
+    toPlotConcentrations = tuple()
+    initial_spectra = matrix[:, diapFrom:diapTo].T
+    mcrar = McrAR(c_regr=NNLS(), st_regr=NNLS(), c_constraints=[], st_constraints=[], tol_increase=0.1,
+                    max_iter=100,
+                    tol_n_above_min=5000)
+    mcrar.fit(matrix.T, ST=initial_spectra, verbose=False)
+    print('\nFinal MSE: {:.7e}'.format(mcrar.err[-1]))
+   # print(mcrar.ST_opt_[i,:].T)
+    while i < numberOfComponents:
+        plt.plot(energy, initial_spectra[i,:].T, label= "initial")
+        plt.plot(energy,mcrar.ST_opt_[i,:].T, label= "result")
+        plt.xlabel('Энернгия')
+        plt.ylabel('Интенсивность')
+        plt.title('Компоненты')
+        plt.legend()
+        plt.show()
+
+        plt.plot(temperature, mcrar.C_opt_[:,i], label= "C")
+        plt.title('Зависимость концентраций от температуры')
+        plt.legend()
+        plt.show()
+        #plotting.plotToFile(*toPlotConcentrations, fileName='mcr/graphs/concentrations/concentration' + str(i) + '.png')
+        i += 1

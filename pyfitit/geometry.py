@@ -1,11 +1,20 @@
+import copy, math, scipy
 import numpy as np
-import math
 
 
 def sign(x): return math.copysign(1, x)
 
 
 def normalize(v): return v/np.linalg.norm(v)
+
+
+def relDist(a, b):
+    assert len(a.shape) <= 2 and len(b.shape) <= 2
+    if len(a.shape) == 1: a = a.reshape(1, -1)
+    if len(b.shape) == 1: b = b.reshape(1, -1)
+    sum = np.linalg.norm(a, axis=1) + np.linalg.norm(b, axis=1)
+    sum[sum == 0] = 1
+    return np.linalg.norm(a-b, axis=1)/sum
 
 
 def calcAngle(p1, p2):
@@ -111,3 +120,58 @@ def transformAnglesInv(alpha, beta):
     else: c[c>1]=1; c[c<-1]=-1
     psi = np.arccos(c)
     return phi/math.pi*180, psi/math.pi*180
+
+
+def get_line_by_2_points(x1, y1, x2, y2):
+    a = y2-y1
+    b = -(x2-x1)
+    c = -x1*a - y1*b
+    assert np.abs(a * x1 + b * y1 + c) < 1e-10
+    assert np.abs(a * x2 + b * y2 + c) < 1e-10
+    return a,b,c
+
+
+def get_line_intersection(a1, b1, c1, a2, b2, c2):
+    d = a1*b2 - b1*a2
+    assert d != 0, f'{a1}x + {b1}y + {c1} = 0  {a2}x + {b2}y + {c2} = 0'
+    d1 = -c1*b2 - (-c2)*b1
+    d2 = a1*(-c2) - a2*(-c1)
+    x = d1/d; y = d2/d
+    assert np.abs(a1*x+b1*y+c1)<1e-10
+    assert np.abs(a2*x+b2*y+c2)<1e-10
+    return x, y
+
+
+def getNNdistsStable(x1, x2):
+    dists = scipy.spatial.distance.cdist(x1, x2)
+    M = np.max(dists)
+    mean = np.mean(dists)
+    np.fill_diagonal(dists, M)
+    NNdists = np.min(dists, axis=1)
+    return NNdists, mean
+
+
+def getMinDist(x1, x2):
+    NNdists, mean = getNNdistsStable(x1, x2)
+    # take min element with max index (we want to throw last points first)
+    min_dist_ind = np.max(np.where(NNdists == np.min(NNdists))[0])
+    min_dist = NNdists[min_dist_ind]
+    return min_dist_ind, min_dist, mean
+
+
+def unique_mulitdim(p, rel_err=1e-6):
+    """
+    Remove duplicate points from array p
+
+    :param p: points (each row is one point)
+    :param rel_err: max difference between points to be equal i.e. dist < np.quantile(all_dists, 0.1) * rel_err
+    :returns: new_p, good_ind
+    """
+    p = copy.deepcopy(p)
+    assert len(p.shape) == 2, 'p must be 2-dim (each row is one point). For 1 dim we can\'t determine whether it is row or column'
+    good_ind = np.arange(len(p))
+    min_dist_ind, min_dist, med_dist = getMinDist(p,p)
+    while min_dist <= med_dist * rel_err:
+        good_ind = np.delete(good_ind, min_dist_ind)
+        min_dist_ind, min_dist, _ = getMinDist(p[good_ind, :], p[good_ind, :])
+    return p[good_ind, :], good_ind

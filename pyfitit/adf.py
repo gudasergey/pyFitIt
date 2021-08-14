@@ -5,7 +5,7 @@ from scipy.spatial import distance
 import numpy as np
 import pandas as pd
 from io import StringIO
-from . import utils
+from . import utils, plotting, molecule
 
 cycleStartStr = " Coordinates in Geometry Cycle"
 floatParser = parsy.regex(r"[-+]?\d*\.\d+|\d+").map(float)
@@ -45,40 +45,8 @@ def parseLogfile(fname):
 
     cycles = parseCycles.parse(content)
     cycles = [x for x in cycles if x is not None] # get rid of the last null
+
     return cycles
-
-
-def parseXYZFile(fname):
-
-    @parsy.generate
-    def parseHeader():
-        num = yield intParser # number of atoms
-        yield newLine >> untilNewLine >> newLine # comment
-        return num
-
-    @parsy.generate
-    def parseRow():
-        atom = yield parsy.regex(r'\s*[a-zA-Z.]*')
-        yield parsy.whitespace.many()
-        x = yield floatParser
-        yield parsy.whitespace.many()
-        y = yield floatParser
-        yield parsy.whitespace.many()
-        z = yield floatParser
-        return {'atom':atom, 'x':x, 'y':y, 'z':z}
-
-    @parsy.generate
-    def parseContent():
-        yield parseHeader.optional()
-        table = yield parseRow.many()
-        yield parsy.whitespace.many()
-        return table
-
-    with open(fname, encoding='utf-8') as f:
-        content = f.read()
-
-    table = parseContent.parse(content)
-    return table
 
 
 def enumerateParsedXYZ(table):
@@ -104,42 +72,61 @@ def savexyz(atoms, file):
             print("{0:>2}{1:10.6g}{2:10.6g}{3:10.6g}".format(name, a['x'], a['y'], a['z']), file=output)
 
 
-def nearestAtomsDistChange(originalMoleculePath, logfileFolder, firstN=5):
+def nearestAtomsDistChange(logFileName, mainAtom, firstN=5):
+    """
+    Check ADF geometry optimization
+
+    :param logFileName:
+    :param mainAtom: name of central atom (Cr, Fe, ...)
+    :param firstN: number of checked atoms close to the central one
+    """
     def getPos(atom):
         return atom['x'],atom['y'],atom['z']
 
     def getInterAtomicDistances(cycle):
-        cr = getPos(cycle[0])
-        res = map(lambda x: {'atom':str(x['num'])+'.'+x['atom'], 'dist':distance.euclidean(getPos(x), cr)}, cycle[1:])
+        main = getPos(cycle[0])
+        res = map(lambda x: {'atom':x['atom'], 'dist':distance.euclidean(getPos(x), main)}, cycle[1:])
         return list(res)
 
-    logFname = utils.findFile(logfileFolder, 'logfile', check_unique=False)
-    if logFname is None: return None
-    cycles = parseLogfile(logFname)
-    savexyz(cycles[0], logfileFolder+os.sep+'atoms_cycle_first.xyz')
-    savexyz(cycles[-1], logfileFolder+os.sep+'atoms_cycle_last.xyz')
-    savexyz(cycles[-1], logfileFolder+os.sep+os.path.split(logfileFolder)[1]+'.xyz')
-    assert all(map(lambda x: x[0]['atom'] == 'Cr', cycles)) # assert first atoms to be Cr
+    logfileFolder = os.path.split(logFileName)[0]
+    name = os.path.splitext(os.path.split(logFileName)[-1])[0]
+    # logFileName = utils.findFile(logfileFolder, 'logfile', check_unique=False)
+    cycles = parseLogfile(logFileName)
+    savexyz(cycles[0], logfileFolder+os.sep+f'xyz_{name}_cycle_0.xyz')
+    savexyz(cycles[-1], logfileFolder+os.sep+f'xyz_{name}_cycle_{len(cycles)}.xyz')
+    assert all(map(lambda x: x[0]['atom'] == mainAtom, cycles))  # assert first atoms to be mainAtom
+    for c in cycles:
+        for a in c: a['atom'] = str(a['num'])+'.'+a['atom']
 
-    originalMolecule = parseXYZFile(originalMoleculePath)
-    enumerateParsedXYZ(originalMolecule)
-    trimAtomNames(originalMolecule)
-    trimAtomNames(cycles[-1])
-    assert all(map(lambda x: x[0]['atom'] == x[1]['atom'], zip(originalMolecule, cycles[-1]))), "Atoms in original molecule and optimized are different"
-    firstDist = sorted(getInterAtomicDistances(originalMolecule), key=lambda x: x['dist'])
+    inputFileName = logfileFolder+os.sep+name+'.job'
+    if not os.path.exists(inputFileName):
+        inputFileName = logfileFolder+os.sep+name+'.run'
+        if not os.path.exists(inputFileName):
+            print('Can\'t find input .run or .job file for log',logFileName)
+            return None
+    originalMolecule = parseRunOrJobFile(inputFileName)
+    originalAtomNames = [str(i+1)+'.'+originalMolecule.atomName[i] for i in range(len(originalMolecule.atomName))]
+    # enumerateParsedXYZ(originalMolecule)
+    # trimAtomNames(originalMolecule)
+    # trimAtomNames(cycles[-1])
+    assert all(map(lambda x: x[0] == x[1]['atom'], zip(originalAtomNames, cycles[-1]))), "Atoms in original molecule and optimized are different"
+    dist = np.linalg.norm(originalMolecule.atom - originalMolecule.atom[0], axis=1)
+    ind = np.argsort(dist)[1:]
 
     # find appropriate atoms in the last cycle
     lastDist = getInterAtomicDistances(cycles[-1])
     sortedDist = []
+    if firstN > len(ind): firstN = len(ind)
     for i in range(firstN):
         try:
-            elem = next(x for x in lastDist if x['atom'] == firstDist[i]['atom'])
+            elem = next(x for x in lastDist if x['atom'] == originalAtomNames[ind[i]])
         except StopIteration as e:
-            print(firstDist[i]['atom']+' from the first cycle was not found in the last cycle for experiment ' + os.path.split(logfileFolder)[1])
+            print(originalAtomNames[ind[i]]+' from the first cycle was not found in the last cycle for experiment ' + logfileFolder+os.sep+name)
             raise e
         sortedDist.append(elem)
     lastDist = sortedDist
 
+    firstDist = [{'atom':originalAtomNames[ind[i]], 'dist':dist[ind[i]]} for i in range(len(ind))]
     zipped = list(zip(firstDist, lastDist))[:firstN]
     res = map(lambda x: {'diff%': (abs(x[0]['dist'] - x[1]['dist']) / max(x[0]['dist'], x[1]['dist'])) * 100, 'atom':x[0]['atom']}, zipped)
     assert all(map(lambda x: x[0]['atom'] == x[1]['atom'], zipped)), "Nearest atoms have different names"
@@ -147,7 +134,7 @@ def nearestAtomsDistChange(originalMoleculePath, logfileFolder, firstN=5):
     return list(res)
 
 
-def generateInput(molecule, cards, lowest=None, folder = ''):
+def generateInput(molecule, cards, lowest=None, folder=''):
     if folder == '':
         if not os.path.exists("./tmp"): os.makedirs("./tmp")
         folder = tempfile.mkdtemp(dir='./tmp')
@@ -183,7 +170,7 @@ def convertRunToJob(folder):
     return os.path.splitext(runFile)[0]+'.job'
 
 
-def runLocal(folder = '.'):
+def runLocal(folder='.'):
     jobFile = convertRunToJob(folder)
     proc = subprocess.Popen(['.'+os.sep+jobFile], cwd=folder, stdout=subprocess.PIPE)
     proc.wait()
@@ -192,7 +179,7 @@ def runLocal(folder = '.'):
     return proc.stdout.read()
 
 
-def runCluster(folder = '.', memory=5000, nProcs = 6):
+def runCluster(folder='.', memory=5000, nProcs=6):
     jobFile = convertRunToJob(folder)
     proc = subprocess.Popen(["run-cluster-and-wait", "-m", str(memory), '-n', str(nProcs), '.'+os.sep+jobFile], cwd=folder, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     proc.wait()
@@ -217,25 +204,25 @@ def parseOutFile(fileName):
     return pd.read_csv(StringIO(s), header=None, names=['N','colon', 'E', 'fmu', 'fQ', 'fm', 'fOmu', 'fMmu','ftot'], sep=r'\s+')
 
 
-def parseRunFile(fileName, xyz_result_filename):
+def parseRunOrJobFile(fileName):
     with open(fileName, 'r') as f: s = f.read()
-    i = s.find('\nATOMS\n')
-    assert i >= 0
-    i += len('\nATOMS\n')
-    j = s.find('\nEND', i)
-    assert j >= 0
-    s = s[i:j]
+    i = re.search(r"\n\s*Atoms\s*\n", s,  re.IGNORECASE)
+    assert i is not None
+    i = i.end()
+    j = re.search(r"\n\s*END\s*\n", s[i:],  re.IGNORECASE)
+    assert j is not None
+    j = j.start()
+    s = s[i:i+j]
     p = ''
     lines = s.split('\n')
     for line in lines:
         # print(line)
         p += ' '.join(line.strip().split(' ')[1:]) + '\n'
-    with open(xyz_result_filename, 'w') as xyzf:
-        xyzf.write(str(len(lines))+'\n\n'+p)
-    return 0
+    return molecule.Molecule.fromXYZcontent(p)
 
-def parse_one_folder(folder, makePiramids = False):
-    xanesFile = utils.findFile(folder,'.out', check_unique = False)
+
+def parse_one_folder(folder, makePiramids=False):
+    xanesFile = utils.findFile(folder,'.out', check_unique=False)
     if xanesFile is None:
         raise Exception('Error: in folder '+folder+' there is no output file')
     try:
@@ -247,50 +234,6 @@ def parse_one_folder(folder, makePiramids = False):
     if makePiramids:
         energy, absorb = utils.makePiramids(energy, absorb, 0.01)
     return utils.Spectrum(energy, absorb), None
-
-
-def parse_all_folders(parentFolder, printOutput=True):
-    df_rows = []
-    energies0 = np.zeros(1)
-    atomColumnNames = []
-    subfolders = [f for f in os.listdir(parentFolder) if os.path.isdir(os.path.join(parentFolder,f))]
-    subfolders.sort()
-    badFolders = []; allXanes = {}
-    for i in range(len(subfolders)):
-        d = subfolders[i]
-        xanesFile = utils.findFile(os.path.join(parentFolder, d),'.out', check_unique = False)
-        if xanesFile is None:
-            print('Error: in folder '+d+' there is no output file')
-            badFolders.append(d)
-            continue
-        table = parseOutFile(xanesFile)
-        if table is None:
-            print('Can\'t parse xanes table in .out file of folder '+d)
-            badFolders.append(d)
-            continue
-        allXanes[d] = table
-    if len(allXanes)==0: print('None good folders'); return None, None, None
-    energyCount = np.array([ x.shape[0] for x in allXanes.values() ])
-    maxEnergyCount = np.max(energyCount)
-    for d in allXanes:
-        if allXanes[d].shape[0] != maxEnergyCount:
-            print('Error: in folder '+d+' there are less energies '+str(allXanes[d].shape[0]))
-            badFolders.append(d)
-    goodFolders = list(set(subfolders) - set(badFolders))
-    if len(goodFolders)==0: print('None good folders'); return None, None, None
-    energies = allXanes[goodFolders[0]].loc[:,'E'].ravel()
-    paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'geometryParams.txt'))
-    n = len(goodFolders)
-    df_xanes = np.zeros([n, energies.size])
-    df_params = np.zeros([n, len(paramNames)])
-    for i in range(n):
-        d = goodFolders[i]
-        _, params = getParams(os.path.join(parentFolder, d, 'geometryParams.txt'))
-        df_params[i,:] = np.array(params)
-        df_xanes[i,:] = allXanes[d].loc[:,'ftot'].ravel()
-    df_xanes = pd.DataFrame(data=df_xanes, columns=['e_'+str(e) for e in energies])
-    df_params = pd.DataFrame(data=df_params, columns=paramNames)
-    return df_xanes, df_params, badFolders
 
 
 def nextWord(s, i0, ignoreNewLine=False):
@@ -333,83 +276,136 @@ def nextLine(s, i0):
     return i
 
 
-def parseExcitations_DOS(folder, MOcount, fragment, printOutput=False):
-    fnames = glob.glob(folder+os.sep+'*.out')
+def parseNumberSpinMO_Excitations(output, MOcount):
+    # read MOs responsible for excitations and their spin
+    i = output.rfind('Major MO -> MO transitions for the above excitations')
+    for l in range(9): i = nextLine(output, i)
+    end_i = output.find('\n \n\n', i)
+    number = [];    spin = [];    MO = []
+    j = 1
+    twoSpins = True
+    while True:
+        num, i = nextWord(output, i)
+        assert num[:-1] == str(j), f'Wrong NumberSpinMO line format: {num[:-1]} != {j} \n' + output[i:i+300]
+        num = int(num[:-1])
+        number.append(num)
+
+        sp, i = nextWord(output, i)
+        if sp not in ['Alph', 'Beta']:
+            sp = 'Alph'   # only one spin (restriction calculation)
+            twoSpins = False
+        spin.append(sp)
+
+        i = output.find('->', i)
+        i += 2
+        mo, i = nextWord(output, i)
+        MO.append(mo)
+
+        i = output.find('\n\n\n', i)
+        if i > end_i or i < 0: break
+        i += 3
+        j += 1
+        if j > MOcount: break
+    return number, spin, MO, twoSpins
+
+
+def getNumberSpinMO_DOS(MOcount):
+    number = [];    spin = [];     MO = []
+    for l in range(MOcount):
+        number.append(l + 1)
+        spin.append('Alph')
+        MO.append(str(l + 1) + 'a')
+    for l in range(MOcount):
+        number.append(MOcount + l + 1)
+        spin.append('Beta')
+        MO.append(str(l + 1) + 'a')
+    return number, spin, MO
+
+
+def parseExcitationsDOS(folder, MOcount, fragment, DOS, printOutput=False):
+    """
+    Parse all ADF output files from folder.
+
+    :param folder:
+    :param MOcount:
+    :param fragment: fragment number according to FRAGMENTS section in .out file
+    :param DOS: True - parse DOS, False - parse excitations
+    """
+    fnames = glob.glob(folder + os.sep + '*.out')
+    from natsort import natsorted
     fnames = natsorted(fnames)
     print(fnames)
-     
+
     for filename in fnames:
         if printOutput: print('File', filename)
         with open(filename, 'r') as file: output = file.read()
-        # read MOs responsible for excitations and their spin
-        i = output.rfind('Major MO -> MO transitions for the above excitations')
-        for l in range(9): i = nextLine(output, i)
-        number = []; spin = []; MO = []
-        j = 1
-        while True:
-            num, i = nextWord(output, i)
-            if num[:-1] != str(j): break
-            num = int(num[:-1])
-            number.append(num)
-
-            sp, i = nextWord(output, i)
-            spin.append(sp)
-
-            i = output.find('->', i)
-            i += 2
-            mo, i = nextWord(output, i)
-            MO.append(mo)
-
-            for l in range(7): i = nextLine(output, i)
-            j += 1
-            if j > MOcount: break
-
-        if printOutput: print(j-1, 'transitions found')
+        if DOS:
+            number, spin, MO = getNumberSpinMO_DOS(MOcount)
+        else:
+            number, spin, MO, twoSpins = parseNumberSpinMO_Excitations(output, MOcount)
+            if printOutput: print(len(MO), 'transitions found')
         df = pd.DataFrame()
         df['Number'] = np.array(number)
         df['Spin'] = np.array(spin)
         df['MO'] = np.array(MO)
-        
+
         i = output.rfind("List of all MOs, ordered by energy, with the most significant SFO gross populations")
-        i = output.find(" *** SPIN 1 ***", i)
-        for l in range(6): i = nextLine(output, i)
+        i1 = output.find(" *** SPIN 1 ***", i)
+        if i1 < 0:
+            if not DOS:
+                assert not twoSpins
+            twoSpins = False
+            df = df.loc[:df.shape[0] // 2 - 1]
+            assert len(np.unique(df['Spin'])) == 1, str(df['Spin'])
+            for l in range(13): i = nextLine(output, i)
+        else:
+            if not DOS:
+                assert twoSpins
+            twoSpins = True
+            i = i1
+            for l in range(6): i = nextLine(output, i)
         k = output.find("\n\n", i)
         spin_str = [output[i:k]]
         word, i = nextWord(output, k, ignoreNewLine=True)
-        assert word == '***'
-        assert output[i+1:i+7] == 'SPIN 2'
-        for l in range(6): i = nextLine(output, i)
-        k1 = output.find("\n \n", i)
-        k2 = output.find("\n  pauli", i)
-        k = min(k1,k2)
-        spin_str.append(output[i:k])
+        if twoSpins:
+            assert word == '***'
+            assert output[i + 1:i + 7] == 'SPIN 2'
+            for l in range(6): i = nextLine(output, i)
+            k1 = output.find("\n \n", i)
+            k2 = output.find("\n  pauli", i)
+            if k2 < 0: k2 = k1
+            k = min(k1, k2)
+            assert k >= 0
+            spin_str.append(output[i:k])
         spin_df = []
         for s in spin_str:
             s = np.array([s], dtype=str)
             s = s.view('U1')
             i = 0
-            lastHead = s[i:i+30]
-            spaces = np.array([' ']*30)
+            lastHead = s[i:i + 30]
+            spaces = np.array([' '] * 30)
             while i is not None:
-                if np.all(s[i:i+30] == spaces): s[i:i+30] = lastHead
-                else: lastHead = s[i:i+30]
+                if np.all(s[i:i + 30] == spaces): s[i:i + 30] = lastHead
+                else: lastHead = s[i:i + 30]
                 i = nextLine(s, i)
                 # if i > 100000: break
             s = s.tostring()[::4].decode()
-            data = pd.read_csv(StringIO(s), sep=r'\s+', header=None, skipinitialspace=True, names=['E1','Occ1','MO_N', 'MO_A', 'percent', 'SFO_N', 'SFO_L', 'E2', 'Occ2', 'Fragment_N', 'Fragment_L'])
+            data = pd.read_csv(StringIO(s), sep=r'\s+', header=None, skipinitialspace=True, names=['E1', 'Occ1', 'MO_N', 'MO_A', 'percent', 'SFO_N', 'SFO_L', 'E2', 'Occ2', 'Fragment_N', 'Fragment_L'])
             for c in data.columns:
-                if np.sum(pd.isna(data[c]))>0:
+                if np.sum(pd.isna(data[c])) > 0:
                     ind = np.where(pd.isna(data[c]))[0][0]
-                    print('There is NaN in column '+c+'. Last good lines:')
-                    print(data.loc[ind-3:ind+3])
+                    print('There is NaN in column ' + c + '. Last good lines:')
+                    print(data.loc[ind - 3:ind + 3])
                     exit(1)
             spin_df.append(data)
-#        print(spin_df[1])
+        #        print(spin_df[1])
+        if printOutput and not DOS: print(data['SFO_L'])
 
         orbitals = ["D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2"]
-        #initialize arrays to store energies and occupations for MOs
-        energy = np.zeros(df.shape[0])
-        occ = np.zeros(df.shape[0])
+        if DOS:
+            # initialize arrays to store energies and occupations for MOs
+            energy = np.zeros(df.shape[0])
+            occ = np.zeros(df.shape[0])
         for orb in orbitals:
             n = df.shape[0]
             percent = np.zeros(n)
@@ -420,6 +416,7 @@ def parseExcitations_DOS(folder, MOcount, fragment, printOutput=False):
                 mo_a = mo[-1].upper()
                 spin = df['Spin'][i]
                 assert spin in ['Alph', 'Beta']
+                if not twoSpins: assert spin == 'Alph', spin
                 sdf = spin_df[0] if spin == 'Alph' else spin_df[1]
                 # ind0 = (sdf['MO_N'] == mo_n) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb)
                 # if np.sum(ind0) > 0:
@@ -430,27 +427,32 @@ def parseExcitations_DOS(folder, MOcount, fragment, printOutput=False):
                 if sum_ind == 1:
                     p = sdf['percent'][ind].values[0]
                     percent[i] = float(p[:-1])
-                    e = sdf['E1'][ind].values[0]
-                    o = sdf['Occ1'][ind].values[0]
-                    assert (energy[i]==0) or (energy[i]==e)
-                    energy[i] = e
-                    occ[i] = o
+                    if DOS:
+                        e = sdf['E1'][ind].values[0]
+                        o = sdf['Occ1'][ind].values[0]
+                        assert (energy[i] == 0) or (energy[i] == e)
+                        energy[i] = e
+                        occ[i] = o
                 else:
-                    assert sum_ind==0, str(sdf.loc[ind])
+                    assert sum_ind == 0, str(sdf.loc[ind])
                 if printOutput:
-                    pdone = i*100 // (n-1)
-                    if pdone != (i-1)*100 // (n-1):
+                    pdone = i * 100 // (n - 1)
+                    if pdone != (i - 1) * 100 // (n - 1):
                         t = time.time()
                         if pdone > 0:
-                            print('Orbital ' + orb +'.', pdone,'% done. Left: ',(100-pdone)*(t-t0)//pdone,'s')
+                            print('Orbital ' + orb + '.', pdone, '% done. Left: ', (100 - pdone) * (t - t0) // pdone, 's')
             df[orb] = percent
-        df['E'] = energy
-        df['Occ'] = occ
-        #change order of columns
-        df = df[['E', 'Number', 'Spin', 'MO', "D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2",'Occ']]
-        df.loc[df['Spin'] == 'Beta', orbitals] = -df.loc[df['Spin'] == 'Beta', orbitals]
-        df.to_csv(filename[:-4]+'_DOS_3d.csv', index=False)
-        #df.to_csv(os.path.splitext(filename)[0]+'_DOS_3d.csv', index=False)
+            if printOutput: print(df[orb])
+        if DOS:
+            df['E'] = energy
+            df['Occ'] = occ
+            # change order of columns
+            df = df[['E', 'Number', 'Spin', 'MO', "D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2", 'Occ']]
+            df.loc[df['Spin'] == 'Beta', orbitals] = -df.loc[df['Spin'] == 'Beta', orbitals]
+            df.to_csv(os.path.splitext(filename)[0] + '_DOS_3d.csv', index=False)
+        else:
+            df.to_csv(os.path.splitext(filename)[0] + '_excitations_3d.csv', index=False)
+
 
 def parse_ADFEmis(fileName, returnDOS=False):
     with open(fileName, 'r') as f: s = f.read()
@@ -493,3 +495,44 @@ def parse_ADFEmis(fileName, returnDOS=False):
         dos_sp = utils.Spectrum(DOS_en_unique, DOS_unique)
     if returnDOS: return spectrum, dos_sp
     else: return spectrum
+
+
+def spectrumExcitations(directory, N_points, Elarge, Gamma_max, Gamma_hole):
+    fnames = glob.glob(directory + '/*.out')
+    from natsort import natsorted
+    fnames = natsorted(fnames)
+    print(fnames)
+
+    for f1 in fnames:
+        file = open(f1, 'r')
+        output = file.read()
+        file.close()
+
+        # prepare the array of transitions Exc. We use findr to find first occurence from the end, since excitations section is printed several times
+        i = output.rfind('No.            E/eV        f(mu)            f(Q)           f(m)          f(O-mu)        f(M-mu)         f(tot)')
+        i = output.find('\n', i) + 1
+        i = output.find('\n', i) + 1
+        j = output.find('  End of higher-order oscillator strengths (X-ray spectroscopy)', i)
+        excitations = output[i:j - 3]
+
+        Exc = pd.read_csv(StringIO(excitations), sep='\s+', names=['Number', 'Energy', '3', '4', '5', '6', '7', 'Intensity'])
+        print(Exc)
+        Exc_numpy = np.zeros((N_points, 2))
+
+        Efermi = Exc['Energy'][1]  # set Fermi energy
+        print(Efermi)
+        Ei = Efermi - 15  # initial energy
+        Ef = Efermi + 55  # final energy in convoluted spectrum
+        Nexc = len(Exc.index)
+        print(Nexc)
+
+        for i in range(0, N_points):
+            print(str(int(i / N_points * 100)) + '%')
+            Exc_numpy[i, 0] = Ei + (i) / N_points * (Ef - Ei)
+            for j in range(1, Nexc):
+                conv = Gamma_hole + 2 / np.pi * np.arctan((Exc_numpy[i, 0] - Efermi) / Elarge) * Gamma_max
+                Exc_numpy[i, 1] = Exc_numpy[i, 1] + (Exc['3'] + Exc['4'])[j] * conv / ((Exc['Energy'][j] - Exc_numpy[i, 0]) ** 2 + conv ** 2)
+
+        plotting.plotToFile(Exc_numpy[:,0], Exc_numpy[:,1], 'spectrum', fileName=directory + '_spectrum_' + str(Gamma_hole) + 'eV.png', save_csv=True)
+        # file = open(filename.split('.')[0]+'_excitations.txt', 'w') #use only number 15 from 15.out
+        Exc.to_csv(directory + '_excitations.txt', line_terminator='\n', index=False)

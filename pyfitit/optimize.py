@@ -399,7 +399,7 @@ def minimize(fun, x0, bounds, constraints=(), fun_args=None, paramNames=None, me
     return fmin, xmin
 
 
-def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult='globalMinimumSearchResult',  fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extra_plot_func=None, printOnline=True):
+def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult='globalMinimumSearchResult', fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFunc=None, printOnline=True):
     """
     Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum.
     
@@ -413,7 +413,7 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
     :param fixParams: dict of paramName:value to fix
     :param contourMapCalcMethod: 'fast' - plot contours of the target function; 'thorough' - plot contours of the min of target function by all arguments except axes
     :param plotContourMaps: 'all' or list of 1-element or 2-elements lists of axes names to plot contours of target function 
-    :param extra_plot_func: user defined function to plot something on result contours: extra_plot_func(ax, axisNamesList)
+    :param extraPlotFunc: user defined function to plot something on result contours: func(ax, axisNamesList, xminDict)
     :return: sorted list of trysCount minimums of dicts {'value':.., 'x':...} 
     """
 
@@ -483,8 +483,8 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
         # method can violate bounds and constrains!
         for j in range(len(partialBounds)):
             g = xs_partial[ir]
-            xs_partial[ir][j] = max(g[j], bounds[j][0])
-            xs_partial[ir][j] = min(g[j], bounds[j][1])
+            xs_partial[ir][j] = max(g[j], partialBounds[j][0])
+            xs_partial[ir][j] = min(g[j], partialBounds[j][1])
         xs[ir] = getFullx(xs_partial[ir])
         # old = fmins[ir]
         fmins[ir] = targetFunction(xs[ir])
@@ -506,7 +506,7 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
         plotMap1d(param, targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_1d_target_func')
 
     def plot2d(param1, param2):
-        plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extra_plot_func=extra_plot_func)
+        plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extraPlotFunc=extraPlotFunc)
 
     if plotContourMaps == 'all':
         for i in range(len(notFixedParamNames)):
@@ -629,7 +629,7 @@ def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
 
 # axes - a pair of param names or param indexes
 # N = {paramName1:N1, paramName2:N2}
-def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix='', extra_plot_func=None):
+def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix='', extraPlotFunc=None):
     assert calMapMethod in ['fast', 'thorough']
     if isinstance(axes[0], str):
         assert (axes[0] in paramNames) and (axes[1] in paramNames)
@@ -705,9 +705,11 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     funcValues[~insideConstrains] = np.max(funcValues)
     fig, ax = plotting.createfig()
     CS = plt.contourf(param1mesh, param2mesh, funcValues, cmap='plasma')
-    plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=30, inline=False)
-    if extra_plot_func is not None:
-        extra_plot_func(ax, axisNames)
+    plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=15, inline=False)
+    ax.plot([xmin[axisInds[0]]], [xmin[axisInds[1]]], marker='o', markersize=5, color="red")
+    if extraPlotFunc is not None:
+        xminDict = {paramNames[i]:xmin[i] for i in range(len(xmin))}
+        extraPlotFunc(ax, axisNames, xminDict)
     # plt.clabel(CS, inline=1, fontsize=10)
     plt.xlabel(axisNames[0])
     plt.ylabel(axisNames[1])

@@ -1,6 +1,6 @@
 from . import utils
 utils.fixDisplayError()
-import os, warnings, json, matplotlib, copy
+import os, warnings, json, matplotlib, copy, sklearn
 from . import optimize, ML
 import numpy as np
 import pandas as pd
@@ -27,6 +27,8 @@ def createfig(interactive=False, figsize=None, figdpi=None, **kwargs):
 def savefig(fileName, fig, figdpi=None):
     if figdpi is None:
         figdpi = 300
+    folder = os.path.split(fileName)[0]
+    if folder!= '' and not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
     fig.savefig(fileName, dpi=figdpi)
 
 
@@ -39,6 +41,7 @@ def closefig(fig):
     else:
         print('Warning: can\'t close not existent figure')
     if utils.isJupyterNotebook(): plt.ion()
+
 
 # append = {'label':..., 'data':..., 'twinx':True} or  [{'label':..., 'data':...}, {'label':..., 'data':...}, ...]
 def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', title='', shift=None):
@@ -101,9 +104,12 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     savefig(folder+'/'+fileName+'.png', fig)
     closefig(fig)
     # print(exp_e.size, exp_xanes.size, fdmnes_xan.size)
+    if os.path.exists(folder+'/'+fileName+'.csv'): os.remove(folder+'/'+fileName+'.csv')
     with open(folder+'/'+fileName+'.csv', 'a') as f:
         np.savetxt(f, [exp_e, exp_xanes], delimiter=',')
         np.savetxt(f, [fdmnes_en, fdmnes_xan], delimiter=',')
+        if xanes0 is not None:
+            np.savetxt(f, [xanes0.energy+shift, fdmnes_xan0], delimiter=',')
 
 
 # region = {paramName1:[a,b], paramName2:[c,d]}, N = {paramName1:N1, paramName2:N2}
@@ -190,35 +196,67 @@ def wrap(s, n):
     return s
 
 
-# x1,y1,label1,x2,y2,label2,....,filename
-def plotToFile(*p, fileName=None, save_csv=True, title='', xlim=None):
-    assert len(p)%3 == 0
+#
+def plotToFile(*p, fileName=None, save_csv=True, title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None):
+    """
+    Simple plot multiple graphs to file
+    :param p: sequence of triads x1,y1,label1,x2,y2,label2,....
+    :param fileName:
+    :param save_csv: True/False
+    :param title:
+    :param xlabel:
+    :param ylabel:
+    :param xlim:
+    :param ylim:
+    :param plotMoreFunction: function(ax)
+    :return:
+    """
+    assert len(p)%3 == 0, f'Number of parameters {len(p)} is not multiple of 3'
     fig, ax = createfig()
     n = len(p)//3
+    labels = {}
     for i in range(n):
-        # print('plotting '+p[i*3+2]+': ', p[i*3], p[i*3+1])
-        ax.plot(p[i*3], p[i*3+1], label=p[i*3+2])
+        if isinstance(p[i*3+2], str):
+            labels[i] = p[i*3+2]
+            ax.plot(p[i*3], p[i*3+1], label=labels[i])
+        else:
+            params = p[i*3+2]
+            assert isinstance(params, dict)
+            if 'format' in params:
+                fmt = params['format']
+                del params['format']
+                ax.plot(p[i * 3], p[i * 3 + 1], fmt, **params)
+            else:
+                ax.plot(p[i * 3], p[i * 3 + 1], **params)
+            if 'label' in params: labels[i] = params['label']
     if title != '':
         # print(title)
         title = wrap(title, 100)
         ax.set_title(title)
-    ax.legend()
     if xlim is not None: ax.set_xlim(xlim[0], xlim[1])
-    fig.set_size_inches((16/3*2, 9/3*2))
+    if ylim is not None: ax.set_ylim(ylim[0], ylim[1])
+    if xlabel != '': ax.set_xlabel(xlabel)
+    if ylabel != '': ax.set_ylabel(ylabel)
+    if plotMoreFunction is not None:
+        plotMoreFunction(ax)
+    ax.legend()
+    fig.tight_layout()
     if fileName is None: fileName = 'graph.png'
     folder = os.path.split(os.path.expanduser(fileName))[0]
-    if not os.path.exists(folder): os.makedirs(folder)
-    # print('saving to file: '+fileName)
+    if folder != '' and not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
+    fig.tight_layout()
     savefig(fileName, fig)
     closefig(fig)
 
     if save_csv:
         with open(os.path.splitext(fileName)[0]+'.csv', 'w') as f:
             for i in range(n):
-                f.write(p[i*3+2]+' x: ')
-                np.savetxt(f, p[i*3], delimiter=',')
-                f.write(p[i*3+2]+' y: ')
-                np.savetxt(f, p[i*3+1], delimiter=',')
+                label = labels[i] if i in labels else str(i)
+                f.write(label+' x: ')
+                np.savetxt(f, p[i*3], delimiter=',', newline=',')
+                f.write('\n')
+                f.write(label+' y: ')
+                np.savetxt(f, p[i*3+1], delimiter=',', newline=',')
 
 
 def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryParams, xanes, N=20, estimator=ML.Normalize(ML.makeQuadric(ML.RidgeCV(alphas=[0.01,0.1,1,10,100])), xOnly=False) ):
@@ -318,3 +356,120 @@ def getPlotLim(z, gap=0.1):
     M = np.max(z)
     d = M-m
     return [m-d*gap, M+d*gap]
+
+
+def addColorBar(mappable, fig, ax, labelMaps, label, ticksPos, ticks):
+    cbar = fig.colorbar(mappable, ax=ax, extend='max', orientation='vertical', ticks=ticksPos, format='%.1g')
+    if label in labelMaps:
+        cbarTicks = [None]*len(labelMaps[label])
+        for name in labelMaps[label]:
+            cbarTicks[labelMaps[label][name]] = name
+        cbar.ax.set_yticklabels(cbarTicks)
+    else:
+        cbar.ax.set_yticklabels(ticks)
+
+
+def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=None, markersize=500, marker='o', alpha=0.8, title='', xlabel='', ylabel='', fileName='scatter.png', plotMoreFunction=None):
+    """
+
+    :param x:
+    :param y:
+    :param color:
+    :param colorMap: 'plasma' (default) or 'gist_rainbow' or any other
+    :param marker_text:
+    :param text_size: if None - auto evaluation
+    :param markersize:
+    :param marker:
+    :param alpha:
+    :param title:
+    :param xlabel:
+    :param ylabel:
+    :param fileName:
+    :param plotMoreFunction: function(ax)
+    :return:
+    """
+    if isinstance(x, pd.Series): x = x.to_numpy()
+    if isinstance(y, pd.Series): y = y.to_numpy()
+    if isinstance(color, pd.Series): color = color.to_numpy()
+    if isinstance(color, np.ndarray):
+        assert color.dtype in ['float64', 'int32'], color.dtype
+    assert len(x) == len(y)
+    if color is not None: assert len(color) == len(x)
+    fig,ax = createfig()
+    if colorMap == 'hsv':
+        colorMap = truncate_colormap('hsv', minval=0, maxval=0.9)
+        trunc = True
+    else: trunc = False
+    if color is not None:
+        c = color
+        c_min = np.min(c)
+        c_max = np.max(c)
+        coeff = 0.9 if trunc else 1
+        transform = lambda r: (r - c_min) / (c_max - c_min) * coeff
+        if ML.isClassification(color):
+            ticks = np.unique(color)
+        else:
+            ticks = np.linspace(c_min, c_max, 10)
+        ticksPos = transform(ticks)
+        sc = ax.scatter(x, y, markersize, marker=marker, c=transform(c), cmap=colorMap, vmin=0, vmax=1, alpha=alpha)
+        addColorBar(sc, fig, ax, {}, '', ticksPos, ticks)
+    else:
+        ax.scatter(x, y, markersize, color='green', alpha=alpha)
+    if marker_text is not None:
+        assert len(marker_text) == len(x)
+        if text_size is None: text_size = np.sqrt(markersize)*0.4
+        for i in range(len(marker_text)):
+            ax.text(x[i], y[i], str(marker_text[i]), ha='center', va='center', size=text_size)
+    if title != '':
+        title = wrap(title, 100)
+        ax.set_title(title)
+    ax.set_xlim(getPlotLim(x))
+    ax.set_ylim(getPlotLim(y))
+    if xlabel != '': ax.set_xlabel(xlabel)
+    if ylabel != '': ax.set_ylabel(ylabel)
+    if plotMoreFunction is not None:
+        plotMoreFunction(ax)
+    savefig(fileName, fig)
+    closefig(fig)
+    csv_data = pd.DataFrame()
+    csv_data['x'] = x
+    csv_data['y'] = y
+    if color is not None: csv_data['color'] = color
+    csv_data.to_csv(os.path.splitext(fileName)[0] + '.csv', index=False)
+
+
+def plotConfusionMatrixHelper(conf_mat, accuracy, labelName, uniqueLabelValues, fileName):
+    fig, ax = createfig()
+    pos = ax.matshow(conf_mat.T, cmap='plasma')
+    fig.colorbar(pos, ax=ax)
+    title = 'Confusion matrix for label ' + labelName + f'. Accuracy = {accuracy:.2f}'
+    ax.set_title(title)
+    ax.set_xlabel('predicted ' + labelName)
+    ax.set_ylabel('true ' + labelName)
+    ticks = [''] + ['%g' % v for v in uniqueLabelValues]
+    m = len(uniqueLabelValues)
+    ax.set_xticklabels(ticks)
+    ax.set_yticklabels(ticks)
+    # print(ticks)
+    for i in range(m):
+        for j in range(m):
+            ax.text(i, j, '%.2g' % conf_mat[i, j], ha='center', va='center', size=10)
+    savefig(fileName, fig)
+    closefig(fig)
+
+
+def plotConfusionMatrix(trueLabels, predictedLabels, labelName, fileName=''):
+    n = len(trueLabels)
+    assert n == len(predictedLabels)
+    conf_mat = sklearn.metrics.confusion_matrix(trueLabels, predictedLabels)/n
+    # print(conf_mat)
+    if fileName == '': fileN = f'conf_matr_{labelName}.png'
+    else: fileN = fileName
+    acc = np.sum(trueLabels == predictedLabels) / len(trueLabels)
+    plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+    for j in range(len(np.unique(trueLabels))):
+        sum = np.sum(conf_mat[:,j])
+        if sum != 0: conf_mat[:,j] /= sum
+    fileN = os.path.splitext(fileN)[0] + '_normed' + os.path.splitext(fileN)[1]
+    plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+

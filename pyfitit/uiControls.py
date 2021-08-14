@@ -596,12 +596,6 @@ class SpectrumSliders:
         builder = ControlsBuilder()
         parameters = ProjectParametersBuilder(builder, project, self.theoryProcessingPipeline, defaultParams)
         parameters.addGeometryParams(self.sample.params)
-        Efermi = self.project.FDMNES_smooth['Efermi']
-        if 'shift' in defaultParams:
-            shift = defaultParams['shift']
-        else:
-            shift = self.project.defaultSmoothParams['fdmnes']['shift']
-            
         parameters.addPipelineSliders()
         # energy range slider
         e0 = project.spectrum.energy[0] - 10
@@ -1461,13 +1455,14 @@ class FitSmooth:
        extraSpectra - extra spectra to smooth and plot {'label':spectrum1, ...}
        extraGraphs - extra graphs to plot [{'x':.., 'y':.., 'label':..}, ...]
     """
-    def __init__(self, spectrum, project, defaultParams=None, diffFrom=None, norm=None, smoothType='fdmnes', extraSpectra=None, extraGraphs=None, debug=True):
+    def __init__(self, spectrum, project, defaultParams=None, diffFrom=None, norm=None, smoothType='fdmnes', normType='multOnly', extraSpectra=None, extraGraphs=None, debug=True):
         defaultParams = FittingUtils.checkDefaultParams(defaultParams)
         self.spectrum = spectrum
         self.project = copy.deepcopy(project)
         self.diffFrom = diffFrom
         self.norm = norm
         self.smoothType = smoothType
+        self.normType = normType
         self.extraSpectra = extraSpectra
         self.extraGraphs = extraGraphs
         self.manager = None
@@ -1567,7 +1562,7 @@ class FitSmooth:
             for pName in smoothParamNames:
                 project1.defaultSmoothParams[self.smoothType].setAndExpandInterval(pName, params[pName])
                 commonParams0[pName] = params[pName]
-            optimParams = smoothLib.fitSmooth([project1], [self.spectrum], smoothType = self.smoothType, fixParamNames=[], commonParams0=commonParams0, targetFunc='l2(max)', optimizeWithoutPlot=True)
+            optimParams = smoothLib.fitSmooth([project1], [self.spectrum], smoothType=self.smoothType, normType=self.normType, fixParamNames=[], commonParams0=commonParams0, targetFunc='l2(max)', optimizeWithoutPlot=True)
             for pName in smoothParamNames:
                 FittingUtils.setParamForContext(context, pName, optimParams[pName])
             self.update(context)
@@ -1576,19 +1571,22 @@ class FitSmooth:
         project = self.project
         spectrum = self.spectrum
         smoothType = self.smoothType
+        normType = self.normType
         exp_xanes = project.spectrum.intensity
         if 'norm' in params: norm = params['norm']
         else: norm = None
-        xanes_sm, norm1 = smoothLib.smoothInterpNorm(params, spectrum, smoothType, project.spectrum, project.intervals['fit_norm'], norm)
+        xanes_sm, norm1 = smoothLib.smoothInterpNorm(params, spectrum, smoothType, project.spectrum, project.intervals['fit_norm'], norm, normType=normType)
         xanes_sm = xanes_sm.intensity
-        absorbPredictionNormalized = spectrum.intensity / np.mean(spectrum.intensity[-3:]) * np.mean(exp_xanes[-3:])
+        e_last = project.intervals['fit_norm'][1]
+        shift = params['shift']
+        absorbPredictionNormalized = spectrum.intensity / spectrum.val(e_last-shift) * project.spectrum.val(e_last)
         extraSpectraSmoothed = {}
         if extraSpectra is not None:
             for sp in extraSpectra:
-                extraSpectraSmoothed[sp] = smoothLib.smoothInterpNorm(params, extraSpectra[sp], smoothType, project.spectrum, project.intervals['fit_norm'], norm)[0]
+                extraSpectraSmoothed[sp] = smoothLib.smoothInterpNorm(params, extraSpectra[sp], smoothType, project.spectrum, project.intervals['fit_norm'], norm, normType=normType)[0]
         diffFrom = self.diffFrom
         if diffFrom is not None:
-            smoothedXanesBase, _ = smoothLib.smoothInterpNorm(params, diffFrom['xanesBase'], smoothType, diffFrom['projectBase'].spectrum, project.intervals['fit_norm'], norm)
+            smoothedXanesBase, _ = smoothLib.smoothInterpNorm(params, diffFrom['xanesBase'], smoothType, diffFrom['projectBase'].spectrum, project.intervals['fit_norm'], norm, normType=normType)
             smoothedXanesBase = smoothedXanesBase.intensity
             xanes_sm = (xanes_sm - smoothedXanesBase) * params['purity']
             absorbBaseNormalized,_ = diffFrom['xanesBase'].intensity  / np.mean(diffFrom['xanesBase'].intensity) * np.mean(exp_xanes[-3:])
@@ -1605,7 +1603,11 @@ class FitSmooth:
         self.adjustFitIntervals(shift)
         absorbPredictionNormalized, smoothedPredictionNormalized, extraSpectraSmoothed, norm1 = self.smooth(self.extraSpectra, **params)
         if 'norm' not in params:
-            context.plotData['norm'] = {'type': 'metric', 'label': 'norm', 'text': '%.4f' % norm1, 'value': norm1}
+            if isinstance(norm1, dict):
+                for norm_param in norm1:
+                    context.plotData['norm_'+norm_param] = {'type': 'metric', 'label': 'norm_'+norm_param, 'text': '%.4g' % norm1[norm_param], 'value': norm1[norm_param]}
+            else:
+                context.plotData['norm'] = {'type': 'metric', 'label': 'norm', 'text': '%.4f' % norm1, 'value': norm1}
         spectrum = utils.Spectrum(self.spectrum.energy+shift, absorbPredictionNormalized, copy=True)
         #plotting
         exp_e = project.spectrum.energy

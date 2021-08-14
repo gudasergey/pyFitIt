@@ -1,13 +1,18 @@
 #  author "Nathaniel Williams"
 #  license "Apache 2.0"
 
-import threading
+import threading, traceback, logging, sys
 from queue import Queue
 
 
 QUEUE_GET_TIMEOUT = 30 * 24 * 60 * 60
 
 THREAD_DONE = object()
+
+
+class ThreadException:
+    def __init__(self, exception_info):
+        self.exception_info = exception_info
 
 
 class LazyThreadPoolExecutor(object):
@@ -17,6 +22,7 @@ class LazyThreadPoolExecutor(object):
         self.thread_sem = threading.Semaphore(num_workers)
         self._shutdown = threading.Event()
         self.threads = []
+        self.iterable = None
 
     def map(self, predicate, iterable):
         self._shutdown.clear()
@@ -42,12 +48,15 @@ class LazyThreadPoolExecutor(object):
 
     def _make_worker(self, predicate):
         def _w():
-            with self.thread_sem:
-                for thing in self.iterable:
-                    self.result_queue.put(predicate(thing))
-                    if self._shutdown.is_set():
-                        break
-            self.result_queue.put(THREAD_DONE)
+            try:
+                with self.thread_sem:
+                    for thing in self.iterable:
+                        self.result_queue.put(predicate(thing))
+                        if self._shutdown.is_set():
+                            break
+                self.result_queue.put(THREAD_DONE)
+            except Exception:
+                self.result_queue.put(ThreadException(sys.exc_info()))
         return _w
 
     def _result_iterator(self):
@@ -57,7 +66,10 @@ class LazyThreadPoolExecutor(object):
             # Hopefully one year is long enough...
             # See http://bugs.python.org/issue1360
             result = self.result_queue.get(True, QUEUE_GET_TIMEOUT)
-            if result is not THREAD_DONE:
+            if isinstance(result, ThreadException):
+                print('Error in lazy execution thread', file=sys.stderr)
+                traceback.print_exception(*result.exception_info)
+            elif result is not THREAD_DONE:
                 yield result
             else:
                 # if all threads have exited

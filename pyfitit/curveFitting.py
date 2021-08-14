@@ -1,4 +1,4 @@
-import scipy, sklearn, copy
+import scipy, sklearn, copy, warnings
 import numpy as np
 from lmfit.models import ExpressionModel, PolynomialModel
 from . import utils
@@ -7,19 +7,46 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
 
-# возвращает [b,a] из модели y=ax+b
-def linearReg(x,y,de=None):
-    if de is None: de = np.ones(len(x))
-    N = np.sum(de)
-    sumX = np.sum(x*de)
-    sumX2 = np.sum(x*x*de)
-    sumY = np.sum(y*de)
-    sumXY = np.sum(x*y*de)
-    det = N*sumX2-sumX*sumX
+
+def linearReg2(y_true, f1, f2, weights=None):
+    """
+    returns [w1,w2] from the model y = w1*f1 + w2*f2. If de is not None, than model: y(e) = w1*f1(e) + w2*f2(e), and weights = e[1:]-e[:-1], we minimize integral of squared error
+    :param y_true:
+    :param f1: feature1
+    :param f2: feature2
+    :param weights: point weights
+    :return: [w1,w2] from the model y = w1*f1 + w2*f2
+    """
+    assert len(y_true) == len(f1) and len(f1) == len(f2)
+    if weights is None: weights = np.ones(len(y_true))
+    matr_11 = np.sum(f1*f1*weights)
+    matr_12 = np.sum(f1*f2*weights)
+    matr_21 = matr_12
+    matr_22 = np.sum(f2*f2*weights)
+    rhs1 = np.sum(y_true*f1*weights)
+    rhs2 = np.sum(y_true*f2*weights)
+    det = matr_11*matr_22 - matr_21*matr_12
     if det == 0:
-        nn = abs(sumX)+abs(N)
-        return [-sumX/nn, N/nn]
-    return [(sumY*sumX2-sumXY*sumX)/det, (N*sumXY-sumX*sumY)/det]
+        norm_f1 = np.sqrt(np.sum(f1**2*weights))
+        norm_f2 = np.sqrt(np.sum(f2**2*weights))
+        norm_y = np.sqrt(np.sum(y_true ** 2 * weights))
+        if norm_f1 != 0:
+            return [norm_y/norm_f1, 0]
+        elif norm_f2 != 0:
+            return [0, norm_y / norm_f2]
+        else: return [0,0]
+    return [(rhs1*matr_22-rhs2*matr_12)/det, (matr_11*rhs2-matr_21*rhs1)/det]
+
+
+def linearReg(x,y,de=None):
+    """
+    returns [b,a] from the model y=ax+b. If de is not None, than model: y(e) = a*x(e) + b, and de = e[1:]-e[:-1], we minimize integral of squared error
+    :param x:
+    :param y:
+    :param de: point weights
+    :return: [b,a] from the model y=ax+b
+    """
+    return linearReg2(y, np.ones(len(x)), x, weights=de)
 
 
 def linearReg_mult_only(x,y,de):
@@ -29,7 +56,8 @@ def linearReg_mult_only(x,y,de):
     return sumXY/sumX2
 
 
-def fit_by_regression_mult_only(exp_e, exp_xanes, fdmnes_xan, fitEnergyInterval):
+def fit_by_regression(exp_e, exp_xanes, fdmnes_xan, fitEnergyInterval, normType='multOnly'):
+    assert normType in ['multOnly', 'linearMult', 'mult and add']
     ind = (fitEnergyInterval[0]<=exp_e) & (exp_e<=fitEnergyInterval[1])
     e = exp_e[ind]
     ex = exp_xanes[ind]
@@ -37,21 +65,34 @@ def fit_by_regression_mult_only(exp_e, exp_xanes, fdmnes_xan, fitEnergyInterval)
     mex = (ex[1:]+ex[:-1])/2
     mfx = (fx[1:]+fx[:-1])/2
     de = e[1:]-e[:-1]
-    w = linearReg_mult_only(mfx, mex, de)
-    return w*fdmnes_xan
+    me = (e[1:] + e[:-1]) / 2
+    if normType == 'multOnly':
+        w = linearReg_mult_only(mfx, mex, de)
+        norm = 1/w
+        return fdmnes_xan/norm, norm
+    elif normType == 'mult and add':
+        [b, a] = linearReg(mfx, mex, de)
+        return a*fdmnes_xan + b, {'a':a, 'b':b}
+    else:
+        assert normType == 'linearMult'
+        [a, b] = linearReg2(mex, mfx*me, mfx, weights=de)
+        return (a*exp_e + b)*fdmnes_xan, {'a':a, 'b':b}
 
 
-def fit_to_experiment_by_norm_or_regression_mult_only(exp_e, exp_xanes, fit_interval, fdmnes_en, fdmnes_xan, shift, norm = None):
+def fit_to_experiment_by_norm_or_regression(exp_e, exp_xanes, fit_interval, fdmnes_en, fdmnes_xan, shift, norm=None, normType='multOnly'):
     fdmnes_en = fdmnes_en + shift
     fdmnes_xan = np.interp(exp_e, fdmnes_en, fdmnes_xan)
     if norm is None:
-        fdmnes_xan1 = fit_by_regression_mult_only(exp_e, exp_xanes, fdmnes_xan, fit_interval)
-        s = np.sum(fdmnes_xan1)
-        if s != 0: norm = np.sum(fdmnes_xan)/s
-        else: norm = 0
-        # print(norm)
+        fdmnes_xan1, norm = fit_by_regression(exp_e, exp_xanes, fdmnes_xan, fit_interval, normType=normType)
         return fdmnes_xan1, norm
-    else: return fdmnes_xan/norm, norm
+    else:
+        if normType == 'multOnly':
+            return fdmnes_xan/norm, norm
+        elif normType == 'mult and add':
+            return fdmnes_xan*norm['a'] + norm['b'], norm
+        else:
+            assert normType == 'linearMult'
+            return fdmnes_xan * (norm['a']*exp_e + norm['b']), norm
 
 
 def findExpEfermi(exp_e, exp_xanes, search_shift_level):
@@ -74,6 +115,7 @@ def findEfermiByArcTan(energy, intensity):
     :param intensity:
     :return: best_params = {'a':..., 'x0':...}, arctan_y
     """
+    assert len(energy) == len(intensity), f'{len(energy)} != {len(intensity)} ' + str(energy.shape) + ' ' + str(intensity.shape)
     last = np.mean(intensity[-5:])
     efermi0, _, _ = findExpEfermi(energy, intensity, 0.5*last)
     mod = ExpressionModel('b/(1+exp(-a*(x - x0)))+c')
@@ -84,7 +126,131 @@ def findEfermiByArcTan(energy, intensity):
     return result.best_values, result.best_fit
 
 
-def substractBase(x, y, peakInterval, baseFitInterval, model, usePositiveConstrains, extrapolate, useStartParams=None):
+def substractLinearBase(x, y, initialPeakInterval=None, changePeakInterval='no', changeEdgeDirections=None):
+    """
+    Substract linear base from function y such that: base <= y for all x in peakInterval. In case of multiple existent bases take the base according to fixEdgePriority
+    :param x:
+    :param y:
+    :param initialPeakInterval:
+    :param changePeakInterval: permit to correct peak interval: 'no' - do not change, 'make positive' - change only if peak is not positive on peakInterval, 'expand' - expand to as biggest as possible keeping peak positive
+    :param changeEdgeDirections: dict {'left':subset[-1,1], 'right':subset[-1,1]}, default={'left':[+1], 'right':[-1]}
+    :return: x_peak, y_peak-(a*x_peak+b), [a,b]
+    """
+    assert len(x) == len(y)
+    assert len(x.shape) == 1 and len(y.shape) == 1
+    assert np.all(np.diff(x) > 0)
+    assert changePeakInterval in ['no', 'make positive', 'expand']
+    if initialPeakInterval is None: initialPeakInterval = [x[0], x[-1]]
+    if changeEdgeDirections is None: changeEdgeDirections = {'left':[+1], 'right':[-1]}
+    eps = 1e-10
+    assert set(changeEdgeDirections.keys()) == {'left', 'right'}
+    peakInterval = copy.deepcopy(initialPeakInterval)
+    peakIntervalInd = np.array([utils.findNearest(x, peakInterval[0], returnInd=True, ignoreDirectionIfEmpty=True), utils.findNearest(x, peakInterval[1], returnInd=True, ignoreDirectionIfEmpty=True)])
+
+    def isGoodIntervalInd(peakIntervalInd):
+        return (peakIntervalInd[0] < peakIntervalInd[1]) and (peakIntervalInd[0] >= 0) and (peakIntervalInd[1] <= len(x)-1)
+
+    if not isGoodIntervalInd(peakIntervalInd):
+        assert peakIntervalInd[0] == peakIntervalInd[1]
+        if peakIntervalInd[0] > 0: peakIntervalInd[0] -= 1
+        else:
+            if peakIntervalInd[1] < len(x)-1: peakIntervalInd[1] += 1
+            else:
+                i = peakIntervalInd[0]
+                return np.array([x[i]]), np.array([0]), [0,0]
+
+    initialPeakIntervalInd = copy.deepcopy(peakIntervalInd)
+
+    def getLinearBase(peakIntervalInd):
+        assert isGoodIntervalInd(peakIntervalInd)
+        a = (y[peakIntervalInd[1]] - y[peakIntervalInd[0]]) / (x[peakIntervalInd[1]] - x[peakIntervalInd[0]])
+        b = y[peakIntervalInd[0]] - a * x[peakIntervalInd[0]]
+        return a, b
+
+    def result(peakIntervalInd):
+        a, b = getLinearBase(peakIntervalInd)
+        x_peak = x[peakIntervalInd[0]:peakIntervalInd[1]+1]
+        y_peak = y[peakIntervalInd[0]:peakIntervalInd[1]+1]
+        return x_peak, y_peak-(a*x_peak+b), [a,b]
+
+    def isPositive(peakIntervalInd, i=None, returnDeviation=False):
+        if i is None:
+            x_peak, peak, lin = result(peakIntervalInd)
+            a, b = lin
+            dev = peak + eps*np.abs(a*x_peak+b)
+            if returnDeviation: return dev
+            else: return np.all(dev >= 0)
+        else:
+            a, b = getLinearBase(peakIntervalInd)
+            return y[i] - (a*x[i] + b) >= -eps*np.abs(y[i])
+
+    if changePeakInterval == 'no': return result(peakIntervalInd)
+
+    if not isPositive(peakIntervalInd):
+        while True:
+            oldPeakIntervalInd = copy.deepcopy(peakIntervalInd)
+            if +1 in changeEdgeDirections['left']:
+                if not isPositive(peakIntervalInd, peakIntervalInd[0]+1):
+                    peakIntervalInd[0] += 1
+            if -1 in changeEdgeDirections['right']:
+                if not isPositive(peakIntervalInd, peakIntervalInd[1]-1):
+                    peakIntervalInd[1] -= 1
+            if np.all(oldPeakIntervalInd == peakIntervalInd):
+                dev = isPositive(peakIntervalInd, returnDeviation=True)
+                if np.all(dev >= 0): break
+                i = np.argmin(dev) + peakIntervalInd[0]
+                if abs(x[i]-x[peakIntervalInd[0]]) < abs(x[i]-x[peakIntervalInd[1]]):
+                    if +1 in changeEdgeDirections['left']:
+                        peakIntervalInd[0] = i
+                    else:
+                        if -1 in changeEdgeDirections['right']:
+                            peakIntervalInd[1] = i
+                        else:
+                            warnings.warn('Peak is not positive, but interval change is prohibited')
+                else:
+                    if -1 in changeEdgeDirections['right']:
+                        peakIntervalInd[1] = i
+                    else:
+                        if +1 in changeEdgeDirections['left']:
+                            peakIntervalInd[0] = i
+                        else:
+                            warnings.warn('Peak is not positive, but interval change is prohibited')
+                if np.all(oldPeakIntervalInd == peakIntervalInd): break
+
+    def expand(peakIntervalInd, upToInitial):
+        peakIntervalInd = copy.deepcopy(peakIntervalInd)
+        # if not upToInitial: print(peakIntervalInd, isPositive(peakIntervalInd))
+        if not isPositive(peakIntervalInd): return
+        while True:
+            oldPeakIntervalInd1 = copy.deepcopy(peakIntervalInd)
+            if -1 in changeEdgeDirections['left'] and peakIntervalInd[0] > 0:
+                if isPositive([peakIntervalInd[0]-1,peakIntervalInd[1]], peakIntervalInd[0]):
+                    if not upToInitial or peakIntervalInd[0] > initialPeakIntervalInd[0]:
+                        peakIntervalInd[0] -= 1
+            if not isPositive(peakIntervalInd):
+                peakIntervalInd = copy.deepcopy(oldPeakIntervalInd1)
+            oldPeakIntervalInd2 = copy.deepcopy(peakIntervalInd)
+            if +1 in changeEdgeDirections['right'] and peakIntervalInd[1] < len(x)-1:
+                if isPositive([peakIntervalInd[0], peakIntervalInd[1]+1], peakIntervalInd[1]):
+                    if not upToInitial or peakIntervalInd[1] < initialPeakIntervalInd[1]:
+                        peakIntervalInd[1] += 1
+            if not isPositive(peakIntervalInd):
+                peakIntervalInd = copy.deepcopy(oldPeakIntervalInd2)
+            # if not upToInitial: print(peakIntervalInd)
+            if np.all(oldPeakIntervalInd1 == peakIntervalInd): break
+        # if not upToInitial: print('result =', peakIntervalInd)
+        return peakIntervalInd
+
+    # print('before expand1. peakIntervalInd =',peakIntervalInd)
+    peakIntervalInd = expand(peakIntervalInd, upToInitial=True)
+    if changePeakInterval == 'expand':
+        # print('before expand2. peakIntervalInd =', peakIntervalInd)
+        peakIntervalInd = expand(peakIntervalInd, upToInitial=False)
+    # print('final result. peakIntervalInd =',peakIntervalInd)
+    return result(peakIntervalInd)
+    
+
+def substractBase(x, y, peakInterval, baseFitInterval, model, usePositiveConstrains, extrapolate=None, useStartParams=None):
     """
     Fit base by Cauchy function and substract from y.
     :param x: argument
@@ -94,10 +260,11 @@ def substractBase(x, y, peakInterval, baseFitInterval, model, usePositiveConstra
     :param model: 'cauchy' or 'bezier' or 'arctan'
     :param usePositiveConstrains: add constrain y_base <= y
     :param extrapolate: {'left':percent_dx_left, 'right':percent_dx_right}
-    :return: x_peak, y_peak - peak with substracted base (on interval peakInterval); x_base, y_base - base on baseFitInterval
+    :return: x_peak, y_sub - peak with substracted base (on interval peakInterval); x_base, y_base - base on baseFitInterval; y_peak - peak part of original func; y_sub_full - y_sub expanded to baseFitInterval
     """
     assert model in ['cauchy', 'bezier', 'arctan']
     assert len(x) == len(y)
+    if extrapolate is None: extrapolate = {}
     ind_peak = (x >= peakInterval[0]) & (x <= peakInterval[1])
     ind_base_full = (x >= baseFitInterval[0]) & (x <= baseFitInterval[1])
     ind_base = ind_base_full & ~ind_peak
@@ -166,6 +333,7 @@ def substractBase(x, y, peakInterval, baseFitInterval, model, usePositiveConstra
         params = mod.make_params(a=a0, b=b0, c=c0, x0=x00, d=d0)
         param_order = {'a':0, 'b':1, 'c':2, 'x0':3, 'd':4}
         start0 = [params['a'].value, params['b'].value, params['c'].value, params['x0'].value, params['d'].value]
+        assert np.all(x[1:]-x[:-1] > 0), str(x)
         max_dy = np.max((y[1:]-y[:-1])/(x[1:]-x[:-1]))
         params['a'].set(min=0); params['a'].set(max=max_dy/(np.max(y)-np.min(y))*10)
         params['b'].set(min=0)
@@ -333,3 +501,39 @@ def microWaves(energy, intensity, maxWaveLength):
     assert np.max(np.abs(mean-mean_check)) < np.std(mean_check)
 
     return intensity-mean, mean
+
+
+def interpExtrap(x, xp, yp, min_dx=None, min_n=3):
+    """
+    Do interpolation and linear extrapolation
+    :param x:
+    :param xp:
+    :param yp:
+    :param min_dx: min edge interval to use for linear extrapolation
+    :param min_n: min number of edge points to use for linear extrapolation
+    :return: y values in x
+    """
+    if np.isscalar(x): x = np.array([x])
+    if isinstance(x, list): x = np.array(x)
+    y = np.zeros(x.shape)
+    check = np.zeros(x.shape)
+    ind = (xp[0] <= x) & (x <= xp[-1])
+    y[ind] = np.interp(x[ind], xp, yp)
+    check[ind] += 1
+    if np.sum(~ind) == 0:
+        assert np.all(check == 1)
+        return y
+    # edges
+    for edge in [-1, +1]:
+        edge_x = xp[-(edge+1)//2]
+        # indexes of xp edge points
+        ind = np.where((xp - edge_x)*edge + min_dx > 0)[0]
+        if len(ind) < min_n:
+            ind = np.arange(min_n)
+            if edge == 1: ind = -ind-1
+        b,a = linearReg(xp[ind], yp[ind])
+        ind_x = (x - edge_x) * edge > 0
+        y[ind_x] = a * x[ind_x] + b
+        check[ind_x] += 1
+    assert np.all(check == 1)
+    return y

@@ -26,7 +26,8 @@ def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, C
         f.write('Filout\n')
         f.write('out\n\n')
         f.write('Radius\n')
-        f.write('%.2f\n\n' % radius)
+        if isinstance(radius, str): f.write(radius+'\n\n')
+        else: f.write('%.2f\n\n' % radius)
         if Green: f.write('Green\n\n')
         if Quadrupole: f.write('Quadrupole\n\n')
         f.write('Absorber\n')
@@ -43,7 +44,6 @@ def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, C
         f.write('Molecule\n')
         c = str(cellSize)
         f.write(c+' '+c+' '+c +' 90 90 90\n')
-        center = molecula.atom[0]
         for i in range(molecula.atom.shape[0]):
             a = molecula.atom[i, :]; az = molecula.az[i]
             if electronTransfer is None: atomInd = az
@@ -154,14 +154,7 @@ def parse_input(d):
     return {'filout':filout, 'energpho':Energpho}
 
 
-def parse_one_folder(d):
-    d = utils.fixPath(d)
-    if not os.path.exists(d):
-        raise Exception('Error: folder '+d+' doesn\'t exist')
-    inp = parse_input(d)
-    filout = inp['filout']
-    Energpho = inp['energpho']
-    xanesFile = d+os.sep+filout+'.txt'
+def parse_out_file(xanesFile, Energpho):
     if not os.path.isfile(xanesFile):
         raise Exception('Error: the filout file '+xanesFile+' doesn\'t exist')
     xanes = np.genfromtxt(xanesFile, skip_header=2)
@@ -188,6 +181,33 @@ def parse_one_folder(d):
     return utils.Spectrum(energies, xanesVal)
 
 
+def parse_one_folder(d, multipleAbsorber=False):
+    """
+    Parse one fdmnes folder
+    :param d: folder
+    :param returnPartial: if true - returns also dict{absorber=>its spectrum}
+    :return: spectrum
+    """
+    d = utils.fixPath(d)
+    if not os.path.exists(d):
+        raise Exception('Error: folder '+d+' doesn\'t exist')
+    inp = parse_input(d)
+    filout = inp['filout']
+    Energpho = inp['energpho']
+    if multipleAbsorber:
+        partials = {}
+        for partialFile in glob.glob(d+os.sep+filout+'_*.txt'):
+            name = os.path.splitext(os.path.split(partialFile)[1])[0]
+            postfix = name[name.rindex('_')+1:]
+            if postfix == 'bav': continue
+            n = int(postfix)
+            partials[n] = parse_out_file(partialFile, Energpho)
+        return partials
+    else:
+        xanesFile = d + os.sep + filout + '.txt'
+        return parse_out_file(xanesFile, Energpho)
+
+
 def parse_convolution(folder):
     xanes = np.genfromtxt(folder+'/out_conv.txt', skip_header=1)
     energies = xanes[:,0].ravel()
@@ -200,61 +220,34 @@ def getParams(fileName):
     return [p[0] for p in params0], [p[1] for p in params0]
 
 
-def parse_all_folders(parentFolder, printOutput=True):
-    subfolders = [f for f in os.listdir(parentFolder) if os.path.isdir(os.path.join(parentFolder,f))]
+def get_good_folders(parentFolder):
+    subfolders = [f for f in os.listdir(parentFolder) if os.path.isdir(os.path.join(parentFolder, f))]
     subfolders.sort()
-    badFolders = []; allXanes = {}
+    badFolders = []
+    allXanes = {}
     output = ''
     for i in range(len(subfolders)):
         d = subfolders[i]
         try:
             res = parse_one_folder(os.path.join(parentFolder, d))
-            if res is not None: allXanes[d] = res
-            else: output += 'Can\'t read output in folder '+d
+            if res is not None:
+                allXanes[d] = res
+            else:
+                output += 'Can\'t read output in folder ' + d
         except:
-            output += traceback.format_exc()+'\n'
+            output += traceback.format_exc() + '\n'
             badFolders.append(d)
     if len(allXanes) == 0:
-        if printOutput: print('None good folders')
         for i in range(len(badFolders)): badFolders[i] = os.path.join(parentFolder, badFolders[i])
-        return None, None, badFolders
-    else:
-        if output != '' and printOutput: print(output)
-    energyCount = np.array([ x.intensity.shape[0] for x in allXanes.values() ])
+        return []
+    energyCount = np.array([x.intensity.shape[0] for x in allXanes.values()])
     maxEnergyCount = np.max(energyCount)
     for d in allXanes:
         if allXanes[d].intensity.shape[0] != maxEnergyCount:
-            if printOutput:
-                print('Error: in folder '+d+' there are less energies '+str(allXanes[d].intensity.shape[0]))
             badFolders.append(d)
     goodFolders = list(set(subfolders) - set(badFolders))
     goodFolders.sort()
-    if len(goodFolders) == 0:
-        if printOutput: print('None good folders')
-        for i in range(len(badFolders)): badFolders[i] = os.path.join(parentFolder, badFolders[i])
-        return None, None, badFolders
-    allEnergies = np.array([ allXanes[folder].energy for folder in goodFolders ])
-    n = len(goodFolders)
-    if n == 1: allEnergies.reshape(1,-1)
-    energies = np.median(allEnergies, axis=0)
-    if useEpsiiShift:
-        maxShift = np.max(allEnergies[:,0]) - np.min(allEnergies[:,0])
-        if printOutput: print('Max energy shift between spectra: {:.2}'.format(maxShift))
-    paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'geometryParams.txt'))
-    df_xanes = np.zeros([n, energies.size])
-    df_params = np.zeros([n, len(paramNames)])
-    for i in range(n):
-        d = goodFolders[i]
-        _, params = getParams(os.path.join(parentFolder, d, 'geometryParams.txt'))
-        df_params[i,:] = np.array(params)
-        if useEpsiiShift:
-            df_xanes[i, :] = np.interp(energies, allXanes[d].energy, allXanes[d].intensity)
-        else:
-            df_xanes[i,:] = allXanes[d].intensity
-    df_xanes = pd.DataFrame(data=df_xanes, columns=['e_'+str(e) for e in energies])
-    df_params = pd.DataFrame(data=df_params, columns=paramNames)
-    for i in range(len(badFolders)): badFolders[i] = os.path.join(parentFolder, badFolders[i])
-    return df_xanes, df_params, badFolders
+    return goodFolders
 
 
 def runLocal(folder='.'):

@@ -1,9 +1,9 @@
-import parser, scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, traceback, copy, glob, sklearn
+import scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, copy, glob, numbers, itertools, pickle, time, re
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 from notebook import notebookapp
-import time
+from . import geometry
 
 
 class Spectrum:
@@ -15,7 +15,7 @@ class Spectrum:
         :param molecula: molecule, defaults to None
         :param copy: copy params or assign as reference, defaults to False
         """
-        assert len(energy) == len(intensity)
+        assert len(energy) == len(intensity), f'{len(energy)} != {len(intensity)}'
         if copy:
             self.energy = np.copy(energy).reshape(-1)
             self.intensity = np.copy(intensity).reshape(-1)
@@ -34,9 +34,67 @@ class Spectrum:
     def clone(self):
         return Spectrum(self.energy, self.intensity, self.molecula, copy=True)
 
-    def limit(self, interval):
+    def limit(self, interval, inplace=False):
         e, inten = limit(interval, self.energy, self.intensity)
-        return Spectrum(e, inten, self.molecula, copy=True)
+        if e[0] != interval[0] and self.energy[0] < interval[0] < self.energy[-1]:
+            e = np.insert(e, 0, interval[0])
+            inten = np.insert(inten, 0, np.interp(interval[0], self.energy, self.intensity))
+        if e[-1] != interval[1] and self.energy[0] < interval[1] < self.energy[-1]:
+            e = np.append(e, interval[1])
+            inten = np.append(inten, np.interp(interval[1], self.energy, self.intensity))
+        if inplace:
+            self.energy = e
+            self.intensity = inten
+        else:
+            return Spectrum(e, inten, self.molecula, copy=True)
+
+    def changeEnergy(self, newEnergy, inplace=False):
+        newInt = np.interp(newEnergy, self.energy, self.intensity)
+        if inplace:
+            self.energy = newEnergy
+            self.intensity = newInt
+        else:
+            return Spectrum(newEnergy, newInt, copy=True)
+
+    def val(self, energyValue):
+        """
+        Calculate spectrum value at specific energy
+        """
+        return np.interp(energyValue, self.energy, self.intensity)
+
+    def inverse(self, intensity, select='min'):
+        ind = np.where((self.intensity[:-1] - intensity) * (self.intensity[1:] - intensity) <= 0)[0]
+        assert len(ind) > 0, f'Can\'t find inverse for value {intensity}'
+        if select == 'min': i = ind[0]
+        else:
+            assert select == 'max'
+            i = ind[-1]
+        a,b,c = geometry.get_line_by_2_points(self.energy[i], self.intensity[i], self.energy[i+1], self.intensity[i+1])
+        e,inten = geometry.get_line_intersection(a,b,c, 0,1,-intensity)
+        return e
+
+    def __add__(self, other):
+        e1 = max(self.energy[0], other.energy[0])
+        e2 = min(self.energy[-1], other.energy[-1])
+        ind1 = (e1 <= self.energy) & (self.energy <= e2)
+        ind2 = (e1 <= other.energy) & (other.energy <= e2)
+        if np.sum(ind1) > np.sum(ind2):
+            e = self.energy[ind1]
+            s = self.intensity[ind1] + np.interp(e, other.energy, other.intensity)
+        else:
+            e = other.energy[ind2]
+            s = other.intensity[ind2] + np.interp(e, self.energy, self.intensity)
+        return Spectrum(e, s)
+
+    def __mul__(self, other):
+        assert isinstance(other, numbers.Number)
+        return Spectrum(self.energy, self.intensity*other, self.molecula)
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, other):
+        assert isinstance(other, numbers.Number)
+        return Spectrum(self.energy, self.intensity/other, self.molecula)
 
 
 class Exafs:
@@ -118,20 +176,70 @@ def readSpectra(fileName, header=True, skiprows=0, energyColumn=0, intensityColu
     return collection
 
 
-def readSpectrum(fileName, skiprows=0, energyColumn=0, intensityColumn=1, separator=r'\s+', decimal="."):
+def readSpectrum(fileName, skiprows=0, energyColumn=0, intensityColumn=1, separator=r'\s+', decimal=".", guess=False):
     fileName = fixPath(fileName)
-    data = pd.read_csv(fileName, sep=separator, decimal=decimal, skiprows = skiprows, header=None)
-    if data.shape[1]<energyColumn:
-        raise Exception('Data in file contains '+str(data.shape[1])+' only columns. But you specify energyColumn = '+str(energyColumn))
-    if data.shape[1]<intensityColumn:
-        raise Exception('Data in file contains '+str(data.shape[1])+' only columns. But you specify intensityColumn = '+str(intensityColumn))
-    energy = data[data.columns[energyColumn]]
-    if not is_numeric_dtype(energy):
-        raise Exception('Data energy column is not numeric: '+str(energy))
-    intensity = data[data.columns[intensityColumn]]
-    if not is_numeric_dtype(intensity):
-        raise Exception('Data energy column is not numeric: '+str(intensity))
-    return Spectrum(energy.values, intensity.values)
+    if guess:
+        with open(fileName, 'r') as f: lines = f.read()
+        lines = lines.split('\n')
+        lines = [l.strip() for l in lines]
+        # delete empty lines
+        lines = [l for l in lines if len(l) > 0]
+        # delete comments
+        lines = [l for l in lines if l[0] not in ['#', '!', '%']]
+        # if last line contains ',' but not '.', than ',' is integer part feature
+        if ',' in lines[-1] and '.' not in lines[-1]:
+            lines = [l.replace(',', '.') for l in lines]
+        # delete lines which are not numbers
+        lines = [l for l in lines if re.match(r"^[\d.eE+\-\s]*$", l) is not None]
+        assert len(lines) > 0, 'Unknown file format. Can\'t guess'
+        numbers = re.findall(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', lines[-1])
+        ncols = len(numbers)
+        if ncols == 2:
+            if ncols <= energyColumn:
+                print(f'Warning: wrong energyColumn number {energyColumn} in readSpectrum. It was corrected to 0')
+                energyColumn = 0
+            if ncols <= intensityColumn:
+                print(f'Warning: wrong intensityColumn number {intensityColumn} in readSpectrum. It was corrected to 1')
+                intensityColumn = 1
+        assert ncols > energyColumn
+        assert ncols > intensityColumn
+        result = []
+        for i in range(len(lines)):
+            numbers = re.findall(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', lines[i])
+            # print(numbers)
+            if len(numbers) != ncols:
+                assert len(result) == 0, 'Rows with different number of values detected!'
+                continue
+            result.append(np.array([float(n) for n in numbers]))
+        assert len(result) > 0, 'Unknown file format. Can\'t guess'
+        result = np.array(result)
+        result = Spectrum(result[:, energyColumn], result[:, intensityColumn])
+    else:
+        data = pd.read_csv(fileName, sep=separator, decimal=decimal, skiprows=skiprows, header=None)
+        if data.shape[1]<energyColumn:
+            raise Exception('Data in file contains '+str(data.shape[1])+' only columns. But you specify energyColumn = '+str(energyColumn))
+        if data.shape[1]<intensityColumn:
+            raise Exception('Data in file contains '+str(data.shape[1])+' only columns. But you specify intensityColumn = '+str(intensityColumn))
+        energy = data[data.columns[energyColumn]]
+        if not is_numeric_dtype(energy):
+            raise Exception('Data energy column is not numeric: '+str(energy))
+        intensity = data[data.columns[intensityColumn]]
+        if not is_numeric_dtype(intensity):
+            raise Exception('Data energy column is not numeric: '+str(intensity))
+        result = Spectrum(energy.values, intensity.values)
+    e = result.energy
+    assert np.all(e[1:] - e[:-1] >= 0)
+    if np.any(e[1:] - e[:-1] == 0):
+        print(f'Spectrum {fileName} contains duplicate energies. Calculate average')
+        # calculate average for repeated energies
+        ue, ind, counts = np.unique(e, return_counts=True, return_index=True)
+        uin = result.intensity[ind]
+        not_unique_ind = np.where(counts > 1)[0]
+        for i in not_unique_ind:
+            uin[i] = np.mean(result.intensity[e == ue[i]])
+        result = Spectrum(ue, uin)
+    return result
+
 
 
 def readExafs(fileName, skiprows=0, energyColumn=0, intensityColumn=1, separator=r'\s+', decimal="."):
@@ -160,6 +268,8 @@ def adjustSpectrum(s, maxSpectrumPoints, intervals):
 
 
 def integral(x,y):
+    if isinstance(y, pd.DataFrame): y = y.to_numpy()
+    if isinstance(y, pd.Series): y = y.to_numpy()
     assert len(x.shape) == 1
     dx = x[1:] - x[:-1]
     if len(y.shape) == 1:
@@ -196,6 +306,38 @@ def findNextMaximum(y, i0):
         i += 1
         if i>=n-1: return i
     return i
+
+
+def findNearest(a, value, returnInd=False, direction='both', ignoreDirectionIfEmpty=False):
+    """
+    Find nearest value or index of nearest value
+    :param a: numpy array
+    :param value: scalar value
+    :param returnInd: True/False
+    :param direction: 'left', 'right' or 'both'
+    :param ignoreDirectionIfEmpty: True/False
+    :return: for empty array a (or left/right parts of a): nan if returnInd else None
+    """
+    assert np.isscalar(value)
+    assert isinstance(a, np.ndarray)
+    badRes = np.nan if returnInd else None
+    if len(a) == 0: return badRes
+    if direction == 'both':
+        i = np.abs(a-value).argmin()
+    else:
+        if direction == 'left':
+            ind = np.where(a <= value)[0]
+        elif direction == 'right':
+            ind = np.where(a >= value)[0]
+        else: assert False, f'Unknown direction {direction}'
+        if len(ind) == 0:
+            if ignoreDirectionIfEmpty: i = np.abs(a - value).argmin()
+            else: return badRes
+        else:
+            i = np.abs(a[ind] - value).argmin()
+            i = ind[i]
+    if returnInd: return i
+    else: return a[i]
 
 
 def getInitialShift(exp_e, exp_xanes, fdmnes_en, fdmnes_xan, search_shift_level):
@@ -311,6 +453,7 @@ def isLibExists(name):
 
 
 def fixPath(p):
+    if p == '': return ''
     return str(pathlib.PurePath(p))
 
 
@@ -328,13 +471,17 @@ def gauss(x,a,s):
     return 1/s/np.sqrt(2*np.pi)*np.exp(-(x-a)**2/2/s**2)
 
 
-def findFile(folder, postfix, check_unique = True, ignoreSlurm=True):
-    files = glob.glob(folder+os.sep+'*'+postfix)
+def findFile(folder='.', postfix=None, mask=None, check_unique=True, ignoreSlurm=True):
+    assert (mask is not None) or (postfix is not None)
+    assert (mask is None) or (postfix is None)
+    if postfix is not None: mask = f'*{postfix}'
+    if folder != '.': mask = f'{folder}/{mask}'
+    files = glob.glob(mask)
     if ignoreSlurm:
         files = [f for f in files if f.find('slurm')<0]
     if check_unique:
-        assert len(files)>0, 'Can\'t find file *'+postfix+' in folder '+folder
-        assert len(files)==1, 'There are several files *'+postfix+' in folder '+folder
+        assert len(files)>0, 'Can\'t find file '+mask
+        assert len(files)==1, 'There are several files '+mask
     if len(files)==1: return files[0]
     else: return None
 
@@ -392,6 +539,23 @@ def makeDataFrame(energy, spectra):
     return pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
 
 
+def makeDataFrameFromSpectraList(spectra, energy=None):
+    assert isinstance(spectra, list)
+    m = len(spectra)
+    if energy is None:
+        energies = np.array([])
+        for s in spectra: energies = np.append(energies, s.energy)
+        energies = np.sort(energies)
+        max_count = np.max([len(s.energy) for s in spectra])
+        step = len(energies) // max_count
+        energy = np.unique(energies[::step])
+    n = len(energy)
+    sp_matr = np.zeros((m,n))
+    for i,s in enumerate(spectra):
+        sp_matr[i] = np.interp(energy, s.energy, s.intensity)
+    return makeDataFrame(energy, sp_matr)
+
+
 def isObjectArraysEqual(a, b):
     assert isinstance(a, np.ndarray) or isinstance(b, np.ndarray)
     if not isinstance(a, np.ndarray): return isObjectArraysEqual(b, a)
@@ -405,3 +569,99 @@ def isObjectArraysEqual(a, b):
         else:
             res[i] = False
     return res
+
+
+def comb_index(n, k, repetition=False):
+    """
+    :param n:
+    :param k:
+    :param repetition: if True include duplicate items in one combination
+    :return: array of size C_n^k x k with all k-combinations (without duplicates) from np.arange(n)
+    """
+    count = scipy.special.comb(n, k, exact=True, repetition=repetition)
+    if repetition:
+        index = np.fromiter(itertools.chain.from_iterable(itertools.combinations_with_replacement(range(n), k)), int, count=count * k)
+    else:
+        index = np.fromiter(itertools.chain.from_iterable(itertools.combinations(range(n), k)), int, count=count*k)
+    return index.reshape(-1, k)
+
+
+def find_nearest_in_sorted_array(array, value):
+    idx = np.searchsorted(array, value, side="left")
+    if idx > 0 and (idx == len(array) or math.fabs(value - array[idx-1]) < math.fabs(value - array[idx])):
+        return array[idx-1], idx-1
+    else:
+        return array[idx], idx
+
+
+def rFactor(e, theory, exp):
+    return integral(e, (theory - exp) ** 2) / integral(e, exp ** 2)
+
+
+def save_pkl(obj, fileName):
+    folder = os.path.split(fileName)[0]
+    if folder != '' and not os.path.exists(folder):
+        os.makedirs(folder)
+    with open(fileName, 'wb') as f:
+        pickle.dump(obj, f)
+
+
+def load_pkl(fileName):
+    with open(fileName, 'rb') as f:
+        return pickle.load(f)
+
+
+def appendToBeginningOfFile(fileName, s):
+    if os.path.exists(fileName):
+        with open(fileName, 'r') as f:
+            content = f.read()
+    else: content = ''
+    content = s + content
+    with open(fileName, 'w') as f:
+        f.write(content)
+
+
+def argrelmax(y, returnAll=False):
+    """
+    Analog of numpy.argrelmax to calculate argmax (global or all locals). Returns indices
+    """
+    y_prev = y[:-2]
+    y_next = y[2:]
+    y_cur = y[1:-1]
+    ind = np.where((y_prev <= y_cur) & (y_cur >= y_next))[0]
+    if len(ind) == 0:
+        if returnAll: return np.nan, np.array([])
+        else: return np.nan
+    j = np.argmax(y_cur[ind])
+    res = ind[j]+1
+    assert y[res - 1] <= y[res] and y[res] >= y[res + 1], f'{y[res - 2]} {y[res - 1]} {y[res]} {y[res + 1]} {y[res + 2]}'
+    if returnAll:
+        # search for middles in segments of equal y values
+        # print(ind)
+        delta = ind[1:]-ind[:-1]
+        all1 = ind[:-1][delta > 1]
+        all2 = ind[1:][delta > 1]
+        all = np.zeros(len(all1) + 1, dtype=int)
+        all[:-1] = all1
+        if len(all2) > 0:
+            all[-1] = all2[-1]
+            all[1:-1] = (all1[1:] + all2[:-1]) // 2
+        else:
+            all[-1] = (ind[len(all1)]+ind[-1]) // 2
+        all += 1
+        for r in all:
+            assert y[r - 1] <= y[r] and y[r] >= y[r + 1], f'{y[r - 2]} {y[r - 1]} {y[r]} {y[r + 1]} {y[r + 2]}'
+        return res, all
+    else:
+        return res
+
+
+def addPostfixIfExists(fileName):
+    if not os.path.exists(fileName): return fileName
+    b = os.path.splitext(fileName)[0]
+    ext = os.path.splitext(fileName)[1]
+    i = 1
+    while os.path.exists(f'{b}_{i}{ext}'):
+        i += 1
+    return f'{b}_{i}{ext}'
+

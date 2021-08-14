@@ -2,7 +2,7 @@ from . import utils, mixture
 utils.fixDisplayError()
 import numpy as np
 import pandas as pd
-import sklearn, copy, os, json, sys, math, logging, traceback, itertools, gc, matplotlib, shutil, scipy
+import sklearn, copy, os, json, sys, math, logging, traceback, itertools, gc, matplotlib, shutil, scipy, glob
 from distutils.dir_util import copy_tree, remove_tree
 from multiprocessing.dummy import Pool as ThreadPool
 from sklearn.linear_model import RidgeCV
@@ -30,7 +30,7 @@ def recommendedParams(name):
         params = {'n_estimators':100, 'random_state':0, 'min_samples_leaf':10}
         allParams = list(ExtraTreesRegressor().get_params().keys())
     elif name[:3] == "RBF":
-        params = {'function':'linear', 'baseRegression': 'quadric'}
+        params = {'function':'linear', 'baseRegression': 'quadric', 'scaleX': True}
         allParams = list(params.keys())
     elif name == 'LightGBM':
         params = {'num_leaves':31, 'learning_rate':0.02, 'n_estimators':100}
@@ -57,16 +57,18 @@ def getMethod(name, params0=None):
 def prepareSample(sample0, diffFrom, project, norm, smooth_type='fdmnes'):
     sample = copy.deepcopy(sample0)
     assert set(sample.paramNames) == set(project.geometryParamRanges.keys()), 'Param names in geometryParamRanges of project:\n'+str(list(project.geometryParamRanges.keys()))+'\ndoes not equal to dataset param names:\n'+str(sample.paramNames)
-    sample.spectra = smoothLib.smoothDataFrame(project.defaultSmoothParams[smooth_type], sample.spectra, smooth_type, project.spectrum, project.intervals['fit_smooth'], norm=norm, folder=sample.folder)
+    sample.spectra = smoothLib.smoothDataFrame(project.defaultSmoothParams[smooth_type], sample.spectra, smooth_type, project.spectrum, project.intervals['fit_norm'], norm=norm, folder=sample.folder)
     if diffFrom is not None:
-        sample.spectra = (sample.spectra - diffFrom['spectrumBase'].intensity) * diffFrom['purity']
+        sample.setSpectra(spectra=(sample.spectra.to_numpy() - diffFrom['spectrumBase'].intensity) * diffFrom['purity'], energy=sample.energy)
     return sample
 
 
 def prepareDiffFrom(project, diffFrom, norm):
     diffFrom = copy.deepcopy(diffFrom)
-    diffFrom['projectBase'].spectrum.intensity = np.interp(project.spectrum.energy, diffFrom['projectBase'].spectrum.energy, diffFrom['projectBase'].spectrum.intensity)
-    diffFrom['projectBase'].spectrum.energy = project.spectrum.energy
+    bs = diffFrom['projectBase'].spectrum
+    bs.intensity = np.interp(project.spectrum.energy, diffFrom['projectBase'].spectrum.energy, diffFrom['projectBase'].spectrum.intensity)
+    bs.energy = project.spectrum.energy
+    diffFrom['projectBase'].spectrum = bs
     diffFrom['spectrumBase'], _ = smoothLib.funcFitSmoothHelper(project.defaultSmoothParams['fdmnes'], diffFrom['spectrumBase'], 'fdmnes', diffFrom['projectBase'], norm)
     return diffFrom
 
@@ -78,10 +80,6 @@ class Estimator:
         if method not in allowedMethods:
             raise Exception('Unknown method name. You can use: '+str(allowedMethods))
         self.exp = copy.deepcopy(exp)
-        interval = self.exp.intervals['fit_geometry']
-        ind = (self.exp.spectrum.energy >= interval[0]) & (self.exp.spectrum.energy <= interval[1])
-        self.exp.spectrum.energy = self.exp.spectrum.energy[ind]
-        self.exp.spectrum.intensity = self.exp.spectrum.intensity[ind]
         self.convolutionParams = {k:convolutionParams[k] for k in convolutionParams}
         if 'norm' in self.convolutionParams:
             self.norm = self.convolutionParams['norm']
@@ -90,10 +88,12 @@ class Estimator:
         for pName in self.convolutionParams:
             self.exp.defaultSmoothParams[smooth_type][pName] = self.convolutionParams[pName]
         self.regressor = getMethod(method, params)
+        if smooth_type == 'optical' and self.norm is not None:
+            self.regressor = ML.SeparateNorm(self.regressor, normMethod='mean')
         self.normalize = normalize
         if normalize: self.regressor = ML.Normalize(self.regressor, xOnly=False)
         self.CVcount = CVcount
-        assert CVcount>=2
+        assert CVcount >= 2
         self.folderToSaveCVresult = folderToSaveCVresult
         self.folderToDebugSample = folderToDebugSample
         self.diffFrom = copy.deepcopy(diffFrom)
@@ -102,6 +102,10 @@ class Estimator:
             self.expDiff = copy.deepcopy(self.exp)
             self.expDiff.spectrum = utils.Spectrum(self.expDiff.spectrum.energy, self.exp.spectrum.intensity - self.diffFrom['projectBase'].spectrum.intensity)
         self.smooth_type = smooth_type
+        self.sample = None
+        self.xanes_energy = None
+        self.geometryParamRanges = None
+        self.paramNames = None
 
     def fit(self, sample0):
         sample = prepareSample(sample0, self.diffFrom, self.exp, self.norm, self.smooth_type)
@@ -117,104 +121,53 @@ class Estimator:
         self.geometryParamRanges = {}
         for pName in sample.paramNames:
             self.geometryParamRanges[pName] = [np.min(sample.params[pName]), np.max(sample.params[pName])]
-
-        res, stddevs, predictions = inverseCrossValidation(self.regressor, sample, self.CVcount)
+        sample_cv = sample.limit(energyRange=self.exp.intervals['fit_geometry'], inplace=False)
+        res, individualSpectrErrors, predictions = inverseCrossValidation(self.regressor, sample_cv, self.CVcount)
         output = 'Inverse method relative to constant prediction error = %5.3g\n' % res['relToConstPredError']
-        # output += 'L2 mean error = %5.3g\n' % res['meanL2']
         print(output)
+        if self.smooth_type == 'optical' and self.norm is not None:
+            assert 'SeparateNorm' in self.regressor.name, self.regressor.name
+            if self.normalize: sepNorm = self.regressor.learner
+            else: sepNorm = self.regressor
+            nsample_spectra, nrm = sepNorm.normalize(sample_cv.spectra.values)
+            nsample = sample_cv.copy()
+            nsample.setSpectra(nsample_spectra, energy=sample_cv.energy)
+            sepNormLearner = sepNorm.learner
+            if self.normalize: sepNormLearner = ML.Normalize(sepNormLearner, xOnly=False)
+            res, _, _ = inverseCrossValidation(sepNormLearner, nsample, self.CVcount)
+            output2 = 'relToConstPredError on normalized sample = %5.3g\n' % res['relToConstPredError']
+            output += output2
+            print(output2)
+            sepNormNormLearner = sepNorm.normLearner
+            if self.normalize: sepNormNormLearner = ML.Normalize(sepNormNormLearner, xOnly=False)
+            res = ML.score_cv(sepNormNormLearner, sample_cv.params, nrm, self.CVcount, returnPrediction=False)
+            res = 1-res
+            output3 = 'relToConstPredError on norm values = %5.3g\n' % res
+            output += output3
+            print(output3)
         if self.folderToSaveCVresult != '':
             os.makedirs(self.folderToSaveCVresult, exist_ok=True)
             with open(self.folderToSaveCVresult+'/info.txt', 'w') as f: f.write(output)
-            ind = np.argsort(stddevs)
-            n = stddevs.size
+            ind = np.argsort(individualSpectrErrors)
+            n = individualSpectrErrors.size
             exp = self.exp if self.diffFrom is None else self.expDiff
-            energy = exp.spectrum.energy
+            energy = sample_cv.energy
 
             def plotCVres(energy, trueXan, predXan, fileName):
-                fig, ax = plotting.createfig()
-                ax.plot(energy, trueXan, label="True spectrum")
-                ax.plot(energy, predXan, label="Predicted spectrum")
-                ax.legend()
-                ax.set_title(os.path.basename(fileName))
-                plotting.savefig(fileName, fig)
-                plotting.closefig(fig)
-                np.savetxt(fileName[:fileName.rfind('.')]+'.csv', [energy, trueXan, predXan], delimiter=',')
+                plotting.plotToFile(energy, trueXan, "True spectrum", energy, predXan, "Predicted spectrum", title=os.path.basename(fileName), fileName=fileName, save_csv=True)
+
             i = ind[n//2]
-            plotCVres(energy, sample.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_mean_error.png')
+            plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_mean_error.png')
             i = ind[9*n//10]
-            plotCVres(energy, sample.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_max_0.9_error.png')
+            plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_max_0.9_error.png')
             i = ind[-1]
-            plotCVres(energy, sample.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_max_error.png')
+            plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_max_error.png')
         self.regressor.fit(sample.params, sample.spectra)
         self.paramNames = sample.paramNames
         # calcParamStdDev(self)
 
     def predict(self, params):
         return self.regressor.predict(params)
-
-    def compareDifferentMethods_old(self, sample0, folderToSaveResult, verticesNum=10, intermediatePointsNum=10, calcExactInternalPoints=False):
-        folderToSaveResult = utils.fixPath(folderToSaveResult)
-        sample = self.prepareSample(sample0, self.diffFrom, self.exp, self.norm)
-        fig, ax = plotting.createfig(interactive=True)
-        if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
-        plotData = pd.DataFrame()
-        for methodName in allowedMethods:
-            method = getMethod(methodName)
-            res, _, _ = inverseCrossValidation(method, sample, self.CVcount)
-            print(methodName+' relative to constant prediction error = %5.3g\n' % res['relToConstPredError'], flush=True)
-            plotData1, edgePoints, labels, curveParams = ML.getOneDimPrediction(method, sample.params, sample.spectra, verticesNum=verticesNum, intermediatePointsNum=intermediatePointsNum)
-            plotData[methodName+'_'+labels[1]] = plotData1[1]
-        plotData[labels[0]] = plotData1[0]
-        for methodName in allowedMethods:
-            ax.plot(plotData[labels[0]], plotData[methodName+'_'+labels[1]], label=methodName)
-        ax.plot(edgePoints[0], edgePoints[1], 'r*', ms=10, label='exact edge points')
-        if calcExactInternalPoints:
-            exactFolder = folderToSaveResult+os.sep+'sample'
-            calcFolder = exactFolder+os.sep+'calc'
-            if not os.path.exists(exactFolder+os.sep+'params.txt'):
-                if not os.path.exists(calcFolder):
-                    os.makedirs(exactFolder); os.makedirs(calcFolder);
-                    for i in range(curveParams.shape[0]):
-                        params = {sample0.paramNames[j]:curveParams[i,j] for j in range(len(sample0.paramNames))}
-                        m = self.exp.moleculeConstructor(params)
-                        folder = calcFolder+os.sep+utils.zfill(i,curveParams.shape[0])
-                        fdmnes.generateInput(m, folder=folder, **self.exp.FDMNES_calc)
-                        geometryParamsToSave = [[sample0.paramNames[j], curveParams[i,j]] for j in range(len(sample0.paramNames))]
-                        with open(folder+os.sep+'geometryParams.txt', 'w') as f: json.dump(geometryParamsToSave, f)
-                sampling.calcSpectra('fdmnes', 'run-cluster', nProcs=6, memory=10000, calcSampleInParallel=10, folder=calcFolder, recalculateErrorsAttemptCount = 2, continueCalculation = True)
-                sampling.collectResults(spectralProgram='fdmnes', folder=calcFolder, outputFolder=exactFolder)
-            exactSample0 = ML.Sample.readFolder(exactFolder)
-            exactSample = self.prepareSample(exactSample0, self.diffFrom, self.exp, self.norm)
-            exact_x = exactSample.params.loc[:, exactSample.params.columns == labels[0]].values.reshape(-1)
-            exact_y = exactSample.spectra.loc[:, exactSample.spectra.columns == labels[1]].values.reshape(-1)
-            tmpind = np.argsort(exact_x)
-            exact_x = exact_x[tmpind]
-            exact_y = exact_y[tmpind]
-            if exact_y.size == plotData.shape[0]:
-                ax.plot(exact_x, exact_y, label='exact', lw=2, color='k') # - тоже неправильно будет строится, если поменялись длины
-                plotData['exact'] = exact_y
-                fig2, ax2 = plotting.createfig()
-                for methodName in allowedMethods:
-                    ax2.plot(plotData[labels[0]], np.abs(plotData[methodName+'_'+labels[1]]-exact_y), label=methodName)
-                ax2.plot(edgePoints[0], np.zeros(edgePoints[0].size), 'r*', ms=10, label='exact edge points')
-                ax2.plot([edgePoints[0][0], edgePoints[0][-1]], [0,0], label='exact', lw=2, color='k')
-                delta = (edgePoints[0][1]-edgePoints[0][0])/10
-                # ax2.set_xlim(edgePoints[0][1]-delta, edgePoints[0][3]+delta)
-                ax2.legend()
-                ax2.set_xlabel(labels[0])
-                ax2.set_ylabel('abs('+labels[1]+'-exact)')
-                plotting.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse_delta.png', fig2)
-            else:
-                print('Length of exact data doesn\'t match verticesNum and intermediatePointsNum')
-
-        # ax.set_xlim(edgePoints[0][1]-delta, edgePoints[0][3]+delta)
-        ax.legend()
-        ax.set_xlabel(labels[0])
-        ax.set_ylabel(labels[1])
-        plotData.to_csv(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.csv', sep=' ', index=False)
-        plotting.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsInverse.png', fig)
-        # if not utils.isJupyterNotebook(): plt.close(fig)  #notebooks also have limit - 20 figures # - sometimes figure is not shown
-        # if matplotlib.get_backend() != 'nbAgg': plt.close(fig)
 
 
 def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam, project, diffFrom=None, CVcount=4, folderToSaveResult='inverseMethodsCompare'):
@@ -281,25 +234,26 @@ def makeVectorFromDict(params, paramNames, check=True):
     return np.array([params[p] for p in paramNames])
 
 
-def findGlobalL2NormMinimum(trysCount, estimator, folderToSaveResult, calcXanes=None, fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extra_plot_func=None):
+def findGlobalL2NormMinimum(trysCount, estimator, folderToSaveResult, calcXanes=None, fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFuncContourMaps=None, normalizeMixtureToExperiment=False, gaussComponents=False):
     """
-        Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum
+    Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum
 
-        :param trysCount: number of attempts to find minimum
-        :param estimator: instance of Estimator class to predict spectrum by parameters
-        :param folderToSaveResult: folder to save graphs
-        :param calcXanes: calcXanes = {'local':True/False, /*for cluster - */ 'memory':..., 'nProcs':...}
-        :param fixParams: dict of paramName:value to fix
-        :param contourMapCalcMethod: 'fast' - plot contours of the target function; 'thorough' - plot contours of the min of target function by all arguments except axes
-        :param plotContourMaps: 'all' or list of 1-element or 2-elements lists of axes names to plot contours of target function
-        :param extra_plot_func: user defined function to plot something on result contours: extra_plot_func(ax, axisNamesList)
-        :return: dict with keys 'value' (minimum value), 'x'
-        """
+    :param trysCount: number of attempts to find minimum
+    :param estimator: instance of Estimator class to predict spectrum by parameters
+    :param folderToSaveResult: folder to save graphs
+    :param calcXanes: calcXanes = {'local':True/False, /*for cluster - */ 'memory':..., 'nProcs':...}
+    :param fixParams: dict of paramName:value to fix
+    :param contourMapCalcMethod: 'fast' - plot contours of the target function; 'thorough' - plot contours of the min of target function by all arguments except axes
+    :param plotContourMaps: 'all' or list of 1-element or 2-elements lists of axes names to plot contours of target function
+    :param extraPlotFuncContourMaps: user defined function to plot something on result contours: func(ax, axisNamesList, xminDict)
+    :param normalizeMixtureToExperiment: True if we need to normalize spectrum of mixture when compare to experiment
+    :param gaussComponents: True, if instead of spectrum(param0) you want to use gauss mixture of spectrum(param) with center in param0 (center and covariance matrix are fitted)
+    :return: dict with keys 'value' (minimum rFactor value), 'x', 'spectrum'
+    """
+    return findGlobalL2NormMinimumMixture(trysCount, [estimator], folderToSaveResult, calcXanes=calcXanes, fixParams=fixParams, contourMapCalcMethod=contourMapCalcMethod, plotContourMaps=plotContourMaps, extraPlotFuncContourMaps=extraPlotFuncContourMaps, normalizeMixtureToExperiment=normalizeMixtureToExperiment, gaussComponents=gaussComponents)
 
-    return findGlobalL2NormMinimumMixture(trysCount, [estimator], folderToSaveResult, calcXanes=calcXanes, fixParams=fixParams, contourMapCalcMethod=contourMapCalcMethod, plotContourMaps=plotContourMaps, extra_plot_func=extra_plot_func)
 
-
-def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult, calcXanes=None, fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extra_plot_func=None):
+def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult, calcXanes=None, fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFuncContourMaps=None, normalizeMixtureToExperiment=False, gaussComponents=False):
     """
     Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum
 
@@ -310,7 +264,9 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
     :param fixParams: dict of paramName:value to fix. Param names: projectName_paramName, concentration names - projectName
     :param contourMapCalcMethod: 'fast' - plot contours of the target function; 'thorough' - plot contours of the min of target function by all arguments except axes
     :param plotContourMaps: 'all' or list of 1-element or 2-elements lists of axes names to plot contours of target function
-    :param extra_plot_func: user defined function to plot something on result contours: extra_plot_func(ax, axisNamesList)
+    :param extraPlotFuncContourMaps: user defined function to plot something on result contours: func(ax, axisNamesList, xminDict)
+    :param normalizeMixtureToExperiment: True if we need to normalize spectrum of mixture when compare to experiment
+    :param gaussComponents: True, if instead of spectrum(param0) you want to use gauss mixture of spectrum(param) with center in param0 (center and covariance matrix are fitted)
     :return: dict with keys 'value' (minimum value), 'x' (list of component parameter values lists), 'x1d' (flattened array of all param values), 'paramNames1d', 'concentrations', 'spectra', 'mixtureSpectrum'
     """
 
@@ -318,8 +274,12 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
     estimator0 = estimatorList[0]
     exp0 = estimator0.exp
     e0 = exp0.spectrum.energy
-    ind = (exp0.intervals['fit_geometry'][0] <= e0) & (e0 <= exp0.intervals['fit_geometry'][1])
-    e0 = e0[ind]
+    ind_geom = (exp0.intervals['fit_geometry'][0] <= e0) & (e0 <= exp0.intervals['fit_geometry'][1])
+    e0_geom = e0[ind_geom]
+    expXanesPure = exp0.spectrum.intensity
+    expXanes = expXanesPure if estimator0.diffFrom is None else estimator0.expDiff.spectrum.intensity
+    expXanesPure_geom = expXanesPure[ind_geom]
+    expXanes_geom = expXanes[ind_geom]
     if fixParams is None: fixParams = {}
     folderToSaveResult = utils.fixPath(folderToSaveResult)
     if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
@@ -329,8 +289,24 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
         exp = estimator.exp
         e = exp.spectrum.energy
 
-        def spectraFunc(geomArg):
-            xanesPred = estimator.predict(geomArg.reshape(1,-1)).reshape(-1)
+        def spectraFunc(arg):
+            n = len(arg)
+            if gaussComponents and fitGaussComponentParams:
+                assert n % 2 == 0
+                center = arg[:n//2].reshape(1,-1)
+                sigma = arg[n//2:].reshape(1,-1)
+                # assert np.all(sigma > 0), 'sigma = ' + str(sigma) + '   center = ' + str(center)
+                sigma[sigma<1e-3] = 1e-3
+                spectra = estimator.sample.spectra.to_numpy()
+                params = estimator.sample.params.to_numpy()
+                weights = np.sum(-0.5*(params-center)**2/sigma**2, axis=1)
+                weights = weights - np.max(weights)  # div exp(weights) by max(exp(weights))
+                weights = np.exp(weights).reshape(-1,1)
+                assert np.sum(weights) > 0, f'{weights}  -0.5*(params-center)**2/sigma**2 = {-0.5*(params-center)**2/sigma**2}  sigma = {sigma}'
+                weights /= np.sum(weights)
+                xanesPred = np.sum(spectra*weights, axis=0)
+            else:
+                xanesPred = estimator.predict(arg.reshape(1,-1)).reshape(-1)
             xanesPred = np.interp(e0, e, xanesPred)
             return xanesPred
         return spectraFunc
@@ -340,23 +316,39 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
         mixtureSpectrum = spectraList[0]*concentrations[0]
         for i in range(1,len(estimatorList)):
             mixtureSpectrum += concentrations[i]*spectraList[i]
+        if normalizeMixtureToExperiment:
+            mixtureSpectrum = curveFitting.fit_by_regression(e0, expXanes, mixtureSpectrum, estimator0.exp.intervals['fit_norm'])
         return mixtureSpectrum
 
     def distToExperiment(mixtureSpectrum, allArgs):
-        estimator = estimatorList[0]
-        exp = estimator.exp
-        e = exp.spectrum.energy
-        ind = (exp.intervals['fit_geometry'][0] <= e) & (e <= exp.intervals['fit_geometry'][1])
-        e0 = e[ind]
-        expXanes = exp.spectrum.intensity if estimator.diffFrom is None else estimator.expDiff.spectrum.intensity
-        expXanes = expXanes[ind]
-        rFactor = utils.integral(e0, (mixtureSpectrum - expXanes) ** 2) / utils.integral(e0, expXanes ** 2)
+        assert len(mixtureSpectrum) == len(e0)
+        rFactor = utils.rFactor(e0_geom, mixtureSpectrum[ind_geom], expXanes_geom)
         return rFactor
 
-    paramNames = [estimator.paramNames.tolist() for estimator in estimatorList]
-    bounds = []
-    for estimator in estimatorList:
-        bounds.append([estimator.exp.geometryParamRanges[p] for p in estimator.paramNames])
+    def paramNames():
+        if gaussComponents and fitGaussComponentParams:
+            res = []
+            for estimator in estimatorList:
+                ps = estimator.paramNames.tolist()
+                ps += [f'{p}_sigma' for p in ps]
+                res.append(ps)
+            return res
+        else:
+            return [estimator.paramNames.tolist() for estimator in estimatorList]
+
+    def bounds():
+        b = []
+        for estimator in estimatorList:
+            pb = [estimator.exp.geometryParamRanges[p] for p in estimator.paramNames]
+            if gaussComponents and fitGaussComponentParams:
+                for p in estimator.paramNames:
+                    r = estimator.exp.geometryParamRanges[p]
+                    d = r[1]-r[0]
+                    assert d > 0
+                    pb.append([d*0.01, d])
+            b.append(pb)
+        return b
+
     componentNames = [estimator.exp.name for estimator in estimatorList]
     for i in range(len(componentNames)):
         cn = componentNames[i]
@@ -366,7 +358,9 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
                 if componentNames[j] == cn:
                     componentNames[j] = cn+f'_{k}'
                     k += 1
-    minimums = mixture.findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCount, bounds,  paramNames, componentNames=componentNames, folderToSaveResult=folderToSaveResult, fixParams=fixParams, contourMapCalcMethod=contourMapCalcMethod, plotContourMaps=plotContourMaps, extra_plot_func=extra_plot_func)
+
+    fitGaussComponentParams = True
+    minimums = mixture.findGlobalMinimumMixture(distToExperiment, spectraFuncs, makeMixture, trysCount, bounds(), paramNames(), componentNames=componentNames, folderToSaveResult=folderToSaveResult, fixParams=fixParams, contourMapCalcMethod=contourMapCalcMethod, plotContourMaps=plotContourMaps, extraPlotFuncContourMaps=extraPlotFuncContourMaps)
 
     output = ''
     paramNames1d = minimums[0]['paramNames1d']
@@ -379,24 +373,16 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
         resultString = 'R-factor = {:.4g} '.format(minimum['value']) + ' '.join([paramNames1d[i]+'={:.2g}'.format(minimum['x1d'][i]) for i in range(len(paramNames1d))])
         print(resultString)
         strj = utils.zfill(j, trysCount)  # str(ir) !!!!!! - to have names sorted in same order as minimums
-        for ip in range(len(estimatorList)):
-            estimator = estimatorList[ip]
-            exp = estimator.exp
-            xanes = utils.Spectrum(e0, minimum['spectra'][ip])
-            fileName = 'xanes_approx_'+strj if oneComponent else 'xanes_'+componentNames[ip]+'_approx_'+strj
-            if estimator.diffFrom is None:
-                plotting.plotToFolder(folderToSaveResult, exp, None, xanes, fileName=fileName)
-                np.savetxt(folderToSaveResult+os.sep+fileName+'.csv', [exp.spectrum.energy, exp.spectrum.intensity, xanes.intensity], delimiter=',')
-            else:
-                plotting.plotToFolder(folderToSaveResult, estimator.expDiff, None, xanes, fileName=fileName)
-                np.savetxt(folderToSaveResult+os.sep+fileName+'.csv', [exp.spectrum.energy, estimator.expDiff.spectrum.intensity, xanes.intensity], delimiter=',')
         if not oneComponent:
-            xanesMixture = utils.Spectrum(e0, minimum['mixtureSpectrum'])
-            plotting.plotToFolder(folderToSaveResult, estimatorList[0].exp, None, xanesMixture, title=resultString, fileName='xanes_mixture_approx_' + strj)
-            np.savetxt(folderToSaveResult + '/xanes_mixture_approx_' + strj + '.csv', [estimatorList[0].exp.spectrum.energy, estimatorList[0].exp.spectrum.intensity, xanesMixture.intensity], delimiter=',')
+            for ip in range(len(estimatorList)):
+                fileName = 'xanes_approx_'+strj if oneComponent else 'xanes_'+componentNames[ip]+'_approx_'+strj
+                plotting.plotToFile(e0, minimum['spectra'][ip], 'theory', e0_geom, expXanes_geom, 'exp', title=resultString, fileName=folderToSaveResult+os.sep+fileName)
+        # for one component mixture spectrum can be different from single component spectrum if normalizeMixtureToExperiment
+        plotting.plotToFile(e0, minimum['mixtureSpectrum'], 'theory', e0_geom, expXanes_geom, 'exp', title=resultString, fileName=folderToSaveResult+os.sep+'xanes_mixture_approx_' + strj)
 
     minimum = minimums[0]
     concentrations = minimum['concentrations']
+    spectraList = []
     for ip in range(len(estimatorList)):
         estimator = estimatorList[ip]
         exp = estimator.exp
@@ -414,27 +400,19 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
         else: fdmnes.runCluster(folderToSaveResult+'/fdmnes_'+componentNames[ip], calcXanes['memory'], calcXanes['nProcs'])
         xanes = fdmnes.parse_one_folder(folderToSaveResult+'/fdmnes_'+componentNames[ip])
         smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(exp.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', exp, estimator.norm)
-        if estimator.diffFrom is None:
-            plotting.plotToFolder(folderToSaveResult, exp, None, smoothed_xanes, fileName='xanes_'+componentNames[ip]+'_best_minimum')
-            np.savetxt(folderToSaveResult+'/xanes_'+componentNames[ip]+'_best_minimum.csv', [exp.spectrum.energy, exp.spectrum.intensity, smoothed_xanes.intensity], delimiter=',')
-        else:
-            plotting.plotToFolder(folderToSaveResult, exp, None, smoothed_xanes, fileName='xanes_'+componentNames[ip]+'_best_minimum', append=[{'data':estimator.diffFrom['spectrumBase'].intensity, 'label':'spectrumBase'}, {'data':estimator.diffFrom['projectBase'].spectrum.intensity, 'label':'projectBase'}])
-            np.savetxt(folderToSaveResult+'/xanes_'+componentNames[ip]+'_best_minimum.csv', [exp.spectrum.energy, exp.spectrum.intensity, smoothed_xanes.intensity], delimiter=',')
+        plotting.plotToFile(e0, smoothed_xanes, 'theory', e0_geom, expXanesPure_geom, 'exp', title=resultString, fileName=folderToSaveResult + os.sep + 'xanes_' + componentNames[ip] + '_best_minimum')
+        if estimator.diffFrom is not None:
             smoothed_xanes.intensity = (smoothed_xanes.intensity - estimator.diffFrom['spectrumBase'].intensity)*estimator.diffFrom['purity']
-            plotting.plotToFolder(folderToSaveResult, estimator.expDiff, None, smoothed_xanes, fileName='xanesDiff_'+componentNames[ip]+'_best_minimum')
-            np.savetxt(folderToSaveResult+'/xanesDiff_best_minimum.csv', [exp.spectrum.energy, estimator.expDiff.spectrum.intensity, smoothed_xanes.intensity], delimiter=',')
-        concentration = concentrations[ip]
-        if estimator == estimatorList[0]:
-            smoothed_xanesMixture = smoothed_xanes.clone()
-            smoothed_xanesMixture.intensity *= concentration
-        else:
-            smoothed_xanesMixture.intensity += concentration * np.interp(smoothed_xanesMixture.energy, smoothed_xanes.energy, smoothed_xanes.intensity)
-    if calcXanes is not None and not oneComponent:
-        smoothed_xanesMixture.intensity /= np.sum(concentrations)
-        plotting.plotToFolder(folderToSaveResult, exp0, None, smoothed_xanesMixture, fileName='xanes_mixture_best_minimum')
-        np.savetxt(folderToSaveResult+'/xanes_mixture_best_minimum.csv', [exp0.spectrum.energy, exp0.spectrum.intensity, smoothed_xanesMixture.intensity], delimiter=',')
+            plotting.plotToFile(e0, smoothed_xanes, 'theory', e0_geom, expXanes_geom, 'exp', title=resultString, fileName=folderToSaveResult + os.sep + 'xanesDiff_'+componentNames[ip]+'_best_minimum')
+        spectraList.append(smoothed_xanes)
+    if calcXanes is not None:
+        smoothed_xanesMixture = makeMixture(spectraList, concentrations)
+        plotting.plotToFile(e0, smoothed_xanesMixture, 'theory', e0_geom, expXanesPure_geom, 'exp', title=resultString, fileName=folderToSaveResult + os.sep + 'xanes_mixture_best_minimum.png')
+        if estimator0.diffFrom is not None:
+            smoothed_xanesMixture = (smoothed_xanesMixture - estimator0.diffFrom['spectrumBase'].intensity) * estimator0.diffFrom['purity']
+            plotting.plotToFile(e0, smoothed_xanesMixture, 'theory', e0_geom, expXanes_geom, 'exp', title=resultString, fileName=folderToSaveResult + os.sep + 'xanesDiff_mixture_best_minimum.png')
     if oneComponent:
-        return {'value':minimum['value'], 'x':minimum['x']}
+        return {'value':minimum['value'], 'x':minimum['x'], 'spectrum':minimum['mixtureSpectrum']}
     else:
         return minimum
 
@@ -682,6 +660,103 @@ def findGlobalL2NormMinimumMixtureUniform(tryCount, spectrumCollection, estimato
                 plot2d(params[0], params[1])
 
 
+def parseFindGlobalL2NormMinimumMixtureResult(folder):
+    with open(os.path.join(folder, 'minimums.txt'), 'r') as mf:
+        line = mf.readline(10000).strip()
+        minimum = float(line.split(' ')[0])
+        paramsLine = line[line.index(' ') + 1:].strip()
+        result = {'rFactor': minimum}
+        spectraFileNames = glob.glob(f'{folder}/xanes_*_approx_*.png')
+        spectraFileNames = [os.path.split(s)[1] for s in spectraFileNames]
+        projectNames = []
+        for s in spectraFileNames:
+            i1 = s.find('_')
+            i2 = s.rfind('_')
+            assert i2 >= 0
+            i2 = s.rfind('_', 0, i2-1)
+            projectNames.append(s[i1+1:i2])
+        projectNames = np.unique(projectNames)
+        if len(projectNames) == 1 and projectNames[0] == 'mixture': projectNames = []
+        params = {eq.split('=')[0]:float(eq.split('=')[1]) for eq in paramsLine.split('  ')}
+        concentrations = {pn:params[pn] for pn in projectNames if pn in params}
+        for pn in projectNames:
+            if pn in params:
+                del params[pn]
+
+        def dictToStr(d):
+            keys = sorted(list(d.keys()))
+            s = ''
+            for k in keys: s += f' {k}={d[k]}'
+            return s.strip()
+        result['concentrations'] = dictToStr(concentrations)
+        result['params'] = dictToStr(params)
+        return result
+
+
+def multiFit(projects, samples, experiment, combinations='all 1', startWithComb=None, constructInverseEstimatorParams=None, findGlobalL2NormMinimumParams=None, outputFolder='multiFitResult', gatherStatOnly=False):
+    """
+    Fit all experiments by combinations of given samples
+
+    :param projects: list of projects
+    :param samples: list of samples len(projects) == len(samples). Project names must be different!
+    :param experiment: exp spectrum
+    :param combinations: 'all 1', 'all 2', 'all 1,2', 'all 3', ... - means all combinations of the given size; or list of project/sample indices/ind_lists. Example: combinations = [[0,3], [1,3], 0, 2, [4,2]]
+    :param startWithComb: combination to start with (in terms of project names)
+    :param constructInverseEstimatorParams: dict
+    :param findGlobalL2NormMinimumParams: dict
+    :param outputFolder: working folder
+    :param gatherStatOnly: if True do not calculate, just gather statistics
+    """
+    assert len(projects) == len(samples)
+    n = len(projects)
+    if isinstance(combinations, str):
+        assert combinations[:4] == 'all '
+        all_types = [int(s) for s in combinations[4:].split(',')]
+        trys = [i for i in range(n)]
+        combinations = []
+        for m in all_types: combinations += list(itertools.combinations(trys, m))
+    projectNames = [p.name for p in projects]
+    assert len(set(projectNames)) == n, 'Duplicate project names: '+str(projectNames)
+    estimators = []
+    if not gatherStatOnly:
+        for i in range(n):
+            projects[i].spectrum = experiment
+            est = Estimator(exp=projects[i], convolutionParams=projects[i].FDMNES_smooth, folderToSaveCVresult=f'{outputFolder}/CVresults/{i}', **constructInverseEstimatorParams)
+            est.fit(samples[i])
+            estimators.append(est)
+    continueCalc = startWithComb is None
+    results = []
+    statFolder = f'{outputFolder}/statistics'
+    os.makedirs(statFolder, exist_ok=True)
+    for comb in combinations:
+        if isinstance(comb, int): comb = [comb]
+        nameComb = [projectNames[ic] for ic in comb]
+        suffix = '_'.join(nameComb)
+        if startWithComb is not None and not continueCalc:
+            if suffix == '_'.join(startWithComb): continueCalc=True
+            else: continue
+        folderToSaveResult = f'{outputFolder}/fit_by_{suffix}'
+        if not gatherStatOnly:
+            print(f'Start fitting by', nameComb, 'Save result in', outputFolder)
+            ests = [estimators[ic] for ic in comb]
+            findGlobalL2NormMinimumMixture(estimatorList=ests, folderToSaveResult=folderToSaveResult, **findGlobalL2NormMinimumParams)
+        res = parseFindGlobalL2NormMinimumMixtureResult(folderToSaveResult)
+        res['combination'] = suffix
+        results.append(res)
+        bestSpectrumFile = f'{res["rFactor"]:.4f}_{suffix}.png'
+        f = sorted(glob.glob(os.path.join(folderToSaveResult, 'xanes_mixture_approx_0*.png')))
+        if len(f) > 0:
+            # mixture
+            shutil.copyfile(f[0], os.path.join(statFolder, bestSpectrumFile))
+        else:
+            print('Can\'t find best spectrum graph in folder', folderToSaveResult)
+    results = sorted(results, key=lambda r: r['rFactor'], reverse=False)
+    with open(os.path.join(statFolder,'! statistics.csv'), 'w') as f:
+        f.write("rFactor;combination;concentrations;params\n")
+        for r in results:
+            f.write(f"{r['rFactor']};{r['combination']};{r['concentrations']};{r['params']}\n")
+
+
 def inverseCrossValidation(estimator, sample, CVcount):
     if sample.spectra.shape[0] > 20:
         kf = KFold(n_splits=CVcount, shuffle=True, random_state=0)
@@ -695,27 +770,38 @@ def inverseCrossValidation(estimator, sample, CVcount):
         y_train, y_test = y[train_index,:], y[test_index,:]
         estimator.fit(X_train, y_train)
         prediction_spectra[test_index] = estimator.predict(X_test)
-    y_mean = np.mean(y, axis=0)
     N = y.shape[0]
-    u = np.mean([utils.integral(sample.energy, (y[i] - prediction_spectra[i]) ** 2) for i in range(N)])
-    v = np.mean([utils.integral(sample.energy, (y[i] - y_mean) ** 2) for i in range(N)])
-    score = 1 - u / v
-    stddevs = np.array([np.sqrt(utils.integral(sample.energy, (y[i] - prediction_spectra[i]) ** 2)) for i in range(N)])
-    meanL2 = np.mean(stddevs)
-    return {'relToConstPredError':1-score, 'meanL2':meanL2}, stddevs, prediction_spectra
+    error = relativeToConstantPredictionError(y, prediction_spectra, sample.energy)
+    individualSpectrErrors = np.array([np.sqrt(utils.integral(sample.energy, (y[i] - prediction_spectra[i]) ** 2)) for i in range(N)])
+    rFactors = np.array([utils.rFactor(sample.energy, prediction_spectra[i], y[i]) for i in range(N)])
+    meanL2 = np.mean(individualSpectrErrors)
+    return {'relToConstPredError': error, 'meanL2': meanL2, 'maxRFactor':np.max(rFactors)}, individualSpectrErrors, prediction_spectra
 
 
-def calcParamStdDev(estimator, numPointsAlongOneDim=3):
-    geometryParamRanges = estimator.exp.geometryParamRanges
+def relativeToConstantPredictionError(yTrue, yPred, energy):
+    y_mean = np.mean(yTrue, axis=0)
+    N = yTrue.shape[0]
+    u = np.mean([utils.integral(energy, (yTrue[i] - yPred[i]) ** 2) for i in range(N)])
+    v = np.mean([utils.integral(energy, (yTrue[i] - y_mean) ** 2) for i in range(N)])
+    return u / v
+
+
+def calcParamStdDevHelper(geometryParamRanges, paramNames=None, numPointsAlongOneDim=3, trainedInverseModel=None, sample=None):
+    assert trainedInverseModel is not None or sample is not None
+    assert paramNames is not None or sample is not None
+    if trainedInverseModel is None:
+        trainedInverseModel = getMethod('Extra Trees')
+        trainedInverseModel.fit(sample.params, sample.spectra)
+    if paramNames is None: paramNames = sample.paramNames
     N = len(geometryParamRanges)
-    paramNames = estimator.paramNames
-    coords = [np.linspace(geometryParamRanges[p][0], geometryParamRanges[p][1], numPointsAlongOneDim) for p in estimator.paramNames]
+    assert len(paramNames) == N
+    coords = [np.linspace(geometryParamRanges[p][0], geometryParamRanges[p][1], numPointsAlongOneDim) for p in paramNames]
     repeatedCoords = np.meshgrid(*coords)
     m = numPointsAlongOneDim**N
     params = np.zeros((m, N))
     for j in range(N):
         params[:,j] = repeatedCoords[j].flatten()
-    xanes = estimator.predict(params)
+    xanes = trainedInverseModel.predict(params)
     stdDevXanes = np.std(xanes, axis=0)
     eps = 1e-5*np.mean(stdDevXanes)
     stdDevXanes[stdDevXanes<eps] = eps
@@ -745,8 +831,16 @@ def calcParamStdDev(estimator, numPointsAlongOneDim=3):
         paramStdDevs = np.array(paramStdDevs)
         maxStdDev[paramNames[paramInd]] = np.mean( np.max(paramStdDevs, axis=0) / stdDevXanes )
         meanStdDev[paramNames[paramInd]] = np.mean(  np.mean(paramStdDevs, axis=0) / stdDevXanes )
-    for name in paramNames:
-        print('Relative StdDev for', name, ': max =', '%0.3f' % maxStdDev[name], 'mean =', '%0.3f' % meanStdDev[name])
+    return maxStdDev, meanStdDev
+
+
+def calcParamStdDev(estimator, numPointsAlongOneDim=3, printResult=True):
+    paramNames = estimator.paramNames
+    maxStdDev, meanStdDev = calcParamStdDevHelper(geometryParamRanges=estimator.exp.geometryParamRanges, paramNames=paramNames, numPointsAlongOneDim=numPointsAlongOneDim, trainedInverseModel=estimator)
+    if printResult:
+        for name in paramNames:
+            print('Relative StdDev for', name, ': max =', '%0.3f' % maxStdDev[name], 'mean =', '%0.3f' % meanStdDev[name])
+    return maxStdDev, meanStdDev
 
 
 def L2normExact(arg, **extraParams):
@@ -775,7 +869,7 @@ def L2normExact(arg, **extraParams):
     if calcIsGood:
         smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(exp.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', exp, extraParams['norm'])
         with open(folder+'/args_smooth.txt', 'w') as f: json.dump(exp.defaultSmoothParams['fdmnes'], f)
-        ind = (exp.intervals['fit_smooth'][0]<=exp.spectrum.energy) & (exp.spectrum.energy<=exp.intervals['fit_smooth'][1])
+        ind = (exp.intervals['fit_geometry'][0]<=exp.spectrum.energy) & (exp.spectrum.energy<=exp.intervals['fit_geometry'][1])
         if diffFrom is None:
             plotting.plotToFolder(folder, exp, None, smoothed_xanes, fileName='spectrum', title=optimize.arg2string(arg))
             expXanes = exp.spectrum.intensity
@@ -863,6 +957,7 @@ def buildEvolutionTrajectory(vertices, estimator, intermediatePointsNum, folderT
     os.makedirs(folderToSaveResult, exist_ok=True)
     assert isinstance(vertices[0][0], str), 'The first row must be parameter names'
     paramNames = vertices[0]
+    assert estimator.paramNames is not None, 'You forget to fit estimator'
     assert set(estimator.paramNames) == set(paramNames), 'Param names in geometryParamRanges of project:\n'+str(estimator.paramNames)+'\ndoes not equal to dataset param names:\n'+str(paramNames)
     vertices = np.array(vertices[1:])
     ind = {estimator.paramNames[i]:i for i in range(len(paramNames))}
@@ -897,7 +992,7 @@ def buildEvolutionTrajectory(vertices, estimator, intermediatePointsNum, folderT
     expData.to_csv(folderToSaveResult+'/exp_xanes.txt', sep=' ', index=False)
 
     for i in range(Ntraj):
-        geometryParams = {};
+        geometryParams = {}
         for j in range(len(estimator.paramNames)):
             geometryParams[estimator.paramNames[j]] = trajectory_df.loc[i,estimator.paramNames[j]]
         molecula = estimator.exp.moleculeConstructor(geometryParams)

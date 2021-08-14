@@ -16,7 +16,7 @@ Python implementation of FitIt software to fit X-ray absorption near edge struct
 pip install pyfitit
 
 ## Usage
-See [examples](http://hpc.nano.sfedu.ru/pyfitit/download/examples.zip). Manual is included in the examples archive.
+See examples in [PyFitIt github repository](https://github.com/gudasergey/pyFitIt).
 
 ### This project is developing thanks to
 - Grigory Smolentsev
@@ -33,4 +33,8 @@ See [examples](http://hpc.nano.sfedu.ru/pyfitit/download/examples.zip). Manual i
 - Mikhail Soldatov
 
 ### If you like the software acknowledge it using the references below:
-A. Martini, S. A. Guda, A. A. Guda, G. Smolentsev, A. Algasov, O. Usoltsev, M. A. Soldatov, A. Bugaev, Yu. Rusalev, C. Lamberti, A. V. Soldatov "PyFitit: the software for quantitative analysis of XANES spectra using machine-learning algorithms" Computer Physics Communications. 2019. DOI: 10.1016/j.cpc.2019.107064
+[A. Martini, S. A. Guda, A. A. Guda, G. Smolentsev, A. Algasov, O. Usoltsev, M. A. Soldatov, A. Bugaev, Yu. Rusalev, C. Lamberti, A. V. Soldatov "PyFitit: the software for quantitative analysis of XANES spectra using machine-learning algorithms" Computer Physics Communications. 2019. DOI: 10.1016/j.cpc.2019.107064](https://doi.org/10.1016/j.cpc.2019.107064)
+
+[A. Martini, A.A. Guda, S.A. Guda, A.L. Bugaev, O.V. Safonova, A.V. Soldatov "Machine Learning Powered by Principal Component Descriptors as the Key for Sorted Structural Fit of XANES" // Phys. Chem. Chem. Phys., 2021 DOI: 10.1039/D1CP01794B](https://doi.org/10.1039/D1CP01794B)
+
+[A. Martini, A. A. Guda, S. A. Guda, A. Dulina, F. Tavani, P. D’Angelo, E. Borfecchia, and A. V. Soldatov. Estimating a Set of Pure XANES Spectra from Multicomponent Chemical Mixtures Using a Transformation Matrix-Based Approach //  In: Di Cicco A., Giuli G., Trapananti A. (eds) Synchrotron Radiation Science and Applications. Springer Proceedings in Physics, vol 220. Springer, Cham. DOI: 10.1007/978-3-030-72005-6_6](https://doi.org/10.1007/978-3-030-72005-6_6)

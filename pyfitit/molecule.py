@@ -1,6 +1,6 @@
 import numpy as np
 from parsy import regex, generate, whitespace, string
-import math, scipy, copy
+import math, scipy, copy, os
 from . import utils, geometry
 if utils.isLibExists("wbm"):
     from . import wbm
@@ -57,6 +57,12 @@ def flatten(array):
 
 
 def parseXYZFile(fname):
+    with open(fname, encoding='utf-8') as f:
+        content = f.read()
+    return parseXYZContent(content)
+
+
+def parseXYZContent(content):
     intParser = regex(r"[-+]?\d+").map(int)
     floatParser = regex(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?").map(float)
     newLine = regex(r'\n')
@@ -70,7 +76,12 @@ def parseXYZFile(fname):
 
     @generate
     def parseRow():
-        atom = yield regex(r'\s*[a-zA-Z.]*')
+        atom = yield regex(r'\s*[a-zA-Z0-9.]*')
+        try:
+            atomNumber = int(atom)
+            atom = atom_names[atomNumber]
+        except ValueError:
+            pass
         yield whitespace.many()
         x = yield floatParser
         yield whitespace.many()
@@ -88,20 +99,28 @@ def parseXYZFile(fname):
         atomNames = [a[1] for a in table]
         return np.array(atomCoords), np.array(atomNames)
 
-    with open(fname, encoding='utf-8') as f:
-        content = f.read()
-
     table, atomNames = parseContent.parse(content)
     atomNumbers = np.array([atom_proton_numbers[an] for an in atomNames])
     return table, atomNumbers, atomNames
 
 
 class Molecule:
-    def __init__(self, fileName):
-        self.fileName = utils.fixPath(fileName)
-        self.atom, self.atomNumber, self.atomName = parseXYZFile(self.fileName)
+    def __init__(self, fileName=None):
+        self.atom, self.atomNumber, self.atomName, self.az = None, None, None, None
+        if fileName is not None:
+            self.fileName = utils.fixPath(fileName)
+            self.construct(*parseXYZFile(self.fileName))
+
+    def construct(self, atom, atomNumber, atomName):
+        self.atom, self.atomNumber, self.atomName = atom, atomNumber, atomName
         self.az = self.atomNumber  # alias
-        self.setParts('0-'+str(len(self.atom)-1))
+        self.setParts('0-' + str(len(self.atom) - 1))
+
+    @classmethod
+    def fromXYZcontent(cls, content):
+        m = cls()
+        m.construct(*parseXYZContent(content))
+        return m
 
     def setParts(self, *parts):
         # partsData should be a 2d-array, each of inner array contains indices of atoms that belong to the corresponding part
@@ -183,6 +202,8 @@ class Molecule:
             self.atom[i] += shift
 
     def export_xyz(self, file, cellSize=1):
+        d = os.path.split(file)[0]
+        if d != '':  os.makedirs(d, exist_ok=True)
         with open(file, 'w') as f:
             f.write(str(self.atom.shape[0])+'\n')
             f.write('\n')
@@ -252,7 +273,10 @@ class Molecule:
         return np.min(dist) >= minDist
 
     def rdf(self, r, sigma, atoms):
-        if isinstance(atoms, str):
+        if atoms is None:
+            # assert np.array_equal(self.atom[0], [0, 0, 0])
+            ind = range(1, self.atom.shape[0])
+        elif isinstance(atoms, str):
             atomName = atoms
             atomNumber = atom_proton_numbers[atomName]
             ind = np.where(self.atomNumber == atomNumber)[0]
@@ -267,8 +291,15 @@ class Molecule:
             rdf += utils.gauss(r,r0,sigma)/r**2
         return rdf
 
-    def adf(self, angle, sigma, atoms):
-        if isinstance(atoms, str):
+    def adf(self, angle, sigma, atoms=None, maxDist=2.5):
+        if atoms is None:
+            # assert np.array_equal(self.atom[0], [0, 0, 0])
+            ind = []
+            for i in range(1, self.atom.shape[0]):
+                if np.linalg.norm(self.atom[i] - self.atom[0]) > maxDist:
+                    continue
+                ind.append(i)
+        elif isinstance(atoms, str):
             atomName = atoms
             atomNumber = atom_proton_numbers[atomName]
             ind = np.where(self.atomNumber == atomNumber)[0]
@@ -594,6 +625,7 @@ def matchAtomsHelper(mol1, mol2, closeAtomCountForAngleOptimizing, verbose=True)
             print(i,'proton_number =', '%.0f' % m1[i,3], 'x =', '%.4f' % m1[i,0], 'dist =', '%.2f' % np.linalg.norm(m1[i,:3]-m1[0,:3]))
             print('------------------------')
     return resMol1, resMol2
+
 
 # return mol1, mol2 with atoms, sorted in matching order. Atoms of the mol1 are sorted by distance to the first atom
 def matchAtoms(mol1, mol2, closeAtomCountForAngleOptimizing, distThrForSymmetryChoose):

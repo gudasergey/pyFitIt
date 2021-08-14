@@ -1,5 +1,8 @@
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 from . import utils
 utils.fixDisplayError()
 import numpy as np
@@ -81,12 +84,10 @@ def loadProject(*p, **q):
     return project.loadProject(*p,**q)
 
 
-def parseFdmnesFolder(folder):
-    spectrum = fdmnes.parse_one_folder(folder)
-    return spectrum
+parseFdmnesFolder = fdmnes.parse_one_folder
 
 
-def parseADFFolder(folder, makePiramids = False):
+def parseADFFolder(folder, makePiramids=False):
     spectrum, _ = adf.parse_one_folder(folder, makePiramids)
     return spectrum
 
@@ -94,14 +95,16 @@ def parseADFFolder(folder, makePiramids = False):
 parseFeffFolder = feff.parse_one_folder
 
 # sampling
+Sample = ML.Sample
 readSample = ML.Sample.readFolder
 generateInputFiles = sampling.generateInputFiles
 calcSpectra = sampling.calcSpectra
 collectResults = sampling.collectResults
+sampleAdaptively = sampling.sampleAdaptively
+checkSampleIsGoodByCount = sampling.checkSampleIsGoodByCount
+checkSampleIsGoodByCVError = sampling.checkSampleIsGoodByCVError
 constructDirectEstimator = directMethod.Estimator
 constructInverseEstimator = inverseMethod.Estimator
-krigingSampling = sampling.krigingSampling
-sampleAdaptively = adaptiveSampling.sampleAdaptively
 
 smoothInterpNorm = smoothLib.smoothInterpNorm
 
