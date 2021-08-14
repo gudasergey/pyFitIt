@@ -720,8 +720,8 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     plotting.closefig(fig)
     # for cmap in ['inferno', 'spectral', 'terrain', 'summer']:
     cmap = 'inferno'
-    fig, _ = plotting.createfig()
-    ax = fig.gca(projection='3d')
+    fig, ax = plotting.createfig(subplot_kw={'projection':'3d'})
+    # ax = fig.gca(projection='3d')
     # cmap = 'summer'
     ax.plot_trisurf(param1mesh.flatten(), param2mesh.flatten(), funcValues.flatten(), linewidth=0.2, antialiased=True, cmap=cmap)
     ax.view_init(azim=310, elev=40)
