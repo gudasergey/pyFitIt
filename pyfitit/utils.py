@@ -73,6 +73,16 @@ class Spectrum:
         e,inten = geometry.get_line_intersection(a,b,c, 0,1,-intensity)
         return e
 
+    def toExafs(self, Efermi, k_power):
+        me = 2 * 9.109e-31  # kg
+        h = 1.05457e-34  # J*s
+        J = 6.24e18  # 1 J = 6.24e18 eV
+        e, s = self.energy, self.intensity
+        i = e >= Efermi
+        k = np.sqrt((e[i] - Efermi) / J * me / h ** 2 / 1e20)  # J * kg /  (J*s)^2 = kg / (J * s^2) = kg / ( kg*m^2 ) = 1/m^2 = 1e-20 / A^2
+        intSqr = (s[i] - 1) * k ** k_power
+        return Exafs(k, intSqr)
+
     def __add__(self, other):
         e1 = max(self.energy[0], other.energy[0])
         e2 = min(self.energy[-1], other.energy[-1])
@@ -101,6 +111,29 @@ class Exafs:
     def __init__(self, k, chi):
         self.k = k
         self.chi = chi
+
+    def toXanes(self, Efermi, k_power):
+        me = 2 * 9.109e-31  # kg
+        h = 1.05457e-34  # J*s
+        J = 6.24e18  # 1 J = 6.24e18 eV
+        e = self.k**2 * J / me * h**2 * 1e20 + Efermi
+        k = copy.deepcopy(self.k)
+        k[k==1] = 1
+        return Spectrum(e, self.chi/k**k_power + 1)
+
+    def shift(self, dE, Efermi, inplace=False):
+        xan = self.toXanes(Efermi, k_power=0)
+        xan.energy += dE
+        exafs = xan.toExafs(Efermi, k_power=0)
+        if inplace:
+            self.k, self.chi = exafs.k, exafs.chi
+        else:
+            return exafs
+
+    def smooth(self, SO2, sigmaSquare, inplace=False):
+        chi1 = self.chi * np.exp(-2 * self.k ** 2 * sigmaSquare) * SO2
+        if inplace: self.chi = chi1
+        else: return Exafs(self.k, chi1)
 
 
 class SpectrumCollection:

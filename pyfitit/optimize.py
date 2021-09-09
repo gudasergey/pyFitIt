@@ -39,6 +39,7 @@ def param(paramName, value, borders, step, minStep, isInt = False):
     assert  a<=value and value<=b, 'Error, for '+paramName+' not true: '+str(a)+'<='+str(value)+'<='+str(b)
     return {'paramName':paramName, 'value':value, 'leftBorder':a, 'rightBorder':b, 'step':step, 'minStep':minStep, 'isInt':isInt}
 
+
 class VectorPoint:
     def __init__(self, paramList):
         self.params = copy.deepcopy(paramList)
@@ -721,7 +722,6 @@ def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
     # for cmap in ['inferno', 'spectral', 'terrain', 'summer']:
     cmap = 'inferno'
     fig, ax = plotting.createfig(subplot_kw={'projection':'3d'})
-    # ax = fig.gca(projection='3d')
     # cmap = 'summer'
     ax.plot_trisurf(param1mesh.flatten(), param2mesh.flatten(), funcValues.flatten(), linewidth=0.2, antialiased=True, cmap=cmap)
     ax.view_init(azim=310, elev=40)

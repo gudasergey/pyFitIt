@@ -1,4 +1,4 @@
-import scipy, sklearn, copy, warnings
+import scipy, sklearn, copy, warnings, lmfit
 import numpy as np
 from lmfit.models import ExpressionModel, PolynomialModel
 from . import utils
@@ -93,6 +93,25 @@ def fit_to_experiment_by_norm_or_regression(exp_e, exp_xanes, fit_interval, fdmn
         else:
             assert normType == 'linearMult'
             return fdmnes_xan * (norm['a']*exp_e + norm['b']), norm
+
+
+def fit_by_polynom(e1, xan1, fit_interval):
+    e, xan = utils.limit(fit_interval, e1, xan1)
+
+    def model(t, e0, a):
+        ind = t < e0
+        res = np.zeros(t.shape)
+        res[~ind] = a*(t[~ind]-e0)**2
+        return 1 + res
+    mod = lmfit.Model(model, independent_vars=['t'])
+    params = mod.make_params(e0=5200, a=-1e-7)  # - стартовые
+    params['e0'].set(min=fit_interval[0], max=fit_interval[1])
+    params['a'].set(min=-1e-4, max=1e-4)
+    result = mod.fit(xan, params, t=e)
+    e0 = result.best_values['e0']
+    a = result.best_values['a']
+    app = model(e1,e0,a)
+    return app
 
 
 def findExpEfermi(exp_e, exp_xanes, search_shift_level):

@@ -104,7 +104,7 @@ def nearestAtomsDistChange(logFileName, mainAtom, firstN=5):
         if not os.path.exists(inputFileName):
             print('Can\'t find input .run or .job file for log',logFileName)
             return None
-    originalMolecule = parseRunOrJobFile(inputFileName)
+    originalMolecule = extractMoleculeFromFile(inputFileName)
     originalAtomNames = [str(i+1)+'.'+originalMolecule.atomName[i] for i in range(len(originalMolecule.atomName))]
     # enumerateParsedXYZ(originalMolecule)
     # trimAtomNames(originalMolecule)
@@ -204,7 +204,8 @@ def parseOutFile(fileName):
     return pd.read_csv(StringIO(s), header=None, names=['N','colon', 'E', 'fmu', 'fQ', 'fm', 'fOmu', 'fMmu','ftot'], sep=r'\s+')
 
 
-def parseRunOrJobFile(fileName):
+def extractMoleculeFromFile(fileName, fileType='.run'):
+    assert fileType[0] == '.', f'fileType must be a file extension start with dot: .???'
     with open(fileName, 'r') as f: s = f.read()
     i = re.search(r"\n\s*Atoms\s*\n", s,  re.IGNORECASE)
     assert i is not None
@@ -213,11 +214,15 @@ def parseRunOrJobFile(fileName):
     assert j is not None
     j = j.start()
     s = s[i:i+j]
+    if fileType == '.out': return molecule.Molecule.fromXYZcontent(s)
     p = ''
     lines = s.split('\n')
     for line in lines:
         # print(line)
-        p += ' '.join(line.strip().split(' ')[1:]) + '\n'
+        if fileType in ['.run', '.job']:
+            p += ' '.join(line.strip().split(' ')[1:]) + '\n'
+        else:
+            assert False, f'Unknown file type {fileType}'
     return molecule.Molecule.fromXYZcontent(p)
 
 

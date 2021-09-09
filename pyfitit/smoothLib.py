@@ -255,7 +255,7 @@ class DefaultSmoothParams:
         efermiParam = param('Efermi', Efermi, [Efermi-20,Efermi+20], 2, 0.2)
         self.params = {'fdmnes':\
             [param('Gamma_hole', 1.5, [0.1,10], 0.4, 0.1), param('Ecent', 26, [1,100], 3, 0.5),\
-             param('Elarg', 39, [1,100], 5, 0.5), param('Gamma_max', 15, [5,25], 1, 0.2), efermiParam\
+             param('Elarg', 39, [1,100], 5, 0.5), param('Gamma_max', 15, [5,50], 1, 0.2), efermiParam\
             ], 'simple_Gauss': [param('sigma', 1.5, [0.1,10], 0.1, 0.01)],
                'simple_Cauchy': [param('sigma', 1.5, [0.1,10], 0.1, 0.01)],
                'simple_C+G':\

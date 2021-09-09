@@ -1061,4 +1061,11 @@ class ErrorPredictingSampler(Sampler):
         return result
 
     def isGoodEnough(self, dataset):
-        return self.checkSampleIsGoodFunc(dataset)
+        try:
+            isGood = self.checkSampleIsGoodFunc(dataset)
+        except:
+            print('There was error in function checkSampleIsGoodFunc')
+            print(traceback.format_exc())
+            print('I assume that the sample is not good yet')
+            isGood = False
+        return isGood
