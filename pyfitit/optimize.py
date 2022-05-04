@@ -1,4 +1,4 @@
-import random, copy, json, scipy, scipy.optimize, matplotlib, warnings, os, math
+import random, copy, json, scipy, scipy.optimize, warnings, os, itertools
 import numpy as np
 from multiprocessing.dummy import Pool as ThreadPool
 import matplotlib.pyplot as plt
@@ -373,9 +373,11 @@ def minimizePokoord(f0, arg0, useRefinement=False, extraValue=False, **kwargs):
 
 
 # bounds - is a list of intervals [a,b]
-def minimize(fun, x0, bounds, constraints=(), fun_args=None, paramNames=None, method='coord'):
-    assert method in ['coord', 'scipy']
-    assert (len(constraints) == 0) or method == 'scipy'
+def minimize(fun, x0, bounds, constraints=(), fun_args=None, paramNames=None, method='trust-constr'):
+    """
+    method = scipy minimize method
+    """
+    assert (len(constraints) == 0) or method == 'trust-constr'
     if paramNames is None: paramNames = ['x'+str(i) for i in range(len(x0))]
     if method == 'coord':
         def makeCoordArg(x,b,pNames):
@@ -395,19 +397,19 @@ def minimize(fun, x0, bounds, constraints=(), fun_args=None, paramNames=None, me
     else:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            res = scipy.optimize.minimize(fun, x0, args=fun_args, bounds=bounds, constraints=constraints, method='trust-constr')
+            res = scipy.optimize.minimize(fun, x0, args=fun_args, bounds=bounds, constraints=constraints, method=method)
         fmin, xmin = res.fun, res.x
     return fmin, xmin
 
 
-def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult='globalMinimumSearchResult', fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFunc=None, printOnline=True):
+def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult='globalMinimumSearchResult', fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFunc=None, printOnline=True, method='trust-constr'):
     """
     Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum.
     
     :param targetFunction: function to minimize targetFunction(argsList, *fun_args)
     :param trysCount: number of attempts to find minimum
     :param bounds: list of 2-element lists with parameter bounds
-    :param constraints: additional constrains for ‘trust-constr’ scipy.optimize.minimize method
+    :param constraints: additional constrains for trust-constr scipy.optimize.minimize method
     :param fun_args: extra params of targetFunction (tuple)
     :param paramNames: list of target function argument names to use in plotting (not fixed and fixed)
     :param folderToSaveResult: all result graphs and log are saved here
@@ -434,6 +436,7 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
         a,b = bounds[i]
         assert a <= fixParams[p] and fixParams[p] <= b, f'Fixed param {p} = {fixParams[p]} is out of bounds [{a}, {b}]'
     notFixedInd = np.setdiff1d(np.arange(n), fixInd)
+    m = len(notFixedInd)  # dimension of not fixed variable space
     notFixedParamNames = np.array(paramNames)[notFixedInd]
 
     def getFullx(partial_x):
@@ -458,29 +461,45 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
             part_c = scipy.optimize.NonlinearConstraint(lambda partial_x: c.fun(getFullx(partial_x), *fun_args), c.lb, c.up, keep_feasible=c.keep_feasible)
         partial_constrains += (part_c,)
 
-    folderToSaveResult = utils.fixPath(folderToSaveResult)
-    if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
+    partialBounds = np.zeros((m, 2))
+    for i,j in zip(notFixedInd, range(m)):
+        partialBounds[j,:] = bounds[i]
+
     fmins = np.zeros(trysCount)
     xs = [None]*trysCount
     xs_partial = [None]*trysCount
-    rand = np.random.rand
+    rng = np.random.default_rng(0)
+
+    # start point source
+    edgePoints = np.array(list(itertools.product(*([[0., 1.]] * m))))
+    edgePoints[1], edgePoints[-1] = edgePoints[-1], edgePoints[1]
+    perm = rng.permutation(len(edgePoints) - 2)
+    edgePoints[2:] = edgePoints[2 + perm, :]
+    eps = 0.01
+    edgePoints[edgePoints == 0] += eps
+    edgePoints[edgePoints == 1] -= eps
+    currentPointInd = [0]
+
+    def getNextPoint():
+        if (currentPointInd[0] % 2 == 0) and (currentPointInd[0] // 2 < edgePoints.shape[0]):
+            init_point = edgePoints[currentPointInd[0] // 2] * (partialBounds[:,1] - partialBounds[:,0]) + partialBounds[:,0]
+        else:
+            init_point = rng.random(m) * (partialBounds[:,1] - partialBounds[:,0]) + partialBounds[:,0]
+        currentPointInd[0] += 1
+        return init_point
 
     def getArg0AndBounds():
-        m = len(notFixedInd)
-        partialBounds = np.zeros((m, 2))
-        for i,j in zip(notFixedInd, range(m)):
-            partialBounds[j,:] = bounds[i]
-        partial_arg0 = rand(m) * (partialBounds[:,1] - partialBounds[:,0]) + partialBounds[:,0]
+        partial_arg0 = getNextPoint()
         try_i = 0
         while not checkConstrains(partial_arg0, partial_constrains):
-            partial_arg0 = rand(m) * (partialBounds[:, 1] - partialBounds[:, 0]) + partialBounds[:, 0]
+            partial_arg0 = getNextPoint()
             try_i += 1
             assert try_i < 10000, f'Too many attempts to find start point for optimization inside constrains\nLast try: {partial_arg0}'
         return partial_arg0, partialBounds
 
     for ir in range(trysCount):
         partial_arg0, partialBounds = getArg0AndBounds()
-        fmins[ir], xs_partial[ir] = minimize(targetFunctionPartial, partial_arg0, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, method='scipy')
+        fmins[ir], xs_partial[ir] = minimize(targetFunctionPartial, partial_arg0, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, method=method)
         # method can violate bounds and constrains!
         for j in range(len(partialBounds)):
             g = xs_partial[ir]
@@ -498,35 +517,38 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
     for ir in range(trysCount):
         j = ind[ir]
         output += str(fmins[j])+' '+arg2string(xs[j], paramNames)+"\n"
-    with open(folderToSaveResult+'/minimums.txt', 'w') as f: f.write(output)
+    if folderToSaveResult is not None:
+        folderToSaveResult = utils.fixPath(folderToSaveResult)
+        if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
+        with open(folderToSaveResult+'/minimums.txt', 'w') as f: f.write(output)
 
-    best_ind = ind[0]
-    best_x_partial = xs_partial[best_ind]
+        best_ind = ind[0]
+        best_x_partial = xs_partial[best_ind]
 
-    def plot1d(param):
-        plotMap1d(param, targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_1d_target_func')
+        def plot1d(param):
+            plotMap1d(param, targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_1d_target_func')
 
-    def plot2d(param1, param2):
-        plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extraPlotFunc=extraPlotFunc)
+        def plot2d(param1, param2):
+            plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extraPlotFunc=extraPlotFunc)
 
-    if plotContourMaps == 'all':
-        for i in range(len(notFixedParamNames)):
-            plot1d(i)
-        for i1 in range(len(notFixedParamNames)):
-            for i2 in range(i1+1,len(notFixedParamNames)):
-                plot2d(i1,i2)
-    else:
-        assert isinstance(plotContourMaps, list)
-        for params in plotContourMaps:
-            assert isinstance(params, list)
-            if len(params) == 1:
-                assert params[0] in notFixedParamNames, params[0]+' is not in not fixed param list: '+str(notFixedParamNames)
-                plot1d(params[0])
-            else:
-                assert len(params) == 2
-                assert params[0] in notFixedParamNames, params[0] + ' is not in not fixed param list: ' + str(notFixedParamNames)
-                assert params[1] in notFixedParamNames, params[1] + ' is not in not fixed param list: ' + str(notFixedParamNames)
-                plot2d(params[0], params[1])
+        if plotContourMaps == 'all':
+            for i in range(len(notFixedParamNames)):
+                plot1d(i)
+            for i1 in range(len(notFixedParamNames)):
+                for i2 in range(i1+1,len(notFixedParamNames)):
+                    plot2d(i1,i2)
+        else:
+            assert isinstance(plotContourMaps, list)
+            for params in plotContourMaps:
+                assert isinstance(params, list)
+                if len(params) == 1:
+                    assert params[0] in notFixedParamNames, params[0]+' is not in not fixed param list: '+str(notFixedParamNames)
+                    plot1d(params[0])
+                else:
+                    assert len(params) == 2
+                    assert params[0] in notFixedParamNames, params[0] + ' is not in not fixed param list: ' + str(notFixedParamNames)
+                    assert params[1] in notFixedParamNames, params[1] + ' is not in not fixed param list: ' + str(notFixedParamNames)
+                    plot2d(params[0], params[1])
     result = [{'value': fmins[ind[i]], 'x':xs[ind[i]]} for i in range(trysCount)]
     return result
 

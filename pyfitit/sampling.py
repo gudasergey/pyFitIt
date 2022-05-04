@@ -1,13 +1,50 @@
 import time
 import numpy as np
 from multiprocessing.dummy import Pool as ThreadPool
-import copy, shutil, os, json, subprocess, threading
+import copy, shutil, os, json, subprocess, threading, itertools, shlex, traceback
 import pandas as pd
 import matplotlib.pyplot as plt
-from . import fdmnes, feff, adf, pyGDM, utils, ihs, w2auto, fdmnesTest, ML, plotting, adaptiveSampling, smoothLib, inverseMethod
+import sklearn.ensemble
+
+from . import fdmnes, feff, adf, pyGDM, utils, ihs, w2auto, fdmnesTest, ML, plotting, adaptiveSampling, smoothLib, inverseMethod, vasp_rdf_energy
 
 
-knownPrograms = ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM']
+knownPrograms = ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM', 'vasp_rdf_energy']
+
+
+def isKnown(name):
+    return name in knownPrograms or name[:4] == 'feff'
+
+
+def getInputGenerator(name):
+    assert isKnown(name)
+    if name[:4] == 'feff':
+        version = name[4:]
+        generateInput = lambda molecule,**p:  feff.generateInput(molecule, feffVersion=version, **p)
+    else:
+        generateInput = getattr(globals()[name], 'generateInput')
+    return generateInput
+
+
+def getParser(name):
+    if name[:4] == 'feff': name = 'feff'
+    parseOneFolder = getattr(globals()[name], 'parseOneFolder')
+    return parseOneFolder
+
+
+def getRunner(name, runType):
+    if name[:4] == 'feff':
+        version = name[4:]
+        name = 'feff'
+    if runType == 'run-cluster':
+        run = getattr(globals()[name], 'runCluster')
+    else:
+        assert runType == 'local'
+        run = getattr(globals()[name], 'runLocal')
+        if name == 'feff':
+            run0 = run
+            run = lambda folder: run0(folder, feffVersion=version)
+    return run
 
 
 # ranges - dictionary with geometry parameters region {'paramName':[min,max], 'paramName':[min,max], ...}
@@ -15,7 +52,7 @@ knownPrograms = ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM']
 # spectrCalcParams = {energyRange:..., radius:..., Green:True/False, Adimp=None} - for fdmnes
 # spectrCalcParams = {RMAX:..., }
 # lineEdges = {'start':{...}, 'end':{...}} - for method='line'
-def generateInputFiles(ranges, moleculeConstructor, sampleCount, spectrCalcParams, spectralProgram='fdmnes', method='IHS', folder='sample', lineEdges=None, seed=0):
+def generateInputFiles(ranges, moleculeConstructor, sampleCount, spectrCalcParams, spectralProgram='fdmnes', method='IHS', folder='sample', lineEdges=None, seed=0, debug=False):
     if os.path.exists(folder): shutil.rmtree(folder)
     os.makedirs(folder, exist_ok=True)
     paramNames = [k for k in ranges]
@@ -49,40 +86,38 @@ def generateInputFiles(ranges, moleculeConstructor, sampleCount, spectrCalcParam
     for i in range(points.shape[0]):
         for j in range(N): geometryParams[paramNames[j]] = points[i,j]
         molecula = moleculeConstructor(geometryParams)
-        if molecula is None: print("Can't construct molecula for parameters "+str(geometryParams)); continue
+        if molecula is None: print("Can't construct molecule for parameters "+str(geometryParams)); continue
         folderOne = os.path.join(folder, utils.zfill(i,points.shape[0]))
-        assert spectralProgram in knownPrograms, 'Unknown spectral program name: '+spectralProgram
-        generateInput = getattr(globals()[spectralProgram], 'generateInput')
+        generateInput = getInputGenerator(spectralProgram)
         generateInput(molecula, folder=folderOne, **spectrCalcParams)
         geometryParamsToSave = [[paramNames[j], points[i,j]] for j in range(N)]
-        with open(os.path.join(folderOne,'geometryParams.txt'), 'w') as f: json.dump(geometryParamsToSave, f)
-        print('folder=',folderOne, ' '.join([p+'={:.4g}'.format(geometryParams[p]) for p in geometryParams]))
+        with open(os.path.join(folderOne,'params.txt'), 'w') as f: json.dump(geometryParamsToSave, f)
+        if debug: print('folder=',folderOne, ' '.join([p+'={:.4g}'.format(geometryParams[p]) for p in geometryParams]))
         if hasattr(molecula, 'export_xyz'):
             molecula.export_xyz(folderOne+'/molecule.xyz')
 
 
-def runUserDefined(cmd, folder = '.'):
+def runUserDefined(cmd, folder='.'):
     assert cmd != '', 'Specify command to run'
-    proc = subprocess.Popen([cmd], cwd=folder, stdout=subprocess.PIPE, shell=True)
-    stdoutdata, stderrdata = proc.communicate()
-    if proc.returncode != 0:
-        raise Exception('Error while executing "'+cmd+'" command. Stdout='+str(stdoutdata)+'\nStderr='+str(stderrdata))
-    return stdoutdata
+    output, returncode = utils.runCommand(cmd, folder, outputTxtFile='output.txt')
+    if returncode != 0:
+        raise Exception('Error while executing "'+cmd+'" command. Output:\n'+output)
+    return output
 
 
 # runType = 'local', 'run-cluster', 'user defined'
 def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, memory=5000, calcSampleInParallel=1, folder='sample', recalculateErrorsAttemptCount=0, continueCalculation=False):
-    assert spectralProgram in knownPrograms, 'Unknown spectral program name: '+spectralProgram
+    assert isKnown(spectralProgram), 'Unknown spectral program name: '+spectralProgram
     folders = os.listdir(folder)
     folders.sort()
     for i in range(len(folders)): folders[i] = os.path.join(folder, folders[i])
 
     def calculateXANES(folder):
         if runType == 'run-cluster':
-            runCluster = getattr(globals()[spectralProgram], 'runCluster')
+            runCluster = getRunner(spectralProgram, runType)
             runCluster(folder, memory, nProcs)
         elif runType == 'local':
-            runLocal = getattr(globals()[spectralProgram], 'runLocal')
+            runLocal = getRunner(spectralProgram, runType)
             runLocal(folder)
         elif runType == 'user defined':
             runUserDefined(runCmd, folder)
@@ -97,36 +132,42 @@ def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, 
             for i in range(len(folders)): calculateXANES(folders[i])
     if spectralProgram == 'pyGDM':
         return
-    _, _, _, badFolders = parse_all_folders(folder, spectralProgram, printOutput=not continueCalculation)
+    _, _, _, badFolders = parseAllFolders(folder, spectralProgram, printOutput=not continueCalculation)
     recalculateAttempt = 1
     while (recalculateAttempt <= recalculateErrorsAttemptCount) and (len(badFolders) > 0):
         if calcSampleInParallel > 1:
             threadPool.map(calculateXANES, badFolders)
         else:
             for i in range(len(badFolders)): calculateXANES(badFolders[i])
-        _, _, _, badFolders = parse_all_folders(folder, spectralProgram)
+        _, _, _, badFolders = parseAllFolders(folder, spectralProgram)
         recalculateAttempt += 1
 
 
 def collectResults(spectralProgram='fdmnes', folder='sample', outputFolder='.', printOutput=True):
-    assert spectralProgram in knownPrograms, 'Unknown spectral program name: '+spectralProgram
+    if isinstance(spectralProgram, str):
+        assert isKnown(spectralProgram), 'Unknown spectral program name: '+spectralProgram
     os.makedirs(outputFolder, exist_ok=True)
-    df_xanes, df_params, goodFolders, badFolders = parse_all_folders(folder, spectralProgram, printOutput=printOutput)
-    if df_xanes is None:
-        raise Exception('There is no output extinction data in folder ' + folder)
-    if isinstance(df_xanes, dict):
-        for spType in df_xanes:
-            df_xanes[spType].to_csv(os.path.join(outputFolder,f'{spType}_spectra.txt'), sep=' ', index=False)
+    df_spectra, df_params, goodFolders, badFolders = parseAllFolders(folder, spectralProgram, printOutput=printOutput)
+    if df_spectra is None:
+        raise Exception('There is no output data in folder ' + folder)
+    if isinstance(df_spectra, dict):
+        for spType in df_spectra:
+            df_spectra[spType].to_csv(os.path.join(outputFolder,f'{spType}_spectra.txt'), sep=' ', index=False)
     else:
-        df_xanes.to_csv(os.path.join(outputFolder, 'spectra.txt'), sep=' ', index=False)
+        df_spectra.to_csv(os.path.join(outputFolder, 'spectra.txt'), sep=' ', index=False)
     df_params.to_csv(os.path.join(outputFolder, 'params.txt'), sep=' ', index=False)
+    return df_spectra, df_params, goodFolders, badFolders
 
 
 class InputFilesGenerator:
     """Generates input folder with required content for a certain spectrum-calculating program (e.g. ADF, FDMNES)"""
 
-    def __init__(self, ranges, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram='fdmnes', folder='sample'):
-        assert spectralProgram in ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM'], 'Unknown spectral program name: ' + spectralProgram
+    def __init__(self, ranges, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram='fdmnes', folder='sample', debug=False):
+        if isinstance(spectralProgram, str):
+            assert spectralProgram in ['fdmnes', 'feff', 'feff6', 'feff8.5', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM', 'vasp_rdf_energy'], 'Unknown spectral program name: ' + spectralProgram
+        else:
+            assert isinstance(spectralProgram, dict)
+            assert set(spectralProgram.keys()) == {'generateInput', 'parseOneFolder', 'createDataframes'}
 
         self.spectrCalcParams = spectrCalcParams
         self.spectralProgram = spectralProgram
@@ -135,6 +176,7 @@ class InputFilesGenerator:
         self.paramNames = paramNames
         self.folder = folder
         self.folderCounter = self.getFolderCount()
+        self.debug = debug
 
     def getFolderCount(self):
         os.makedirs(self.folder, exist_ok=True)
@@ -142,70 +184,70 @@ class InputFilesGenerator:
         return len(subfolders)
 
     def getFolderForPoint(self, x):
-        # this would work correctly only if every passed x is unique
-        # folder = '.'+os.path.sep+str(self.folderCounter)
-        # if os.path.exists(self.folder):
-        #     shutil.rmtree(self.folder)
-
+        if self.debug: print('Trying get folder for point', x)
         folder = self.tryGetFolderForPoint(x)
         if folder is not None:
+            if self.debug: print('Found existed folder', folder)
             return folder
-
         os.makedirs(self.folder, exist_ok=True)
         geometryParams = {}
         N = len(self.paramNames)
         for j, name in enumerate(self.paramNames):
             geometryParams[name] = x[j]
-        molecule = self.moleculeConstructor(geometryParams)
-        if molecule is None:
-            print("Can't construct molecule for parameters " + str(geometryParams))
-            return None
         folderOne = os.path.join(self.folder, utils.zfill(self.folderCounter, 200000))
-        generateInput = getattr(globals()[self.spectralProgram], 'generateInput')
-        generateInput(molecule, folder=folderOne, **self.spectrCalcParams)
+        if self.debug: print('The folder doesn\'t exist. Creating new', folderOne)
+        if isinstance(self.spectralProgram, str):
+            molecule = self.moleculeConstructor(geometryParams)
+            if molecule is None:
+                print("Can't construct molecule for parameters " + str(geometryParams))
+                return None
+            if hasattr(molecule, 'export_xyz'):
+                molecule.export_xyz(folderOne + '/molecule.xyz')
+            generateInput = getInputGenerator(self.spectralProgram)
+            generateInput(molecule, folder=folderOne, **self.spectrCalcParams)
+        else:
+            generateInput = self.spectralProgram['generateInput']
+            generateInput(geometryParams, folderOne)
         geometryParamsToSave = [[self.paramNames[j], x[j]] for j in range(N)]
-        with open(os.path.join(folderOne, 'geometryParams.txt'), 'w') as f:
+        with open(os.path.join(folderOne, 'params.txt'), 'w') as f:
             json.dump(geometryParamsToSave, f)
-        print('folder=', folderOne, ' '.join([p + '={:.4g}'.format(geometryParams[p]) for p in geometryParams]))
-        if hasattr(molecule, 'export_xyz'):
-            molecule.export_xyz(folderOne + '/molecule.xyz')
-
+        if self.debug: print('folder=', folderOne, ' '.join([p + '={:.4g}'.format(geometryParams[p]) for p in geometryParams]))
         self.folderCounter += 1
         return folderOne
 
     def tryGetFolderForPoint(self, x):
-        df_xanes, df_params, goodFolders, badFolders = parse_all_folders(self.folder, self.spectralProgram, printOutput=False)
-        for folder in goodFolders + badFolders:
+        #too slow:
+        # df_xanes, df_params, goodFolders, badFolders = parse_all_folders(self.folder, self.spectralProgram, printOutput=False)
+        for f in os.listdir(self.folder):
+            folder = self.folder+os.sep+f
+            if not os.path.isdir(folder): continue
             if np.array_equal(x, loadParams(folder, self.spectralProgram)):
+                if utils.jobIsRunning(folder):
+                    raise Exception(f'Running calculation detected in the folder {folder}. Stop it first')
+                if os.path.exists(folder + os.sep + 'isRunning'): os.unlink(folder + os.sep + 'isRunning')
                 return folder
-
         return None
 
 
 class SpectrumCalculator(adaptiveSampling.CalculationProgram):
 
-    def __init__(self, spectralProgram, inputGenerator, outputFolder, recalculateErrorsAttemptCount, smoothConfig):
+    def __init__(self, spectralProgram, inputGenerator, outputFolder, recalculateErrorsAttemptCount, samplePreprocessor, debug, lock):
         """
 
         :param spectralProgram:
         :param inputGenerator:
         :param outputFolder:
         :param recalculateErrorsAttemptCount:
-        :param smoothConfig: dict with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None} or None (if we do not need to smooth)
+        :param samplePreprocessor: function(sample)->sample or dict with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None, 'fitGeometryInterval'}. None - means do not smooth
         """
         self.recalculateErrorsAttemptCount = recalculateErrorsAttemptCount
         self.outputFolder = outputFolder
         self.input = inputGenerator
         self.spectralProgram = spectralProgram
         self.runType = None
-        self.lock = threading.Lock()
-        assert set(smoothConfig.keys()) >= {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval'}
-        if 'norm' not in smoothConfig:
-            if 'norm' in smoothConfig['smoothParams']:
-                smoothConfig['norm'] = smoothConfig['smoothParams']['norm']
-            else:
-                smoothConfig['norm'] = None
-        self.smoothConfig = smoothConfig
+        self.lock = lock
+        self.samplePreprocessor = samplePreprocessor
+        self.debug = debug
 
     def calculate(self, x):
         with self.lock:
@@ -214,6 +256,7 @@ class SpectrumCalculator(adaptiveSampling.CalculationProgram):
         return self.calculateFolder(folder)
 
     def calculateFolder(self, folder):
+        if self.debug: print('SpectrumCalculator: calculating folder', folder)
         attemptsDone = 0
         while True:
             # checking if the folder already has good data
@@ -221,12 +264,15 @@ class SpectrumCalculator(adaptiveSampling.CalculationProgram):
             if not isBad or attemptsDone > self.recalculateErrorsAttemptCount:
                 break
             if attemptsDone > 0:
-                print(f'Folder {folder} is bad, recalculating')
+                if self.debug: print(f'Folder {folder} is bad, recalculating')
             self.calculateSpectrum(folder)
             attemptsDone += 1
+            isBad = self.checkIfBadFolder(folder)
+            if isBad and attemptsDone > self.recalculateErrorsAttemptCount:
+                if self.debug: print(f'Can\'t calculate folder {folder} after all attempts')
         if not isBad:
             with self.lock:
-                print(f'Returning data from {folder} calculation iterations done: {attemptsDone}')
+                if self.debug: print(f'Returning data from {folder} calculation iterations done: {attemptsDone}')
                 ys, additionalData = self.parseAndCollect(folder)
             return ys, additionalData
         else:
@@ -238,66 +284,74 @@ class SpectrumCalculator(adaptiveSampling.CalculationProgram):
         self.nProcs = nProcs
         self.memory = memory
 
-    def configUserDefined(self, runCmd):
-        self.runType = 'user defined'
-        self.runCmd = runCmd
-
-    def configCluster(self, nProcs=1, memory=5000):
-        self.runType = 'run-cluster'
-        self.nProcs = nProcs
-        self.memory = memory
-
-    def configLocal(self):
-        self.runType = 'local'
-
     def calculateSpectrum(self, folder):
-        if self.runType == 'run-cluster':
-            runCluster = getattr(globals()[self.spectralProgram], 'runCluster')
-            runCluster(folder, self.memory, self.nProcs)
-        elif self.runType == 'local':
-            runLocal = getattr(globals()[self.spectralProgram], 'runLocal')
-            runLocal(folder)
-        elif self.runType == 'user defined':
-            self.runUserDefined(self.runCmd, folder)
-        else:
-            assert False, 'Wrong runType'
-
-    def runUserDefined(self, cmd, folder):
-        import subprocess
-
-        assert cmd != '', 'Specify command to run'
-        proc = subprocess.Popen([cmd, str(folder)], cwd='.', stdout=subprocess.PIPE)
-        proc.wait()
-        if proc.returncode != 0:
-            raise Exception('Error while executing "' + cmd + '" command')
-        return proc.stdout.read()
+        """
+        Be careful, when add new spectrum calculators! Adaptive sampling runs calculation procedure in parallel with generation and parsing of folders.
+        """
+        if self.debug: print('Start calculating folder', folder)
+        assert self.runType in ['run-cluster', 'local', 'user defined']
+        open(folder+os.sep+'isRunning', 'a').close()
+        try:
+            if not isinstance(self.runCmd, str):
+                assert callable(self.runCmd)
+                self.runCmd(folder)
+            elif self.runType == 'run-cluster':
+                runCluster = getRunner(self.spectralProgram, self.runType)
+                runCluster(folder, self.memory, self.nProcs)
+            elif self.runType == 'local':
+                runLocal = getRunner(self.spectralProgram, self.runType)
+                runLocal(folder)
+            else:
+                runUserDefined(self.runCmd, folder)
+        except:
+            print('Error while calculation folder', folder, ':\n', traceback.format_exc())
+        os.remove(folder+os.sep+'isRunning')
 
     def checkIfBadFolder(self, folder):
-        _, _, _, badFolders = parse_all_folders(self.input.folder, self.spectralProgram, printOutput=False)
+        with self.lock:
+            _, _, _, badFolders = parseAllFolders(self.input.folder, self.spectralProgram, printOutput=False)
         return folder in badFolders
 
     def parseAndCollect(self, folder):
-        res = loadExistingSpectrum(self.spectralProgram, self.smoothConfig, folder)
-        collectResults(self.spectralProgram, self.input.folder, self.outputFolder, printOutput=False)
-        return res
+        # for some cases energy is different in different folders, so we can't do loadExistingSpectrum
+        # res = loadExistingSpectrum(self.spectralProgram, self.samplePreprocessor, folder)
+        df_spectra, df_params, goodFolders, badFolders = collectResults(self.spectralProgram, self.input.folder, self.outputFolder, printOutput=False)
+        assert folder in goodFolders,f'{folder} not in {goodFolders}'
+        i = goodFolders.index(folder)
+
+        def getSp(df):
+            e = utils.getEnergy(df)
+            y = df.loc[i].to_numpy()
+            return utils.Spectrum(e,y)
+        if isinstance(df_spectra, dict):
+            spectrum = {name:getSp(df) for name,df in df_spectra.values()}
+        else: spectrum = getSp(df_spectra)
+        if self.samplePreprocessor is not None:
+            if isinstance(self.samplePreprocessor, dict):
+                exp = self.samplePreprocessor['expSpectrum']
+                if 'fitNormInterval' not in self.samplePreprocessor: self.samplePreprocessor['fitNormInterval'] = None
+                resSmoothed, _ = smoothLib.smoothInterpNorm(smoothParams=self.samplePreprocessor['smoothParams'], spectrum=spectrum, smoothType=self.samplePreprocessor['smoothType'], expSpectrum=exp, fitNormInterval=self.samplePreprocessor['fitNormInterval'])
+            else:
+                resSmoothed = self.samplePreprocessor(spectrum)
+        else:
+            resSmoothed = spectrum
+        if self.spectralProgram != 'vasp_rdf_energy':
+            return resSmoothed.intensity, {'spectrum': spectrum, 'folder': folder}
+        else:
+            return df_params.loc[i,'energy'], {'folder': folder}
 
 
-def loadExistingSpectrum(spectralProgram, smoothConfig, folder):
-    parse_method = getattr(globals()[spectralProgram], 'parse_one_folder')
-    res = parse_method(folder)
-    if smoothConfig is not None:
-        exp = smoothConfig['expSpectrum']
-        resSmoothed, _ = smoothLib.smoothInterpNorm(smoothConfig['smoothParams'], res,
-                                                    smoothConfig['smoothType'], exp,
-                                                    smoothConfig['fitNormInterval'],
-                                                    smoothConfig['norm'])
-    return resSmoothed.intensity, {'spectrum': res, 'folder': folder}
+def getParams(fileName):
+    with open(fileName, 'r') as f: params0 = json.load(f)
+    return [p[0] for p in params0], [p[1] for p in params0]
 
 
 def loadParams(folder, spectralProgram):
-    getParams = getattr(globals()[spectralProgram], 'getParams')
-    _, x = getParams(os.path.join(folder, 'geometryParams.txt'))
-    return x
+    f = os.path.join(folder, 'params.txt')
+    if not os.path.exists(f):
+        raise Exception(f'No params.txt in the folder {folder}. If it is due to previous sampling crash, remove folder, because sampling can\'t continue calculation')
+    _, res = getParams(f)
+    return res
 
 
 def loadExistingXPoints(spectralProgram, folder):
@@ -310,11 +364,12 @@ def loadExistingXPoints(spectralProgram, folder):
     return np.array(params)
 
 
-def parse_all_folders(parentFolder, spectral_program, printOutput=True):
+def parseAllFolders(parentFolder, spectralProgram, printOutput=True):
     """
+    Be careful, when add new spectrum parsers! Adaptive sampling runs calculation procedure in parallel with generation and parsing of folders. But generation and parsing are not parallel! The common error: calculation program is writing to a file, that is read by parser. It causes Segmentation fault. What to do?
 
     :param parentFolder: folder containing results
-    :param spectral_program: one of fdmnes, fdmnesTest, adf, feff, pyGDM
+    :param spectralProgram: one of fdmnes, fdmnesTest, adf, feff, pyGDM
     :param printOutput: whether parsing debug info should be printed
     :return: spectra dataframe, params dataframe, goodFolders list, badFolder list
     """
@@ -322,123 +377,153 @@ def parse_all_folders(parentFolder, spectral_program, printOutput=True):
     def read_folders():
         """
 
-        :return: dictionary { folder, parse_one_folder("parentFolder/folder") }
+        :return: dictionary { folder, parseOneFolder("parentFolder/folder") }
         """
         import traceback
         subfolders = [f for f in os.listdir(parentFolder) if os.path.isdir(os.path.join(parentFolder, f))]
         subfolders.sort()
-        allXanes = {}
+        allData = {}
         for i in range(len(subfolders)):
             d = subfolders[i]
-            try:
-                res = parse_one_folder(os.path.join(parentFolder, d))
-                allXanes[d] = res
-                if res is None:
-                    output.append('Can\'t read output in folder ' + d)
-            except:
-                output.append(traceback.format_exc())
-                allXanes[d] = None
+            full_d = os.path.join(parentFolder, d)
+            if os.path.exists(full_d+os.sep+'isRunning') or utils.jobIsRunning(full_d):
+                allData[d] = None
+            else:
+                try:
+                    res = parseOneFolder(full_d)
+                    allData[d] = res
+                    if res is None:
+                        output.append('Can\'t read output in folder ' + d)
+                except:
+                    output.append(traceback.format_exc())
+                    allData[d] = None
 
-        return allXanes
+        return allData
 
-    def separate_folders(allXanes):
+    def separate_folders(allData):
         """
 
-        :param allXanes: dictionary of parsed folders
-        :return: array of good foler names, array of bad foler names
+        :param allData: dictionary of parsed folders
+        :return: array of good folder names, array of bad folder names
         """
         badFolders = []
-        if spectral_program in ['fdmnes', 'fdmnesTest', 'adf']:
-            energyCount = np.array([x.intensity.shape[0] for x in allXanes.values() if x is not None])
+        if spectralProgram in ['fdmnes', 'fdmnesTest']:
+            energyCount = np.array([len(xanes.x) for xanes in allData.values() if xanes is not None])
             maxEnergyCount = np.max(energyCount, initial=0)
 
-        for d in allXanes:
-            if allXanes[d] is None:
+        for d in allData:
+            if allData[d] is None:
                 badFolders.append(d)
                 continue
 
-            if spectral_program in ['fdmnes', 'fdmnesTest', 'adf'] and allXanes[d].intensity.shape[0] != maxEnergyCount:
-                output.append(f'Error: in folder {d} there are less energies {allXanes[d].intensity.shape[0]}')
+            if spectralProgram in ['fdmnes', 'fdmnesTest'] and len(allData[d].x) != maxEnergyCount:
+                output.append(f'Error: in folder {d} there are less energies {len(allData[d].x)}')
                 badFolders.append(d)
 
-        goodFolders = list(set(allXanes.keys()) - set(badFolders))
+        goodFolders = list(set(allData.keys()) - set(badFolders))
         goodFolders.sort()
         return goodFolders, badFolders
 
     def get_full_path_folders(folders):
         return [os.path.join(parentFolder, x) for x in folders]
 
-    def create_dataframes(allXanes, goodFolders):
+    def createDataframes(allData, goodFolders):
         """
 
-        :param allXanes: dictionary of parsed folders
+        :param allData: dictionary of parsed folders
         :param goodFolders: list of good folders
         :return:
         """
-        if len(goodFolders) == 0:
-            output.append('None good folders')
-            return None, None
         # get energies array
-        allEnergies = np.array([allXanes[folder].energy for folder in goodFolders])
+        allEnergies = np.array([allData[folder].x for folder in goodFolders])
         n = len(goodFolders)
         if n == 1:
             allEnergies.reshape(1, -1)
-        energies = allEnergies
         # make specific changes to energies
-        if spectral_program in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
+        if spectralProgram in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
             energies = np.median(allEnergies, axis=0)
             energies = np.sort(energies)
             maxShift = np.max(allEnergies[:, 0]) - np.min(allEnergies[:, 0])
             output.append('Max energy shift between spectra: {:.2}'.format(maxShift))
-        elif spectral_program == 'feff':
-            if abs(float(allXanes[goodFolders[0]].values[0, 0])) < 0.00001:
-                energies = allXanes[goodFolders[0]].iloc[1:, 0].ravel()
+        elif spectralProgram[:4] == 'feff':
+            if abs(float(allData[goodFolders[0]].x[0])) < 0.00001:
+                energies = allData[goodFolders[0]].x[1:]
             else:
-                energies = allXanes[goodFolders[0]].iloc[:, 0].ravel()
-        elif spectral_program == 'adf':
-            energies = allXanes[goodFolders[0]].loc[:, 'E'].ravel()
-        elif spectral_program == 'pyGDM':
-            energies = np.array(allEnergies)
-
-        paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'geometryParams.txt'))
-        df_xanes = np.zeros([n, energies.size])
+                energies = allData[goodFolders[0]].x
+        elif spectralProgram == 'adf':
+            energies = allData[goodFolders[0]].loc[:, 'E'].ravel()
+        elif spectralProgram == 'pyGDM':
+            energies = allData[goodFolders[0]].x
+        elif spectralProgram == 'vasp_rdf_energy':
+            energies = allData[goodFolders[0]].x
+        else:
+            assert False
+        assert np.all(energies[1:] >= energies[:-1]), f'Energies are not sorted!\n'+str(energies)
+        paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'params.txt'))
+        df_spectra = np.zeros([n, energies.size])
         df_params = np.zeros([n, len(paramNames)])
         for i in range(n):
             d = goodFolders[i]
-            _, params = getParams(os.path.join(parentFolder, d, 'geometryParams.txt'))
+            _, params = getParams(os.path.join(parentFolder, d, 'params.txt'))
             df_params[i, :] = np.array(params)
             # make specific spectrum changes
-            if spectral_program in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
-                df_xanes[i, :] = np.interp(energies, allXanes[d].energy, allXanes[d].intensity)
-            elif spectral_program == 'feff':
-                if abs(float(allXanes[d].values[0, 0])) < 0.00001:
-                    df_xanes[i, :] = allXanes[d].iloc[1:, 1].ravel()
-                else:
-                    df_xanes[i, :] = allXanes[d].iloc[:, 1].ravel()
-            elif spectral_program == 'adf':
-                df_xanes[i, :] = allXanes[d].loc[:, 'ftot'].ravel()
+            if spectralProgram in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
+                df_spectra[i, :] = np.interp(energies, allData[d].x, allData[d].y)
+            elif spectralProgram == 'adf':
+                assert False, 'Это неправильно, нужно размазывать и потом интерполировать'
+                df_spectra[i, :] = allData[d].loc[:, 'ftot'].ravel()
             else:
-                df_xanes[i, :] = allXanes[d].intensity
-        df_xanes = pd.DataFrame(data=df_xanes, columns=['e_' + str(e) for e in energies])
+                df_spectra[i, :] = allData[d].y
+        df_spectra = pd.DataFrame(data=df_spectra, columns=['e_' + str(e) for e in energies])
         df_params = pd.DataFrame(data=df_params, columns=paramNames)
-        return df_xanes, df_params
+        return df_spectra, df_params
 
-    parse_one_folder = getattr(globals()[spectral_program], 'parse_one_folder')
-    getParams = getattr(globals()[spectral_program], 'getParams')
-    output = []
-    allXanes = read_folders()
-    goodFolders, badFolders = separate_folders(allXanes)
-    if spectral_program == 'pyGDM':
-        df_abs, df_params = create_dataframes([x['abs'] for x in allXanes], goodFolders)
-        df_ext, _ = create_dataframes([x['ext'] for x in allXanes], goodFolders)
-        df_xanes = {'abs': df_abs, 'ext': df_ext}
+    if isinstance(spectralProgram, str):
+        parseOneFolder = getParser(spectralProgram)
     else:
-        df_xanes, df_params = create_dataframes(allXanes, goodFolders)
+        parseOneFolder = spectralProgram['parseOneFolder']
+    output = []
+    allData = read_folders()
+    goodFolders, badFolders = separate_folders(allData)
+    if len(goodFolders) == 0:
+        output.append('None good folders')
+        badFolders = get_full_path_folders(badFolders)
+        return None, None, goodFolders, badFolders
+    if not isinstance(spectralProgram, str):
+        # custom
+        df_spectra = spectralProgram['createDataframes'](allData, parentFolder, goodFolders)
+        if isinstance(df_spectra, tuple):
+            df_spectra, goodFolders, badFolders = df_spectra
+        paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'params.txt'))
+        params = np.zeros([len(goodFolders), len(paramNames)])
+        for i, d in enumerate(goodFolders):
+            params[i, :] = np.array(getParams(os.path.join(parentFolder, d, 'params.txt'))[1])
+        df_params = pd.DataFrame(data=params, columns=paramNames)
+    elif spectralProgram == 'pyGDM':
+        df_abs, df_params = createDataframes({f:d['abs'] for f,d in allData.items() if f in goodFolders}, goodFolders)
+        df_ext, _ = createDataframes({f:d['ext'] for f,d in allData.items() if f in goodFolders}, goodFolders)
+        df_spectra = {'abs': df_abs, 'ext': df_ext}
+    elif spectralProgram == 'vasp_rdf_energy':
+        allData1 = {}
+        for f in allData:
+            if allData[f] is None:
+                allData1[f] = None
+            else:
+                allData1[f] = allData[f]['rdf']
+        df_spectra, df_params = createDataframes(allData1, goodFolders)
+        vasp_energies = []
+        for f in goodFolders:
+            vasp_energies.append(allData[f]['energy'])
+        if df_params is not None:
+            df_params['energy'] = vasp_energies
+    else:
+        df_spectra, df_params = createDataframes(allData, goodFolders)
     badFolders = get_full_path_folders(badFolders)
     goodFolders = get_full_path_folders(goodFolders)
     if printOutput:
         print(*output)
-    return df_xanes, df_params, goodFolders, badFolders
+    # print(*output)
+    return df_spectra, df_params, goodFolders, badFolders
 
 
 def checkSampleIsGoodByCount(minPoints):
@@ -449,163 +534,233 @@ class BadSpectrumInSampleError(Exception):
     pass
 
 
-def convertToSample(dataset):
+def convertToSample(dataset, spectralProgram):
     xs, ys, additionalData = dataset
-    spectra = []
     good = [i for i in range(len(additionalData)) if additionalData[i] is not None]
-    if len(good) == 0: return None
-    energyCount = np.array([additionalData[i]['spectrum'].intensity.shape[0] for i in good])
-    maxEnergyCount = np.max(energyCount)
-    if not np.all(energyCount == maxEnergyCount):
-        raise BadSpectrumInSampleError('Bad spectra in sample. energyCount = '+str(energyCount))
-    allEnergies = np.array([additionalData[i]['spectrum'].energy for i in good])
-    n = len(good)
-    if n == 1: allEnergies.reshape(1, -1)
-    energies = np.median(allEnergies, axis=0)
-    for i in good:
-        spectrum = additionalData[i]['spectrum']
-        interpolatedSpectrum = np.interp(energies, spectrum.energy, spectrum.intensity)
-        spectra.append(interpolatedSpectrum)
-    spectra = np.array(spectra)
-    paramFile = additionalData[good[0]]['folder']+os.sep+'geometryParams.txt'
-    if os.path.exists(paramFile):
-        with open(paramFile, 'r') as f: params = json.load(f)
-        paramNames = [p[0] for p in params]
-        paramData = pd.DataFrame(data=xs[good, :], columns=paramNames)
-    else:
-        paramData = pd.DataFrame(data=xs[good, :])
-    sample = ML.Sample(paramData, spectra, energies)
-    foldersInds = [int(os.path.split(additionalData[good[i]]['folder'])[-1]) for i in range(len(good))]
+    if len(good) == 0: return None, None
+    df_xanes, df_params, good, _ = parseAllFolders(parentFolder=os.path.split(additionalData[good[0]]['folder'])[0], spectralProgram=spectralProgram, printOutput=False)
+    if len(good) == 0: return None, None
+    sample = ML.Sample(df_params, df_xanes)
+    foldersInds = [int(os.path.split(good[i])[-1]) for i in range(len(good))]
     return sample, foldersInds
 
 
-def checkSampleIsGoodByCVError(maxError, smoothConfig, estimator=None, minCountToCheckError=10, cvCount=10, debug=False, debugOutputFolder='debug', testSample=None):
+def preprocessSample(sample, samplePreprocessor):
+    if isinstance(samplePreprocessor, dict):
+        smoothConfig = samplePreprocessor
+        assert set(smoothConfig.keys()) >= {'smoothParams', 'smoothType', 'expSpectrum'}
+        assert set(smoothConfig.keys()) <= {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm', 'fitGeometryInterval'}
+        if 'fitNormInterval' not in smoothConfig: smoothConfig['fitNormInterval'] = None
+        exp = copy.deepcopy(smoothConfig['expSpectrum'])
+        if 'fitGeometryInterval' in smoothConfig:
+            exp = exp.limit(smoothConfig['fitGeometryInterval'])
+        spectra = smoothLib.smoothDataFrame(smoothConfig['smoothParams'], sample.spectra, smoothConfig['smoothType'], exp, smoothConfig['fitNormInterval'])
+        sample.setSpectra(spectra)
+    else: sample = samplePreprocessor(sample)
+    return sample
+
+
+def plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=True):
+    if isinstance(samplePreprocessor, dict):
+        exp = copy.deepcopy(samplePreprocessor['expSpectrum'])
+        if 'fitGeometryInterval' in samplePreprocessor:
+            exp = exp.limit(samplePreprocessor['fitGeometryInterval'])
+        expPlot = (exp.energy, exp.intensity, 'exp')
+    else: expPlot = tuple()
+    for i, fi in enumerate(folderInds):
+        fileName = f"{debugOutputFolder}{os.sep}spectrum_{fi:05d}.png"
+        if os.path.exists(fileName): continue
+        title = f'Spectrum {fi} (sample N {i})'
+        if plotPrediction:
+            sample_loo = sample.copy()
+            sample_loo.delRow(i)
+            estimator.fit(sample_loo.params, sample_loo.spectra)
+            predicted = estimator.predict(sample.params.to_numpy()[i].reshape(1, -1))
+            title += f'. Predict by sample of {sample_loo.getLength()} spectra'
+            plotting.plotToFile(sample.energy, sample.spectra.to_numpy()[i], 'theory', sample.energy, predicted.reshape(-1), 'predicted', *expPlot, fileName=fileName, title=title, save_csv=False)
+        else:
+            plotting.plotToFile(sample.energy, sample.spectra.to_numpy()[i], 'theory', *expPlot, fileName=fileName, title=title, save_csv=False)
+
+
+def plotFunctionHeatmap(estimator, x, y, paramNames, title, fileName, markerText=None):
+    assert len(paramNames) == 2
+    assert x.shape[1] == 2
+    leftBorder = np.min(x, axis=0).reshape(-1)
+    rightBorder = np.max(x, axis=0).reshape(-1)
+    x1 = np.linspace(leftBorder[0], rightBorder[0], 50)
+    x2 = np.linspace(leftBorder[1], rightBorder[1], 50)
+    x1g, x2g = np.meshgrid(x1, x2)
+    x1v = x1g.flatten()
+    x2v = x2g.flatten()
+    xsTest = np.dstack((x1v, x2v))[0]
+    twoParamsEstimator = copy.deepcopy(estimator)
+    twoParamsEstimator.fit(x, y)
+    ysTest = twoParamsEstimator.predict(xsTest)
+    y2d = ysTest.reshape(x1g.shape)
+
+    fig, ax = plotting.createfig()
+    cs1 = ax.contourf(x1, x2, y2d, cmap='jet')
+    plt.colorbar(cs1)
+    ax.set_xlabel(paramNames[0])
+    ax.set_ylabel(paramNames[1])
+    ax.scatter(x[:, 0], x[:, 1], s=30)
+    if markerText is not None:
+        assert len(markerText) == x.shape[0]
+        for i in range(x.shape[0]):
+            ax.annotate(markerText[i], (x[i, 0], x[i, 1]), fontsize=7)
+    ax.set_title(title)
+    plotting.savefig(fileName, fig)
+    plotting.closefig(fig)
+
+
+def getImportantParamPair(params,y):
+    rf = inverseMethod.getMethod('Extra Trees')
+    rf.fit(params, y)
+    ind = np.argsort(rf.feature_importances_)
+    paramNames = params.columns
+    pn1 = paramNames[ind[-1]]
+    pn2 = paramNames[ind[-2]]
+    if pn1 > pn2: pn1, pn2 = pn2, pn1
+    return pn1, pn2
+
+
+def checkSampleIsGoodByCVError(maxError, samplePreprocessor, spectralProgram, estimator=None, minCountToCheckError=10, cvCount=10, debug=False, debugOutputFolder='debug', testSample=None, maxSampleSize=None):
     """
     Returns function to pass in sampleAdaptively as checkSampleIsGoodFunc argument
     :param maxError:
-    :param smoothConfig: dict with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None, 'fitGeometryInterval'}, fitGeometryInterval - to limit fitting spectra
+    :param samplePreprocessor: function(sample)->sample or dict smoothConfig with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None, 'fitGeometryInterval'}, fitGeometryInterval - to limit fitting spectra
     :param minCountToCheckError:
     :param debug: plot error graphs
     :param debugOutputFolder:
     """
-    assert set(smoothConfig.keys()) >= {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval'}
-    assert set(smoothConfig.keys()) <= {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm', 'fitGeometryInterval'}
-    if 'norm' not in smoothConfig:
-        if 'norm' in smoothConfig['smoothParams']:
-            smoothConfig['norm'] = smoothConfig['smoothParams']['norm']
-        else:
-            smoothConfig['norm'] = None
-
+    if samplePreprocessor is None: samplePreprocessor = lambda s: s
     if estimator is None:
         estimator = inverseMethod.getMethod('RBF')
-
     if debug and os.path.exists(debugOutputFolder): shutil.rmtree(debugOutputFolder)
 
     def checkSampleIsGood(dataset):
-        _, _, additionalData = dataset
-        exp = copy.deepcopy(smoothConfig['expSpectrum'])
-        if 'fitGeometryInterval' in smoothConfig:
-            exp = exp.limit(smoothConfig['fitGeometryInterval'])
-        sample, folderInds = convertToSample(dataset)
+        sample, folderInds = convertToSample(dataset, spectralProgram)
+        if sample is None:
+            print('None good folders')
+            return False
+        if maxSampleSize is not None and sample.getLength() >= maxSampleSize: return True
         lastSpInd = folderInds[-1]
-        # print(len(dataset[0]), folderInds)
-        if sample is None: return False
-        spectra = smoothLib.smoothDataFrame(smoothConfig['smoothParams'], sample.spectra, smoothConfig['smoothType'], exp, smoothConfig['fitNormInterval'], smoothConfig['norm'])
-        sample.setSpectra(spectra)
+        sample = preprocessSample(sample, samplePreprocessor)
         n = sample.getLength()
-
-        def plotSpectra(plotPrediction=True):
-            for i,fi in enumerate(folderInds):
-                fileName = f"{debugOutputFolder}{os.sep}spectrum_{fi:05d}.png"
-                if os.path.exists(fileName): continue
-                title = f'Spectrum {fi} (sample N {i})'
-                if plotPrediction:
-                    sample_loo = sample.copy()
-                    sample_loo.delRow(i)
-                    estimator.fit(sample_loo.params, sample_loo.spectra)
-                    predicted = estimator.predict(sample.params.to_numpy()[i].reshape(1,-1))
-                    title += f'. Predict by sample of {sample_loo.getLength()} spectra'
-                    plotting.plotToFile(sample.energy, sample.spectra.to_numpy()[i], 'theory', sample.energy, predicted.reshape(-1), 'predicted', exp.energy, exp.intensity, 'exp', fileName=fileName, title=title, save_csv=False)
-                else:
-                    plotting.plotToFile(sample.energy, sample.spectra.to_numpy()[i], 'theory', exp.energy, exp.intensity, 'exp', fileName=fileName, title=title, save_csv=False)
-
         if n < minCountToCheckError:
-            if debug: plotSpectra(plotPrediction=False)
+            if debug: plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=False)
             return False
 
-        res = inverseMethod.inverseCrossValidation(estimator, sample, cvCount)
+        res = inverseMethod.inverseCrossValidation(estimator, sample, cvCount, nonUniformSample=True)
         relToConstPredErrorCV = res[0]['relToConstPredError']
-        print(f'relToConstPredError: {relToConstPredErrorCV}')
-        if debug: plotSpectra(plotPrediction=True)
+        print(f'sampleSize = {n}  relToConstPredError = {relToConstPredErrorCV}')
+        if debug: plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=True)
 
         if testSample is not None:
-            testSampleCopy = copy.deepcopy(testSample)
-            spectraTest = smoothLib.smoothDataFrame(smoothConfig['smoothParams'], testSampleCopy.spectra,
-                                                smoothConfig['smoothType'], exp, smoothConfig['fitNormInterval'],
-                                                smoothConfig['norm'])
-            testSampleCopy.setSpectra(spectraTest)
+            testSample1 = preprocessSample(testSample, samplePreprocessor)
             estimator.fit(sample.params, sample.spectra.to_numpy())
-            yPred = estimator.predict(testSampleCopy.params)
-            relToConstPredErrorTest = inverseMethod.relativeToConstantPredictionError(yTrue=testSampleCopy.spectra.to_numpy(), yPred=yPred, energy=testSampleCopy.energy)
+            yPred = estimator.predict(testSample1.params)
+            relToConstPredErrorTest = inverseMethod.relativeToConstantPredictionError(yTrue=testSample1.spectra.to_numpy(), yPred=yPred, energy=testSample1.energy)
             print(f'relToConstPredErrorTest: {relToConstPredErrorTest}')
         if debug and len(sample.paramNames) >= 2:
             std = np.std(sample.spectra.to_numpy(), axis=0)
             j = np.argmax(std)
             # print('max spectrum std energy: ', sample.energy[j], 'all interval: ', sample.energy[0], sample.energy[-1])
             y = sample.spectra.to_numpy()[:,j]
-            geometryParamRanges = {p:[np.min(sample.params[p]), np.max(sample.params[p])] for p in sample.paramNames}
-            maxStdDev, meanStdDev = inverseMethod.calcParamStdDevHelper(geometryParamRanges, sample=sample)
-            std_p = [maxStdDev[p] for p in sample.paramNames]
-            ind = np.argsort(std_p)
-            pn1 = sample.paramNames[ind[-1]]
-            pn2 = sample.paramNames[ind[-2]]
-            # sort in alphabetical order
-            if pn1 > pn2: pn1, pn2 = pn2, pn1
-            params = sample.params.loc[:,[pn1,pn2]].to_numpy()
-            leftBorder = np.min(params, axis=0).reshape(-1)
-            rightBorder = np.max(params, axis=0).reshape(-1)
-            x1 = np.linspace(leftBorder[0], rightBorder[0], 50)
-            x2 = np.linspace(leftBorder[1], rightBorder[1], 50)
-            x1g, x2g = np.meshgrid(x1, x2)
-            x1v = x1g.flatten()
-            x2v = x2g.flatten()
-            xsTest = np.dstack((x1v, x2v))[0]
-            # rbf fails in case of equal param rows
-            _, ind = np.unique([f"{params[i,0]}_{params[i,1]}" for i in range(len(params))], return_index=True)
-
-            twoParamsEstimator = copy.deepcopy(estimator)
-            twoParamsEstimator.fit(params[ind,:], y[ind])
-            ysTest = twoParamsEstimator.predict(xsTest)
-            y2d = ysTest.reshape(x1g.shape)
-
-            fig, ax = plotting.createfig()
-            cs1 = ax.contourf(x1, x2, y2d, cmap='jet')
-            plt.colorbar(cs1)
-            ax.set_xlabel(pn1)
-            ax.set_ylabel(pn2)
-            ax.scatter(params[:,0], params[:,1], s=30)
-            for i in range(sample.spectra.to_numpy().shape[0]):
-                ax.annotate(folderInds[i], (params[i,0], params[i,1]), fontsize=7)
-            plotting.savefig(f"{debugOutputFolder}{os.sep}contour_{lastSpInd:05d}.png", fig)
-            plotting.closefig(fig)
-
+            pn1, pn2 = getImportantParamPair(sample.params, y)
+            params = sample.params.loc[:, [pn1, pn2]].to_numpy()
+            plotFunctionHeatmap(estimator, x=params, y=y, paramNames=[pn1, pn2], title=f'Spectrum at energy = {sample.energy[j]:.0f}', fileName=f"{debugOutputFolder}{os.sep}contour_{lastSpInd:05d}.png", markerText=folderInds)
             relToConstPredError_s = "%.2g" % relToConstPredErrorCV
 
             plot_error = np.linalg.norm(res[2] - sample.spectra.to_numpy(), ord=np.inf, axis=1)
             me = np.max(plot_error)
             mes = '%.2g' % me
             fileName = utils.addPostfixIfExists(f"{debugOutputFolder}{os.sep}error_{lastSpInd:05d}.png")
-            plotting.scatter(params[:,0], params[:,1], color=plot_error / me, colorMap='gist_rainbow_r', markersize=51, marker='s', marker_text=folderInds, title=f'Sample size={n}, max error = {mes}. relToConstPredError = {relToConstPredError_s}', xlabel=pn1, ylabel=pn2, fileName=fileName)
+            plotting.scatter(params[:,0], params[:,1], color=plot_error / me, colorMap='gist_rainbow_r', marker='s', marker_text=folderInds, title=f'Sample size={n}, max error = {mes}. relToConstPredError = {relToConstPredError_s}', xlabel=pn1, ylabel=pn2, fileName=fileName)
 
             if testSample is not None:
                 fileNameTest = utils.addPostfixIfExists(f"{debugOutputFolder}{os.sep}errorTest_{lastSpInd:05d}.png")
                 relToConstPredError_s = "%.2g" % relToConstPredErrorTest
-                plot_error = np.linalg.norm(yPred - testSampleCopy.spectra.to_numpy(), ord=np.inf, axis=1)
+                plot_error = np.linalg.norm(yPred - testSample1.spectra.to_numpy(), ord=np.inf, axis=1)
                 me = np.max(plot_error)
                 mes = '%.2g' % me
-                plotting.scatter(testSampleCopy.params[pn1], testSampleCopy.params[pn2], color=plot_error / me, markersize=51, marker='s', title=f'Sample size= {n}, max error = {mes}. relToConstPredError = {relToConstPredError_s}', xlabel=pn1, ylabel=pn2, fileName=fileNameTest)
-
+                plotting.scatter(testSample1.params[pn1], testSample1.params[pn2], color=plot_error / me, marker='s', title=f'Sample size= {n}, max error = {mes}. relToConstPredError = {relToConstPredError_s}', xlabel=pn1, ylabel=pn2, fileName=fileNameTest)
         return (relToConstPredErrorCV if testSample is None else relToConstPredErrorTest) <= maxError
+    return checkSampleIsGood
+
+
+def checkSampleIsGoodByVASP(spectralProgram, estimator=None, minCountToCheckError=10, cvCount=10, debug=False, debugOutputFolder='debug', testSample=None, param_names=['theta', 'phi', 'r_pdc']):
+    """
+    Returns function to pass in sampleAdaptively as checkSampleIsGoodFunc argument
+    :param minCountToCheckError:
+    :param debug: plot error graphs
+    :param debugOutputFolder:
+    """
+    if estimator is None:
+        estimator = inverseMethod.getMethod('RBF')
+    if debug and os.path.exists(debugOutputFolder): shutil.rmtree(debugOutputFolder)
+
+    def checkSampleIsGood(dataset):
+        sample, folderInds = convertToSample(dataset, spectralProgram)
+        if sample is None:
+            print('None good folders')
+            return False
+        lastSpInd = folderInds[-1]
+        n = sample.getLength()
+        if n < minCountToCheckError:
+            if debug: plotSpectra(sample, folderInds, estimator, None, debugOutputFolder, plotPrediction=False)
+            return False
+        
+        # Energy prediction by RDF
+        relToConstPredErrorCV, pred = ML.score_cv(estimator, sample.spectra, sample.params['energy'], cv_count=cvCount, returnPrediction=True)
+        print(f'relToConstPredError(by_RDF): {relToConstPredErrorCV}')
+        if debug: plotSpectra(sample, folderInds, estimator, None, debugOutputFolder, plotPrediction=True)
+        
+        # Energy prediction by params
+        relToConstPredErrorCV_params, pred_params = ML.score_cv(estimator, sample.params.loc[:, param_names], sample.params['energy'], cv_count=cvCount, returnPrediction=True)
+        pred_params = pred_params.reshape(-1)
+        print(f'relToConstPredError(by_params): {relToConstPredErrorCV_params}')
+        # Plot scatters for predictions by params
+        for pair in itertools.permutations(param_names, 2):#  [['theta','phi'], ['theta', 'r_pdc'], ['phi', 'r_pdc']]:
+            p1 = sample.params.loc[:, pair[0]]
+            p2 = sample.params.loc[:, pair[1]]
+            plot_error = np.abs(pred_params - sample.params['energy'])
+            me = np.max(plot_error)
+            mes = '%.2g' % me
+            relToConstPredError_params_s = "%.2g" % relToConstPredErrorCV_params
+            fileName_params = utils.addPostfixIfExists(f"{debugOutputFolder}{os.sep}error_params_{lastSpInd:05d}.png")
+            plotting.scatter(p1, p2, color=plot_error / me, colorMap='gist_rainbow_r', marker='s', marker_text=folderInds, title=f'Sample size={n}, max error = {mes}. relToConstPredError = {relToConstPredError_params_s}', xlabel=pair[0], ylabel=pair[1], fileName=fileName_params)
+        
+        if testSample is not None:
+            X_test = testSample.iloc[:, :700].values
+            y_test = testSample.loc[:, 'energy'].values
+            estimator.fit(sample.spectra, sample.params['energy'])
+            yPred = estimator.predict(X_test)
+            relToConstPredErrorTest = ML.scoreFast(y_test, yPred)
+            print(f'relToConstPredErrorTest: {relToConstPredErrorTest}')
+        if debug and len(sample.paramNames) >= 2:
+            y = sample.params['energy']
+            pn1, pn2 = param_names[0], param_names[1] #'theta', 'phi'
+            params = sample.params.loc[:, [pn1, pn2]].to_numpy()
+            plotFunctionHeatmap(estimator, x=params, y=y, paramNames=[pn1, pn2], title=f'Energy', fileName=f"{debugOutputFolder}{os.sep}contour_{lastSpInd:05d}.png", markerText=folderInds)
+            relToConstPredError_s = "%.2g" % relToConstPredErrorCV
+
+            plot_error = np.abs(pred - sample.params['energy'])
+            me = np.max(plot_error)
+            mes = '%.2g' % me
+            fileName = utils.addPostfixIfExists(f"{debugOutputFolder}{os.sep}error_{lastSpInd:05d}.png")
+            plotting.scatter(params[:,0], params[:,1], color=plot_error / me, colorMap='gist_rainbow_r', marker='s', marker_text=folderInds, title=f'Sample size={n}, max error = {mes}. relToConstPredError = {relToConstPredError_s}', xlabel=pn1, ylabel=pn2, fileName=fileName)
+
+            # Так как нам неизвестны параметры theta и phi для тестового множества, то отключаю построение графиков ниже
+            #if testSample is not None:
+                #fileNameTest = utils.addPostfixIfExists(f"{debugOutputFolder}{os.sep}errorTest_{lastSpInd:05d}.png")
+                #relToConstPredError_s = "%.2g" % relToConstPredErrorTest
+                #plot_error = np.abs(yPred - testSample.params['energy'])
+                #me = np.max(plot_error)
+                #mes = '%.2g' % me
+                #plotting.scatter(testSample.params[pn1], testSample.params[pn2], color=plot_error / me, marker='s', title=f'Sample size= {n}, max error = {mes}. relToConstPredError = {relToConstPredError_s}', xlabel=pn1, ylabel=pn2, fileName=fileNameTest)
+        return n >= 500
+        #return (relToConstPredErrorCV if testSample is None else relToConstPredErrorTest) <= maxError
     return checkSampleIsGood
 
 
@@ -643,21 +798,20 @@ def writeSettings(settingsFileName, seed, paramRanges):
     return seed
 
 
-def sampleAdaptively(paramRanges, moleculeConstructor, checkSampleIsGoodFunc, spectrCalcParams, spectralProgram='fdmnes', smoothConfig=None, workingFolder='sample', seed=None, outputFolder='sample_result', runConfiguration=None, adaptiveSamplerParams=None, settingsFileName='settings.json'):
+def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=None, maxError=0.01, maxSampleSize=None, spectralProgram='fdmnes', samplePreprocessor=None, workingFolder='sample', seed=None, outputFolder='sample_result', debugFolder='sample_debug', runConfiguration=None, adaptiveSamplerParams=None, settingsFileName='settings.json', debug=False):
     """
     Calculate sample adaptively
     :param paramRanges: dictionary with geometry parameters region {'paramName':[min,max], 'paramName':[min,max], ...}
     :param moleculeConstructor:
-    :param checkSampleIsGoodFunc: function(dataset) for example lambda dataset: len(dataset[0]) >= 200 or use cross-validation error. dataset = (xs, ys, additionalData). You can use predefined functions: checkSampleIsGoodByCount and checkSampleIsGoodByCVError
+    :param maxError: CV-error to stop sampling
     :param spectrCalcParams: see function generateInput in module correspondent to your spectralProgram
-    :param spectralProgram: string, one of knownPrograms (see at the top of this file)
-    :param smoothConfig: dict with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None}. None - means do not smooth
+    :param spectralProgram: string - one of knownPrograms (see at the top of this file), or dict{'generateInput':func(params,folder), 'parseOneFolder':func(folder), 'createDataframes':func(allData, parentFolder, goodFolders)->(df_spectra,df_params)}
+    :param samplePreprocessor: Is applied to y before given it to adaptive sampler, also applied before plotting. Is NOT applied before saving sample. func(sample)->sample and func(spectrum)->spectrum (spectrum - output of parseOneFolder, sample - ML.Sample of output of parseAllFolders) or dict with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None, 'fitGeometryInterval'}.
     :param workingFolder:
     :param seed: if None - get current timestamp
     :param outputFolder:
-    :param continueCalculation: if true do not delete existing folders and continue sample calculation
-    :param runConfiguration: dict, default = {'runType':'local', 'runCmd':'', 'nProcs':1, 'memory':5000, 'calcSampleInParallel':1, 'recalculateErrorsAttemptCount':0}
-    :param adaptiveSamplerParams: dict, default = {'initialPoints':None, 'exploreNum':5, 'exploitNum':5, 'yWeightInNorm':1.0}
+    :param runConfiguration: dict, default = {'runType':'local', 'runCmd':'', 'nProcs':1, 'memory':5000, 'calcSampleInParallel':1, 'recalculateErrorsAttemptCount':0}, runCmd can be command string or function(workingFolder)
+    :param adaptiveSamplerParams: dict, default = {'initialIHSDatasetSize':None}
     :param settingsFileName: name of the persistently saved settings, like seed, paramRanges, etc.
     :return:
     """
@@ -681,14 +835,17 @@ def sampleAdaptively(paramRanges, moleculeConstructor, checkSampleIsGoodFunc, sp
         seed = ensureSettingsAreConsistent(workingFolder + os.sep + settingsFileName, seed, paramRanges)
     else:
         seed = writeSettings(workingFolder + os.sep + settingsFileName, seed, paramRanges)
+    if callable(maxError): checkSampleIsGoodFunc = maxError
+    else: checkSampleIsGoodFunc = checkSampleIsGoodByCVError(maxError=maxError, samplePreprocessor=samplePreprocessor, spectralProgram=spectralProgram, minCountToCheckError=max(len(paramRanges)*2,10), debug=True, maxSampleSize=maxSampleSize, debugOutputFolder=debugFolder)
 
     while True:
         try:
+            lock = threading.Lock()
             sampler = adaptiveSampling.ErrorPredictingSampler(rangeValues, checkSampleIsGoodFunc=checkSampleIsGoodFunc,      seed=seed, initialPoints=initialPoints, **adaptiveSamplerParams)
-            folderGen = InputFilesGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder)
-            func = SpectrumCalculator(spectralProgram, folderGen, outputFolder, runConfiguration['recalculateErrorsAttemptCount'], smoothConfig)
+            folderGen = InputFilesGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder, debug=debug)
+            func = SpectrumCalculator(spectralProgram, folderGen, outputFolder, runConfiguration['recalculateErrorsAttemptCount'], samplePreprocessor, debug, lock)
             func.configAll(runConfiguration['runType'], runConfiguration['runCmd'], runConfiguration['nProcs'], runConfiguration['memory'])
-            orchestrator = adaptiveSampling.CalculationOrchestrator(func, runConfiguration['calcSampleInParallel'])
+            orchestrator = adaptiveSampling.CalculationOrchestrator(func, lock, runConfiguration['calcSampleInParallel'], debug=debug)
             generator = adaptiveSampling.DatasetGenerator(sampler, orchestrator)
             generator.generate()
             break

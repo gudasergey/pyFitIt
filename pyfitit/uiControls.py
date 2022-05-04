@@ -1,12 +1,11 @@
 import copy, types, gc, os
 from IPython.core.display import display, Javascript
 from ipywidgets import widgets, HTML
-import matplotlib.pyplot as plt
-from . import utils, smoothLib, inverseMethod, optimize, ML, plotting
+from . import utils, smoothLib, inverseMethod, optimize, ML, plotting, funcModel, curveFitting
+from .funcModel import FuncModel, ParamProperties
 from scipy.interpolate import Rbf
-import warnings, traceback, pickle, json
+import warnings, traceback, json
 import numpy as np
-import pandas as pd
 from matplotlib.font_manager import FontProperties
 from pyfitit.curveFitting import calculateRFactor
 
@@ -75,7 +74,7 @@ class ControlsManager:
         self.saver = saver
         self.context.plotData = {}
         self.context.controls = controls
-        self.context.cache = Cache()
+        self.context.cache = utils.CacheInMemory()
         self.context.addToStatus = self.addToStatus
         self.context.addDebugToStatus = self.addDebugToStatus
         self.context.setStatus = self.setStatus
@@ -217,24 +216,30 @@ class ControlsManager:
 
 
 class DefaultPlotter:
-    def __init__(self):
-        self.fig, self.ax = plotting.createfig(interactive=True)
+    def __init__(self, **createfigParams):
+        self.fig, self.ax = plotting.createfig(interactive=True, **createfigParams)
+        if not isinstance(self.ax, np.ndarray): self.ax = np.array([self.ax])
+        if len(self.ax.shape) == 2: self.ax = self.ax.flatten()
 
     def clear(self):
-        self.ax.clear()
+        for ax in self.ax: ax.clear()
 
     def plot(self, context):
         """
         Default plotter, outputs all gathered data to the end user (e.g. Jupyter Notebook)
         """
         plotData = context.plotData
-        metrics = ''
+        for ax in self.ax:
+            ax.set_xlabel("Energy")
+            ax.set_ylabel("Intensity")
+        metrics = {ax:'' for ax in self.ax}
         for key, graph in plotData.items():
             if graph is None or not isinstance(graph, dict):
                 continue
-
+            axisInd = graph['axisInd'] if 'axisInd' in graph else 0
+            ax = self.ax[axisInd]
             plotFuncStr = graph['plotFunc'] if 'plotFunc' in graph else None
-            plotFunc = self.ax.scatter if plotFuncStr == 'scatter' else self.ax.plot
+            plotFunc = ax.scatter if plotFuncStr == 'scatter' else ax.plot
 
             if graph['type'] == 'default':
                 plotFunc(
@@ -243,16 +248,16 @@ class DefaultPlotter:
                     label=graph['label'] if 'label' in graph else 'unknown',
                     color=graph['color'] if 'color' in graph else None)
             elif graph['type'] == 'metric':
-                metrics += f'{ graph["label"] }: { graph["text"] }\n'
-
-        energyRange = FittingUtils.getParamFromContext(context, ENERGY_RANGE_PARAM)
-        if energyRange is not None:
-            self.ax.set_xlim(energyRange)
-
-        self.ax.text(0.98, 0.02, metrics, transform=self.ax.transAxes, horizontalalignment='right')
-        self.ax.set_xlabel("Energy")
-        self.ax.set_ylabel("Intensity")
-        self.ax.legend(loc='upper right')
+                metrics[ax] += f'{ graph["label"] }: { graph["text"] }\n'
+            elif graph['type'] == 'xlim':
+                ax.set_xlim(graph['xlim'])
+                plotting.updateYLim(ax)
+            elif graph['type'] == 'xlabel':
+                ax.set_xlabel(graph['xlabel'])
+        for ax in self.ax:
+            if metrics[ax] != '':
+                ax.text(0.98, 0.02, metrics[ax], transform=ax.transAxes, horizontalalignment='right')
+            ax.legend(loc='upper right')
 
     def getFig(self):
         return self.fig
@@ -268,7 +273,7 @@ class ControlsBuilder:
     def addSlider(self, name, min, max, step, value, type='f'):
         if type == 'f':
             s = widgets.FloatSlider(description=name, min=min, max=max, step=step, value=value,
-                                    orientation='horizontal', continuous_update=False)
+                                    orientation='horizontal', continuous_update=False, readout_format='.3g')
         elif type == 'i':
             s = widgets.IntSlider(description=name, min=min, max=max, step=step, value=value,
                                   orientation='horizontal', continuous_update=False)
@@ -365,31 +370,6 @@ class ControlsBuilder:
             self.buildResult.append(control)
         else:
             self.controlsStack[-1].append(control)
-
-
-class Cache:
-
-    def __init__(self):
-        self.dataDict = {}
-
-    def getHash(self, o):
-        return hash(pickle.dumps(o))
-
-    def getIfUpToDate(self, dataName, dependData):
-        if dataName in self.dataDict:
-            hash, data = self.dataDict[dataName]
-            if hash == self.getHash(dependData):
-                return data
-
-        return None
-
-    def getFromCacheOrEval(self, dataName, evalFunc, dependData):
-        data = self.getIfUpToDate(dataName, dependData)
-        if data is None:
-            data = evalFunc()
-            self.dataDict[dataName] = (self.getHash(dependData), data)
-
-        return data
 
 
 class CombinedListeners:
@@ -498,6 +478,134 @@ class FittingUtils:
 #           End of abstract sliders engine
 # ====================================================
 
+
+# ====================================================
+#           Sliders for FuncModel class
+# ====================================================
+
+class FuncModelPlotter:
+    def __init__(self, funcModel):
+        self.funcModel = funcModel
+
+    def clear(self):
+        if self.funcModel.ax is not None:
+            for ax in self.funcModel.ax: ax.clear()
+
+    def plot(self, context):
+        self.funcModel.plot()
+
+    def getFig(self):
+        return self.funcModel.fig
+
+
+class FuncModelSliders:
+    def __init__(self, funcModel:FuncModel, fitType='min', debug=False, defaultParams=None):
+        """
+        :param funcModel:
+        :param paramProperties: dict{paramName -> {type:{'real','int','range','bool','list'}, domain:([a,b],list)}, default:val}
+        :param fitType: 'min' or 'max'
+        """
+        self.funcModel = funcModel.copy()
+        self.funcModel.createfigParams['interactive'] = True
+        self.floatParams = [pn for pn in self.funcModel.paramProperties if self.funcModel.paramProperties[pn]['type']=='float']
+        self.fittedParams = list(self.floatParams)
+        self.fitType = fitType
+        self.defaultParams = defaultParams if defaultParams is not None else {}
+        self.setup(debug)
+        self.manager = None
+
+    def setup(self, debug):
+        # building interface
+        builder = ControlsBuilder()
+        for pn, pp in self.funcModel.paramProperties.items():
+            val = None
+            if 'default' in pp: val = pp['default']
+            if pn in self.defaultParams: val = self.defaultParams[pn]
+            if pp['type'] == 'float':
+                a, b = pp['domain']
+                if val is None: val = (a+b)/2
+                builder.addSlider(name=pn, min=a, max=b, step=(b-a)/50, value=val)
+                fit = self.defaultParams['fit '+pn] if 'fit '+pn in self.defaultParams else True
+                builder.addCheckbox(name='fit '+pn, value=fit)
+            elif pp['type'] == 'int':
+                a, b = pp['domain']
+                if val is None: val = (a + b) // 2
+                builder.addSlider(name=pn, min=a, max=b, step=1, value=val, type='i')
+            elif pp['type'] == 'range':
+                a, b = pp['domain']
+                if val is None: val = [a,b]
+                builder.addRangeSlider(name=pn, min=a, max=b, step=(b-a)/50, value=val)
+            elif pp['type'] == 'bool':
+                if val is None: val = True
+                builder.addCheckbox(name=pn, value=val)
+            elif pp['type'] == 'list':
+                if val is None: val = pp['domain'][0]
+                builder.addDropdown(name=pn, values=pp['domain'], default=val)
+            else: assert False, 'Unknown type '+pp['type']
+        if len(self.floatParams) > 0:
+            builder.addButton(name='optimize')
+            builder.addButton(name='find better')
+
+        # binding callbacks
+        manager = ControlsManager()
+        manager.onControlChangedDelegate = self.onControlChanged  # for when user changes slider, dropdown list etc.
+        manager.onClickDelegate = self.onClick  # for button clicks
+        manager.onInitDelegate = self.update  # for the first call
+        manager.setup(builder.controls, builder.buildResult, debug=debug, plotter=FuncModelPlotter(self.funcModel))
+        self.manager = manager
+
+    def onClick(self, context, name):
+        params = FittingUtils.getParamsFromContext(context)
+
+        def fun(x, *args):
+            p = copy.deepcopy(params)
+            for i, pn in enumerate(self.fittedParams): p[pn] = x[i]
+            val = self.funcModel.evaluate(p)
+            if self.fitType == 'max': val = -val
+            return val
+
+        def optim(startPoint):
+            bounds = [self.funcModel.paramProperties[pn]['domain'] for pn in self.fittedParams]
+            # COBYLA - 0.725  Powell - 0.227
+            fmin, xmin = optimize.minimize(fun, startPoint, bounds, method='Powell')
+            return fmin, xmin
+
+        x0 = [params[pn] for pn in self.fittedParams]
+        if name == 'optimize':
+            assert len(self.funcModel.paramProperties.constrains) == 0, 'Not implemented yet!'
+            fmin, xmin = optim(x0)
+            for i,pn in enumerate(self.fittedParams):
+                FittingUtils.setParamForContext(context, pn, xmin[i])
+            self.update(context)
+        elif name == 'find better':
+            fminPrev = fun(x0)
+            fmin = fminPrev
+            i = 0
+            while i < 10 and fmin >= fminPrev:
+                x0 = self.funcModel.paramProperties.getRandom(self.fittedParams)
+                x0 = [x0[pn] for pn in self.fittedParams]
+                fmin, xmin = optim(x0)
+            if fmin < fminPrev:
+                for i, pn in enumerate(self.fittedParams):
+                    FittingUtils.setParamForContext(context, pn, xmin[i])
+                self.update(context)
+        # context.addDebugToStatus('Button ' + name)
+
+    def update(self, context):
+        params = FittingUtils.getParamsFromContext(context)
+        context.addDebugToStatus(str(params))
+        val = self.funcModel.evaluate(params)
+        self.funcModel.plot()
+        context.addDebugToStatus(str(val))
+        self.fittedParams = [pn for pn in self.floatParams if params['fit '+pn]]
+
+    def onControlChanged(self, context, name, oldValue, newValue):
+        self.update(context)
+
+    def saveAllData(self, fileName):
+        self.funcModel.save(fileName)
+
+
 # ====================================================
 #           Fitting spectrum by a single component
 # ====================================================
@@ -574,9 +682,9 @@ class SpectrumSliders:
         theoryProcessingPipeline : list(str, lists)
                 [['fdmnes smooth', {param1:... value or interval}], 'approximation', ['L1 norm', {norm:value or interval}], [userDefinedFunction, {param1:... value or interval}]]
                   If user sets value then param is fixed, interval means creating a slider for variation of the param.
-                  userDefinedFunction - is a function(Spectrum, param1=..., param2=..., ...)
+                  userDefinedFunction - is a function(energy, intensity, params, context) -> energy, intensity
                   In case of missed smooth params the default sliders are generated.
-                  In case of string instead of list (e.g. ['approximation', 'fdmnes smooth', 'fit L2 norm']) for smoothing default sliders are generated, for norm it is automaticaly fitted to experiment.
+                  In case of string instead of list (e.g. ['approximation', 'fdmnes smooth', 'fit L2 norm']) for smoothing default sliders are generated, for norm it is automatically fitted to experiment.
         Returns
         -------
         None.
@@ -673,7 +781,7 @@ class SpectrumFittingBackend:
     def __init__(self, sample, project, theoryProcessingPipeline, manager):
         self.paramsHash = None
         self.manager = manager
-        self.cache = Cache()
+        self.cache = utils.CacheInMemory()
 
         self.exp_energy = project.spectrum.energy
         self.theory_energy = sample.energy
@@ -801,6 +909,7 @@ class SpectrumFittingBackend:
                 'label': EXPERIMENT_PLOT_LABEL,
                 'color': 'k'
             }
+        context.plotData['plot xlim'] = {'type':'xlim', 'xlim':params['energyRange']}
 
     def update(self, context):
         self.calculatePrediction(FittingUtils.getParamsFromContext(context), context)
@@ -1102,288 +1211,6 @@ class CachedEstimator:
             self.predictionCache = self.estimator.predict(x)
         return self.predictionCache
 
-# ====================================================
-#                     Exafs sliders
-# ====================================================
-
-
-class ExafsPlotter:
-    def __init__(self):
-        self.fig, [self.axMain, self.axFourier] = plotting.createfig(interactive=True, nrows=2)
-
-    def clear(self):
-        self.axMain.clear()
-        self.axFourier.clear()
-
-    def plot(self, context):
-        """
-        Default plotter, outputs all gathered data to the end user (e.g. Jupyter Notebook)
-        """
-        plotData = context.plotData
-        for key, graphs in plotData.items():
-            if graphs is None or graphs == []:
-                continue
-
-            if key == 'Main':
-                for graph in graphs:
-                    self.plotOn(self.axMain, graph)
-                energyRange = FittingUtils.getParamFromContext(context, ENERGY_RANGE_PARAM)
-                if energyRange is not None:
-                    self.axMain.set_xlim(energyRange)
-
-            if key == 'Fourier':
-                for graph in graphs:
-                    self.plotOn(self.axFourier, graph)
-                    self.axFourier.set_xlim(0, 10)
-
-    def plotOn(self, ax, graph):
-        ax.plot(
-            graph['xData'],
-            graph['yData'],
-            label=graph['label'] if 'label' in graph else 'unknown',
-            color=graph['color'] if 'color' in graph else None)
-        ax.legend(loc='upper right')
-
-    def getFig(self):
-        return self.fig
-
-
-class ExafsSliders:
-    def __init__(self, sample, project, debug=True, defaultParams=None):
-        self.params = {}
-        self.sample = sample
-        self.project = project
-        self.defaultParams = FittingUtils.checkDefaultParams(defaultParams)
-        self.isML = isinstance(sample, ML.Sample)
-        if self.isML:
-            spectra = sample.spectra
-            geometryParams = sample.params
-            # normalizing params
-            self.geometryParamsMin = np.min(geometryParams.values, axis=0)
-            self.geometryParamsMax = np.max(geometryParams.values, axis=0)
-            geometryParams = 2 * (geometryParams - self.geometryParamsMin) / (self.geometryParamsMax - self.geometryParamsMin) - 1
-            # machine learning estimator training
-            self.estimator = inverseMethod.getMethod(
-                "Extra Trees")  # ExtraTreesRegressor(n_estimators = 200, random_state=0)
-            self.estimator.fit(geometryParams.values, spectra.values)
-            e_names = spectra.columns
-            self.k0 = np.array([float(e_names[i][2:]) for i in range(e_names.size)])
-        else:
-            self.exafs = sample
-            self.k0 = self.exafs.k
-
-        # sliders names
-        self.paramsNames = list(self.project.geometryParamRanges.keys())
-        self.kRangeName = 'energyRange'
-        self.kPowerName = 'Power of k'
-        self.sigmaSquareName = 'sigma^2'
-        self.soSquareName = 'SO^2'
-        self.dEName = 'dE'
-        self.aName = 'A'
-
-        # parameters default values
-        for pName in self.project.geometryParamRanges:
-            p0, p1 = self.project.geometryParamRanges[pName]
-            if pName not in self.defaultParams:
-                self.defaultParams[pName] = (p0 + p1) /2
-        e0, e1 = self.project.exafs.k[0], self.project.exafs.k[-1]
-        e0, e1 = max(e0, self.k0[0]), min(e1, self.k0[-1])
-        v0, v1 = self.project.intervals['fit_exafs'][:2]
-        v0, v1 = max(e0, v0), min(e1, v1)
-        self.defaultParams[self.kRangeName] = [v0, v1]
-        self.defaultParams[self.kPowerName] = 2
-        self.defaultParams[self.sigmaSquareName] = 0
-        self.defaultParams[self.soSquareName] = 1
-        self.defaultParams[self.dEName] = 0
-        self.defaultParams[self.aName] = 1
-
-        self.manager = None
-        self.setup(debug)
-
-        def relative_to_constant_prediction_error(n):  # n - partitions count via cross-validation
-            def partition(x, i, size):
-                return np.vstack((x[0:i * size], x[(i + 1) * size:])), x[i * size:(i + 1) * size]
-            if self.isML:
-                geom_params = sample.params.values
-                # normalizing params
-                geom_params_min = np.min(geom_params, axis=0)
-                geom_params_max = np.max(geom_params, axis=0)
-                geom_params = 2 * (geom_params - geom_params_min) / (geom_params_max - geom_params_min) - 1
-                a, b = project.intervals['fit_exafs']
-                ind = (sample.energy >= a) & (sample.energy <= b)
-                sample_spectra = sample.spectra.values * sample.energy ** 2
-                sample_count = sample_spectra.shape[0]
-                if 2 * n > sample_count:
-                    return None
-                part_size = sample_count // n
-                final_prediction = np.zeros((2, sample_spectra.shape[1]))
-                for i in range(n):
-                    # machine learning estimator training
-                    estimator = inverseMethod.getMethod("Extra Trees")
-                    training_params, test_params = partition(geom_params, i, part_size)
-                    training_spectra, _ = partition(sample_spectra, i, part_size)
-                    estimator.fit(training_params, training_spectra)
-                    final_prediction = np.vstack((final_prediction, estimator.predict(test_params)))
-                final_prediction = final_prediction[2:]
-                k = project.exafs.k
-                u = np.mean(np.mean((sample_spectra[:part_size * n, ind] - final_prediction[:, ind]) ** 2, axis=1))
-                mean_sample_spectra = np.mean(sample_spectra, axis=0)
-                v = np.mean(np.mean((sample_spectra[:part_size * n, ind] - mean_sample_spectra[ind]) ** 2, axis=1))
-                return u / v
-            else:
-                return None
-        #print(relative_to_constant_prediction_error(5))
-
-    def setup(self, debug):
-        # building interface
-        builder = ControlsBuilder()
-        if self.isML:
-            for pName in self.project.geometryParamRanges:
-                p0, p1 = self.project.geometryParamRanges[pName]
-                builder.addSlider(name=pName, min=p0, max=p1, step=0.1, value=self.defaultParams[pName])
-        e0, e1 = self.project.exafs.k[0], self.project.exafs.k[-1]
-        e0, e1 = max(e0, self.k0[0]), min(e1, self.k0[-1])
-        slider_name = self.kRangeName
-        builder.addRangeSlider(name=self.kRangeName, min=e0, max=e1, step=(e1 - e0)/30,value=self.defaultParams[slider_name])
-        slider_name = self.kPowerName
-        builder.addSlider(name=slider_name, min=0, max=5, step=1, value=self.defaultParams[slider_name])
-        slider_name = self.sigmaSquareName
-        builder.addSlider(name=slider_name, min=0, max=0.01, step=2e-4, value=self.defaultParams[slider_name])
-        slider_name = self.soSquareName
-        builder.addSlider(name=slider_name, min=0, max=2, step=0.03, value=self.defaultParams[slider_name])
-        slider_name = self.dEName
-        builder.addSlider(name=slider_name, min=-40, max=40, step=1, value=self.defaultParams[slider_name])
-        slider_name = self.aName
-        builder.addSlider(name=slider_name, min=0, max=4, step=0.1, value=self.defaultParams[slider_name])
-
-        # builder.addCheckbox(name='Sin', value=False)
-        builder.addButton(name='Reset')
-
-        # binding callbacks
-        manager = ControlsManager()
-        manager.onControlChangedDelegate = self.onControlChanged  # for when user changes slider, dropdown list etc.
-        manager.onClickDelegate = self.onClick  # for button clicks
-        manager.onInitDelegate = self.update  # for the first call
-
-        # default params are values for parameters, can be dict or string - filepath
-        # debug - whether or not show debug messages
-        manager.setup(builder.controls, builder.buildResult, debug=debug, plotter=ExafsPlotter())
-        self.manager = manager
-
-    def onClick(self, context, name):
-        # here we handle all button clicks depending on the button name
-        # resetting parameters to default
-        if name == 'Reset':
-            for param in self.defaultParams:
-                FittingUtils.setParamForContext(context, param, self.defaultParams[param])
-            self.update(context)
-
-    def update(self, context):
-        # we can add any debug info using this method ("debug" should be True in order for this to work)
-        # this message will tell us that our custom function was called
-        context.addDebugToStatus('Update called')
-
-        # using this method we can extract all parameters' values from context
-        params = FittingUtils.getParamsFromContext(context)
-        kRange = params['energyRange']
-        p = params[self.kPowerName]
-        sigmaSquare = params[self.sigmaSquareName]
-        SO2 = params[self.soSquareName]
-        dE = params[self.dEName]
-        a = params[self.aName]
-
-        # TODO caching
-        # Main calculations
-        if self.isML:
-            geomArg = np.array([params[pName] for pName in self.paramsNames]).reshape([1, len(self.paramsNames)])
-            geomArg = 2 * (geomArg - self.geometryParamsMin) / (self.geometryParamsMax - self.geometryParamsMin) - 1
-        exp_k0 = self.project.exafs.k
-        exp_k = np.linspace(exp_k0[0], exp_k0[-1], exp_k0.size)
-        exp_exafs = np.interp(exp_k, exp_k0, self.project.exafs.chi)
-        exp_exafs = exp_exafs * exp_k ** p
-        if self.isML:
-            predictedSpectr = self.estimator.predict(geomArg)[0]
-        else:
-            predictedSpectr = np.copy(self.exafs.chi)
-        me = 2 * 9.11e-31
-        h = 4.1e-15
-        tmp = self.k0 ** 2 - me * dE / h ** 2
-        tmp[tmp < 0] = 0
-        k = np.sqrt(tmp)
-        predictedSpectr *= k ** p * np.exp(-2 * k ** 2 * sigmaSquare)
-        predictedSpectrFitted = np.interp(exp_k, k, predictedSpectr) * SO2
-        self.exafs = predictedSpectrFitted
-
-        # Plotting
-        context.plotData['Main'] = [{
-            'type': 'default',
-            'xData': exp_k,
-            'yData': predictedSpectrFitted,
-            'label': 'Approximation',
-            'color': 'blue'
-        },
-            {
-            'type': 'default',
-            'xData': exp_k,
-            'yData': exp_exafs,
-            'label': 'Experiment',
-            'color': 'black'
-        }]
-
-        def fourier_transform(k, chi, kmin, kmax, A):
-            w = np.ones(k.shape)
-            i = k < kmin + A
-            w[i] = 0.5 * (1 - np.cos(np.pi * (k[i] - kmin) / A))
-            w[k < kmin] = 0
-            i = k > kmax - A
-            w[i] = 0.5 * (1 + np.cos(np.pi * (k[i] - kmax + A) / A))
-            w[k > kmax] = 0
-            M = k.size
-            delta = (k[-1] - k[0]) / M
-            m = np.arange(0, M // 2)
-            wm = 2 * np.pi * m / M / delta
-            # print('chi: ' + str(chi.size) + '\n')
-            ft = delta * np.exp(complex(0, 1) * wm * k[0]) * np.fft.fft(chi * w)[:M // 2]
-            rbfi = Rbf(wm, np.abs(ft))  # radial basis function interpolator instance
-            freqw = np.linspace(wm[0], wm[-1], 500)
-            rbfft = rbfi(freqw)  # interpolated values
-            return freqw, rbfft, wm, ft
-        k_min, k_max = kRange
-        R_exp, ft_exp, R_exp_no_interp, ft_exp_no_interp = fourier_transform(exp_k, exp_exafs, k_min, k_max, a)
-        R_pr, ft_pr, _, _ = fourier_transform(exp_k, predictedSpectrFitted, k_min, k_max, a)
-        #fig = plt.figure()
-        #plt.plot(R)
-
-        context.plotData['Fourier'] = [{
-            'type': 'default',  # default type indicates this is an ordinary graph
-            'xData': R_pr,
-            'yData': np.abs(ft_pr),
-            'label': 'Approximation FT',
-            'color': 'blue'
-        },
-        {
-            'type': 'default',  # default type indicates this is an ordinary graph
-            'xData': R_exp,
-            'yData': np.abs(ft_exp),
-            'label': 'Experiment FT',
-            'color': 'black'
-        }]
-
-    def onControlChanged(self, context, name, oldValue, newValue):
-        """
-        This function is called every time user changes value of slider or any other control in the Jupyter Notebook
-
-        Note: this function won't be called when control is changed during processing of user input,
-        e.g. when slider values are changed from the code, while handling user input
-        This was made with a purpose of eliminating cascaded and looped calculations
-
-        :param context: context, that contains all the data needed for calculations
-        :param name: name of the slider or any other control, that changed its value
-        :param oldValue: previous control value
-        :param newValue: new control value
-        """
-        self.update(context)
-
 
 # ====================================================
 #                       FitSmooth
@@ -1450,12 +1277,13 @@ class FitSmoothPlotter:
         return self.fig
 
 
-class FitSmooth:
+class fitSmooth:
     """Helps to choose smooth params. 
        extraSpectra - extra spectra to smooth and plot {'label':spectrum1, ...}
        extraGraphs - extra graphs to plot [{'x':.., 'y':.., 'label':..}, ...]
+       bounds - new bounds for params {'Gamma_hole':[0.1,2], ...}
     """
-    def __init__(self, spectrum, project, defaultParams=None, diffFrom=None, norm=None, smoothType='fdmnes', normType='multOnly', extraSpectra=None, extraGraphs=None, debug=True):
+    def __init__(self, spectrum, project, defaultParams=None, bounds=None, diffFrom=None, norm=None, smoothType='fdmnes', normType='multOnly', extraSpectra=None, extraGraphs=None, debug=True):
         defaultParams = FittingUtils.checkDefaultParams(defaultParams)
         self.spectrum = spectrum
         self.project = copy.deepcopy(project)
@@ -1466,6 +1294,7 @@ class FitSmooth:
         self.extraSpectra = extraSpectra
         self.extraGraphs = extraGraphs
         self.manager = None
+        self.bounds = {} if bounds is None else bounds
         self.setup(debug, defaultParams)
 
     def adjustFitIntervals(self, shift):
@@ -1502,22 +1331,29 @@ class FitSmooth:
             manager.addToStatus(message)
             minShift = np.min(project.spectrum.energy) - np.max(spectrum.energy)
             maxShift = np.max(project.spectrum.energy) - np.min(spectrum.energy)
-        builder.addSlider(name='shift', min=minShift, max=maxShift, step=1, value=shift)
-        builder.addSlider(name='Gamma_hole', min=0.1, max=10, step=0.2, value=1)
-        builder.addSlider(name='Ecent', min=1, max=100, step=1, value=50)
-        builder.addSlider(name='Elarg', min=1, max=100, step=1, value=50)
-        builder.addSlider(name='Gamma_max', min=0, max=100, step=0.5, value=15)
+
+        def addSlider(name, min, max, step, value):
+            if name in self.bounds:
+                min, max = self.bounds[name]
+                value = max(value, min)
+                value = min(value, max)
+            builder.addSlider(name=name, min=min, max=max, step=step, value=value)
+        addSlider(name='shift', min=minShift, max=maxShift, step=1, value=shift)
+        addSlider(name='Gamma_hole', min=0.1, max=10, step=0.2, value=1)
+        addSlider(name='Ecent', min=1, max=100, step=1, value=50)
+        addSlider(name='Elarg', min=1, max=100, step=1, value=50)
+        addSlider(name='Gamma_max', min=0, max=30, step=0.5, value=15)
         if self.smoothType == 'adf':
             # in adf smooth Efermi usually = eig energy[0], so parameter Efermi - is a shift from this value
-            builder.addSlider(name='Efermi', min=-20, max=20, step=1, value=0)
+            addSlider(name='Efermi', min=-20, max=20, step=1, value=0)
         else:
-            builder.addSlider(name='Efermi', min=np.min(project.spectrum.energy)-20, max=np.max(project.spectrum.energy), step=1, value=np.min(project.spectrum.energy))
+            addSlider(name='Efermi', min=np.min(project.spectrum.energy)-20, max=np.max(project.spectrum.energy), step=1, value=np.min(project.spectrum.energy))
 
         if 'norm' in defaultParams:
             nrm = defaultParams['norm']
-            builder.addSlider(name='norm', min=nrm/2, max=nrm*2, step=nrm/20, value=nrm)
+            addSlider(name='norm', min=nrm/2, max=nrm*2, step=nrm/20, value=nrm)
         if diffFrom is not None:
-            builder.addSlider(name='purity', min=0, max=1, step=0.05, value=diffFrom['purity'])
+            addSlider(name='purity', min=0, max=1, step=0.05, value=diffFrom['purity'])
 
         builder.addCheckbox(name='smooth width', value=False)
         builder.addCheckbox(name='not convoluted', value=True)
@@ -1717,12 +1553,12 @@ class SampleInspectorPlotter(DefaultPlotter):
     def plot(self, context):
         super().plot(context)
         for plot in context.plotData[self.name_CustomData]:
-            self.customPlotter(self.ax, plot)
+            self.customPlotter(self.ax[0], plot)
         if self.extraPlotter is not None:
-            self.extraPlotter(self.ax)
+            self.extraPlotter(self.ax[0])
         xlim = FittingUtils.getParamFromContext(context, 'xlim')
-        self.ax.set_xlim(*xlim)
-        self.ax.legend()
+        self.ax[0].set_xlim(*xlim)
+        self.ax[0].legend()
 
 
 class SampleInspector:
@@ -2044,3 +1880,77 @@ class SinCosExample:
         """
         self.manager.saveAllData(folder)
 
+
+# ====================================================
+#      FDMNES Smooth based on FuncModel
+# ====================================================
+
+def smoothSliders(expSpectrum, theorySpectrum, shift='auto', smoothType='fdmnes', ylim='auto', defaultParams=None):
+    """
+    :param expSpectrum:
+    :param theorySpectrum:
+    :param smoothType:  'fdmnes' or 'adf'
+    :param ylim: 'auto' or 'manual'
+    """
+    assert ylim in ['auto', 'manual']
+    assert smoothType in ['fdmnes', 'adf']
+    expEfermi = curveFitting.findEfermiFast(expSpectrum.energy, expSpectrum.intensity)
+    if shift == 'auto':
+        x = smoothLib.simpleSmooth(theorySpectrum.energy, theorySpectrum.intensity, sigma=5, assumeZeroInGaps=smoothType=='adf')
+        theoryEfermi = curveFitting.findEfermiFast(theorySpectrum.energy, x)
+        shift0 = expEfermi-theoryEfermi
+    else:
+        shift0 = shift
+
+    def smoothFunction(slf, params):
+        slf.data['exp'] = FuncModel.createDataItem('plot', x=expSpectrum.energy, y=expSpectrum.intensity, order=-1, color='black', lw=2)
+        fitNormInterval = params['fitNormInterval']
+        smoothed, norm = smoothLib.smoothInterpNorm(params, theorySpectrum, smoothType, expSpectrum, fitNormInterval, norm=None)
+        shift = params['shift']
+        slf.data['smoothed'] = FuncModel.createDataItem('plot', x=smoothed.energy, y=smoothed.intensity)
+        slf.data['not smoothed'] = FuncModel.createDataItem('plot', x=theorySpectrum.energy + shift, y=theorySpectrum.intensity / norm, plot=params['not smoothed'])
+
+        slf.data['fitNormInterval1'] = FuncModel.createDataItem('text', transform=None, x=fitNormInterval[0], y=0, str='[', save=False)
+        slf.data['fitNormInterval2'] = FuncModel.createDataItem('text', transform=None, x=fitNormInterval[1], y=0, str=']', save=False)
+
+        energyRange = params['energyRange']
+        def xlim(ax):
+            ax.set_xlim(energyRange)
+            if ylim == 'auto':
+                plotting.updateYLim(ax)
+
+        slf.data['xlim'] = FuncModel.createDataItem('custom', plotter=xlim, save=False, order=1000)
+        error = utils.rFactorSp(smoothed, expSpectrum, sub1=True, interval=energyRange)
+        slf.data['info'] = FuncModel.createDataItem('text', str='norm=%.3g' % norm + '  err=%.3g' % error, order=1001)
+        return error
+
+    paramProperties = ParamProperties()
+    dsp = smoothLib.DefaultSmoothParams(expEfermi, shift0)
+    for p in dsp.params['fdmnes']:
+        paramProperties[p['paramName']] = {'type': 'float', 'domain': [p['leftBorder'], p['rightBorder']], 'default': p['value']}
+    paramProperties['energyRange'] = {'type':'range', 'domain':[expSpectrum.energy[0],expSpectrum.energy[-1]]}
+    paramProperties['fitNormInterval'] = {'type': 'range', 'domain': [expSpectrum.energy[0], expSpectrum.energy[-1]]}
+    paramProperties['not smoothed'] = {'type': 'bool', 'default': False}
+    if ylim != 'auto':
+        paramProperties['ylim'] = {'type': 'range', 'domain': [min(np.min(theorySpectrum.intensity),np.min(expSpectrum.intensity)), max(np.max(theorySpectrum.intensity),np.max(expSpectrum.intensity))]}
+    funcModel = FuncModel(function=smoothFunction, paramProperties=paramProperties)
+    return FuncModelSliders(funcModel, defaultParams=defaultParams)
+
+
+def addNoFit(paramName, paramProperties, defaultParams):
+    if paramName in paramProperties: names = [paramName]
+    else:
+        names = []
+        for p in paramProperties:
+            if p[:len(paramName) + 1] == paramName+ '_': names.append(p)
+    for n in names:
+        fn = f'fit {n}'
+        if fn not in defaultParams: defaultParams[fn] = False
+
+
+def xanesSliders(project, xanesSampleFolder, defaultParams=None):
+    xanesModel = FuncModel.createXanesFittingModel(project, ML.readSample(xanesSampleFolder), name=project.name)
+    if defaultParams is None: defaultParams = {}
+    for p in ['Gamma_hole', 'Gamma_max', 'Ecent', 'Efermi', 'Elarg', 'shift', 'norm']:
+        addNoFit(p, xanesModel.paramProperties, defaultParams)
+    return FuncModelSliders(funcModel=xanesModel, debug=False, defaultParams=defaultParams)

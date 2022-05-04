@@ -1,0 +1,847 @@
+                    List of corrections and modifications in FDMNES
+
+---------------------------------------------------------------------------------------
+
+March 1st 2022
+  - "Python" keyword introduced which change in the output files, the column names, substituing parenthesis by underscore.
+ 
+February 24th 2022
+  - Bug fixed for calculations in SRXRD making the calculation scrach when using some compilers
+
+February 17th 2022
+  - Bug fixed for calculations in SRXRD without absorbing atom in bulk
+
+February 15th 2022
+  - 2 Variables not initialized in previous version fixed
+ 
+February 15h 2022
+  - A bug fixed when using couple of atoms too close with occupancy < 1
+  - Keyword "Header" introduced giving at the begining of the output files some info about the code version, 
+    the date, the edge energy and the convolution parameters
+  - Keyword "Rionic" introduced to fix the ionic radius versus the atomic number (effect only for info in the output bav files).
+  - Surface Resonant XRD slightly improved for the taking into account of the self-absorption
+
+January 5th 2022
+  Self-consistence made safer in some cases as in oxyde of tungsten.
+
+September 7th 2021
+  Somme output format error fixed
+
+August 27th 2021
+  - A bug fixed when using keyword "Xan_atom". The code scratched due to a recent modification.
+  - "SCF_smooth" keyword introduced for case where self-consistence is difficult to reach, due to beating effect.
+
+August 10th 2021
+  - Slight improvement of the SCF convergence (rare effect)
+  - Keyword "SCF_smooth" added to use when SCF convergence is difficult to reach
+  - Keyword RXg improved
+
+June 29th 2021
+  2 new keywords, "Weight_co" and "Error", respectively for weighted average between spectra and for the taking into account
+  of the errors in the experimental spectra for the F-factor evaluation.
+  1 new parameter, "Par_weight_co", to fit the Weight_co parameter. See user's guide.
+
+May 28th 2021
+  3 new parameters for fitting: Par_V_helm, Par_Delta_hel, Par_width_hel
+
+May 3rd 2021
+  - Bug fixed for magnetic calculations without spin-orbit (introduced in last version).
+  - Bug fixed for the COOP printing (some were missing in some cases).
+  - Correction for Hubbard + FDM calculation.
+  
+April 7th 2021
+  - Calculations with Hubbard potential improved for C3, C4 and C6 symmetries
+  - Calculation (very) slightly improved when using spinorbit.
+
+January 21st 2021
+  - For material with Ba and Cs atoms, the process of calculation of the Fermi level has been improved.
+  This improvement is in some cases important.
+  - "Helm_mix" and "Helm_lin" keywords introduced for the treatment of Helmholtz layer.
+  - "Full_atom" keyword is now in the manual. This keyword improves in the cases the convergence of the
+  Fermi level evaluation versus the cluster radius. 
+
+January 1st 2021
+  "Calculation" keyword modified when using multi-site absorbing atom
+  New parameter: "Abs_U_iso" for fitting of Debye-waller disoacement of the absorbing atom.
+  A bug fixed which was introduced in the previous version for FDM calculation with punctual group "3", "3/m", "4", "4/m",
+  "6" or "6/m".
+
+October 8th 2020
+  More than 100000 atoms can now be taken into account in the input files
+  A change in FDM procedure for the calculation of the number of spherical harmonics of the outersphere. Give very small changes.
+
+August 31st 2020
+  Bug fixed when two atoms with half occupancy on the same site. 
+
+August 28th 2020
+  Introduction of Lmax_DOSout keyword to increase the expansion of the atomic basis for the printing of pDOS and COOP.
+  Default basis are now the same. 
+
+August 25th 2020
+  Bug fixed when using "Surface" and "Bulk" keywords without resonant diffraction.
+
+July 23th 2020
+  Bug fixed when working in SCF and MPI (very small effect).
+ 
+June 12th 2020
+  Bug fixed when using "TDDFT" and "Spinorbit" without "Hubbard. Bug introduced the 25th of May !
+
+May 29th 2020
+  Bug fixed when using Wien2k potential. This bug was introduced last month and was active when 
+  non equivalent atoms of the same atomic number was in the structure.
+
+May 25th 2020
+  Bug fixed when using "Hubbard" and "TDDFT" together.
+
+May 15th 2020
+  For H, N, O, F, Cl and rare gaz, the use of "Energpho" keyword shift the enery scale
+  cmoser to the experimental one and closer to the versions before 2016.
+  The use of "File_met" keyword is extended to multiple experimental file cases.
+
+May 5th 2020
+  Another bug fixed by R. Wielcke (ESRF). No effect observed in the benchmark files.
+
+April 30th 2020
+  Numerical and initialization improvements by R. Wilcke (ESRF).
+
+April 22nd 2020
+  Bug fixed by R. Wilcke when using Wien2K potential (from 17th April version)
+
+April 21st 2020
+  "One_run" option made operationnal also for surfaces with bulk.
+  A bug fixed when using "bulk" and "Atom_conf" keywords together.
+  A variable not initialized in the previous version (April 17th) is now initialized (small effect).
+
+April 17th 2020
+  A bug fixed by R. Wilcke ESRF occuping for very large systems, making that the code scrached.
+  Slight improvement in SCF and core level energy calculation. Gives very small effect.
+
+February 18th 2020
+  FOR SRXRD, Helmholtz formula slightly modified to converge to zero in the bulk.
+
+January 30th 2020
+  SCF improved. Most often few effect. Improvement with Ru oxydes.
+
+January 13th 2020
+  Bug for the Coop calculation when spinorbit fixed.
+
+December 20th 2020
+  A bug giving small differences in the DOS for simulations with Eimag is fixed
+  A bug in the DOS writing, when using "Extract" + "Hubbard" keywords fixed
+  2 symmetry operations added in the cif file reading
+  A bug when using "Directory" keyword fixed
+
+November 26th 2019
+  Again, a numerical problem fixed when using Hubbard keyword...
+  A rare bug fixed for SRXRD and error message about "The absorbing atom is not inside the area of calculation".
+
+November 14th 2019
+  "Hubbard_Z" and "Rcharge_Z" keywords introduced for fixing in an easier way,
+   that is versus the atomic number Z, respectively, the value of the Hubbard parameter,
+   and the radius of the atomic sphere to calculate the charge. 
+   A false alert on a non-convinient use of complex harmonics is also fixed.
+
+October 29th 2019
+  Message more clear when not enough memory with library MUMPS.
+  Partial occupancy now possible in bulk, for 2D diffraction.
+  Circular polarization nowpossible in 2D diffraction.
+  E1M1 magnetic component was set to zero, for some times.... It is now corrected. 
+
+September 27th 2019
+  COOP with spin-orbit now ok.
+
+September 13th 2019
+  Special option of cif file now readable
+  The manual contains now a section with "Some advices to make the best possible simulation"
+
+August 29th 2019
+  A bug corrected in the DOS calculation when using spin-orbit (from Julys version) 
+
+July 24th 2019
+  An unstability for calculation with spin-orbit + imaginary energy, introduced July 14th, is fixed ! 
+
+July 19th 2019
+  Output file name for convoluted spectra now automatically contains some parameters values.
+  From the version of 12th June partial screening was taken into account only when specification
+  on orbital was given. This problem is fixed.
+
+July 14th 2019
+  Default output for Density and COOP is now cubic harmonics basis. Harm_cubic keyword is suppressed and replaced by "Harm_tess"
+  to get the classical tesseral (or real) harmics basis.
+  Output format simplified when using Density and COOP.
+  Bug with COOP when using parallel calculation is fixed.
+
+July 2nd 2019
+  Harm_cubic keyword introdusec to get the density of state for cubic harmonics instead of the real (tesseral) one.
+  A modification for Hubbard.
+ 
+June 12th 2019
+  Probem when using partial screening for the 2nd column of the Mendeleiev table fixed.
+
+June 7th 2019
+  The COOP are now calculated with the Oz axis along the bonds.
+  Dist_coop keyword can be used with both max and min interatomic distances
+  Cif file produced by Vista can now be red. 
+
+May 22nd 2019
+  Keyword Ray_max_dirac introduced.
+  A very rare problem of a not found ponctual group fixed.
+  The order of the atoms in the list under "surface" keyword does not matter anymore.
+
+April 15th 2019
+  Keyword "lmaxso_max" introduced.
+
+April 12th 2019
+  Bug fixed when different mean square displacements were used for different atoms.
+
+March 29th 2019
+  Bug fixed when using "XES" and "Eimag" keywords together.
+  Bug fixed when using "Epsii" keyword.
+  Temperature effect now correct for X-ray Raman.
+
+March 25th 2019
+  Bug fixed when using "Surface" and "Film" keywords together.
+
+March 14th 2019
+  A problem related to extremmely small symmetry breaking fixed.
+  Bug for Debye effect when absorbing atoms are magnetic fixed.
+
+March 7th 2019
+  A bug introduced in February when using Eimag and Spinorbit keywords together is fixed.
+  Keyword "Rmtg_Z" introduced.
+
+February 15th 2019
+  Keyword "Check_biref" to check the relative contribution of dichroism and birefringence
+  for simulation of absorption in transmission mode.
+
+February 12th 2019
+  A bug for Coop calculation for ponctual groups using complex spherical harmonics was fixed.
+  E3E3 component has been set to zero for some versions. Now it is ok.
+  Numerical difference when spin-orbit + complex energy
+  Note that a numerical instability when spin-orbit + Hubbard is sometimes still there... Sorry. 
+
+November 30th 2018
+  Numerical improvements for simulation of surface resonant diffraction. Bulk atoms calculated first.
+  Sometimes small numerical differences with previous versions, for simulations using FDM.
+
+October 24th 2018
+  Elimination of the numerical singularity in surface resonant diffraction when L odd and integer.
+
+October 9th 2018
+  Improvement of the SCF for heavy atoms (Z > 50...)
+  Keywords Green_bulk and SCF_bulk introduced for surface resonant diffraction
+
+September 16th 2018
+  Surface diffraction: - Bug fixed for non-orthonormal unit cell.
+                       - All_conv keyword now working
+		       - No_analyser keyword working correctly
+		       - Column names modified "s" and "p" are versus the surface and not anymore versus the diffraction plane
+                       - XANES is the sum of surface and bulk atom, before it was only surface atoms
+
+August 2nd 2018
+ - A bug when using "Atom" or "Atom_conf" keywords, stoping the job, is fixed (rarely active).
+ - SCF procedure made slightly more efficient when absorbing atom excited (keyword SCFexc).
+  
+July 20th 2018
+  It is now possible to specify an atomic configuration with "Atom_conf" keyword on a doping element
+  with keyword "Doping"
+
+July 17th and 18th 2018
+ Bug fixed with X-ray Raman on monocrystal
+
+June 27th and 29th 2018
+ Bug fixed in the writting of cartesian tensors
+
+June 21st 2018
+- Definition of Euler angles has changed:
+  Now it is 1) rotation about z,
+            2) rotation about y' (new y) (and not x')
+            3) rotation about z' (new z)
+  In previous versions last rotation was about x" (second new x)
+  what was not a conventional Euler angle
+
+- NRIXS (X-ray Raman) can now being calculated for a monocrystal. See keyword "NRIXS_mono"
+  In the powder case, results are 4 pi smaller than before, but correctly normalized versus calculation on monocrystal.
+
+- Some comments in the "bav" file are now given to help the user when using the COOP keyword
+
+June 8th 2018
+- Lecture of cif file extended
+- For surfaces, bulk with more than one chemical element is now possible
+
+June 5th 2018
+- Reading of cif file with atoms with partial occupancy taken into account
+- Bug fixed for polarization flip calculation (Mat_polar) when broadening is zero
+- Bug fixed for reading the first line of the indata file, when not a comment
+
+May 23th 2018
+Energy grid in convolution output optimized
+ 
+May 14th 2018
+Bug when using the C3h ponctual group fixed.
+
+May 3rd 2018
+Helmholtz formulation extended.
+
+April 24th 2018
+- Calculation of Crystal Orbital Occupancy Polpulation is now possible:
+  keywords COOP, COOP_dist And COOP_atom
+- Bug fixed when using Hubbard + Spinorbit (or complex spherical orbital)
+- Minor bug fixed when using spinorbit
+- Bug fixed in FDMX by J. Bourke
+
+March 27th 2018
+Slight improvement in thermic effect
+Cif file reading made more general
+
+March 9th 2018
+"Abs_B_iso" and "Abs_U_iso" keywords introduced for thermic effect in the convolution part
+"Atom_B_iso" (replace "Temperature") and "Atom_U_iso" keywords introduced for thermic effect in the main part
+for diffraction (Bragg peak attenuation, as before), with values transmitted to the convolution part (what is new).
+Bug fixed for "Dilatorb" keyword. 
+
+February 15th 2018
+Center_s keyword introduced (can be usefull for surfaces).
+
+February 10th 2018
+A bug fixed when using "Doping" keyword and processing in parallel.
+
+February 8th 2018
+Minor bugs fixed in convolution.
+
+February 7th 2018
+It is now possible to calculate the edges of atoms with different atomic number in the same run.
+A bug fixed when using "extract" (with rare effect).
+
+January 19th 2018
+Keywords "File_in" and "Conc_gaus" introduced
+
+January 10th 2018
+Keyword "No_analyzer" introduced
+Fixing of a problem when using the "0 2 1 3 0 operation mode" for the 2D diffraction case.
+DAFS_2D keyword made also valid for 3D RXD.
+
+---------------------------------------------------------------------------------------
+
+December 20th 2017
+One bug fixed when using "Doping" keyword
+One bug fixed when using "Mat_polar" keyword
+Reading of cif_file made more general.
+
+November 21st 2017
+Work on SRXRD - Bulk roughness now included
+              - Possible bug fixed when not using Film_shift keyword
+              - Roughness definition divided by sqrt(2) 
+
+October 24th 2017
+Bug fixed when using Atom_conf in some cases.
+The case of non rationnal film and bulk unit cells improved in 2D diffraction.
+
+October 20th 2017
+Calculations with Hubbard made a bit more efficient: space group symmetry is kept true
+for the equivalent atoms (it is a bit technical...) In practice convergence is better with Hubbard + SCF.
+
+October 17th 2017
+No more need of "Spacegroup.txt" and "xsect.dat" indata files when running (Sergey Guda).
+Reading of cif_file more general.
+ 
+October 12th 2017
+In 2D diffraction, intensity is now in electron^2 A^-4
+Test on unit cell neutrality efficient when screening /= 1
+Reading of cif_file better in a specific case.
+
+September 4th 2017
+Fixing of a problem when using the "0 2 2 3 0 operation mode" for the 2D diffraction case.
+
+August 1st 2017
+"Mat_polar" and "Sample_thickness" keyword introduced to calculate the transmission through a sample.
+Comparison of 2 sets of calculated spectra is made easier by the use of keyword "file_met".
+Reading of cif files made more general (some new symmetry operations are included).
+
+July 12th 2017
+"Surface_plane" keyword introduced (for absorption correction in bulk RXD).
+Reading of cif files made more general (some new symmetry operations are included).
+
+June 12th 2017
+Bug fixed with "Surface" keyword
+
+June 5th 2017
+"Helmholtz" keyword for Helmholtz layer or counter ion effect is introduced. 
+
+June 1st 2017
+Bug fixed for 2D diffraction when absorbing atom is in the bulk (again !).
+
+May 31st 2017
+Bug fixed for 2D diffraction when absorbing atom is in the bulk.
+
+May 29th 2017
+Bug fixed when using "DAFS_2D" keyword.
+
+May 22nd 2017
+Technical modifications in MPI.
+Search of ponctual group of highest symmetry improved in some cubic cases. 
+
+April 12th 2017
+Minor bugs fixed.
+
+April 7th 2017
+Surface and Interface keywords introduced for 2D diffraction.
+
+February 28th 2017
+Atom_nsph keyword reading was not correct. It is fixed.
+
+February 24th 2017
+Bug fixed with use of Extract keyword.
+
+February 22th 2017
+Crossing spin in matrix elements now possible (effect on L23 edges with spinorbit).
+
+February 8th 2017
+Operation modes included in Surface resonant diffraction,
+COTA 2014 constant introduced,
+1 bug fixed when using "Atom_conf" with "Doping". 
+
+January 10th 2017
+Technical points fixed for Surface Resonant Diffraction
+
+---------------------------------------------------------------------------------------
+
+December 20th 2016
+All_conv and Abs_before keyword introduced
+In 2D resonant diffraction, self-absorption for absorber in bulk is energy now dependant.
+Treatment of self-absorption in 3D resonant diffraction changed (mu calculated with Gamma fixed). 
+
+December 9th 2016
+Very small numerical precision increase.
+
+December 7th 2016
+Extract keyword improved.
+Minor bugs fixed.
+
+November 21st 2016
+Bug fixed when using "Doping" keyword.
+
+November 14th 2016
+Some technical changes and minor buggs fixed.
+
+October 23th 2016
+Symmetry made more general when using cif files.
+lmax_tddft value now optionnal.
+
+October 20th 2016
+Finally, more often the irregular solution calculated in the way before the October 14th version seems better.
+This version go back to it by default. "Classic_irreg" keyword let to the calculation with October 14th way.
+Calculation for resonant 2D diffraction improved and now possible when absorber are also in the bulk.
+
+October 14th 2016
+One (slight) error fixed in the M1 transition operator.
+In FDM, scattering amplitude matrix better symmetrized.
+Irregular solution calculated using a more stable way. Gives very slight change in the Fermi level.
+Final results are only slightly different.
+
+September 9th 2016
+Safer check of absorbing atom inside the calculation cluster when One_run.
+fdmx.f90 is now a separate file (one file more to compile and link).
+
+September 7th 2016
+FDMX extension made safer for reading indata file
+
+September 6th 2016
+A bug fixed when FDM + One_run
+
+September 1st 2016
+Modifications in radius and SCF for when H atoms.
+Some technical modifications.
+
+July 15th 2016
+Bug in the reading of occupancy rate in cif files fixed.
+
+July 6th 2016
+Bug, introduced in June versions in SCF excited option, fixed.
+
+June 23rd 2016
+Bug, introduced in June versions on the reading of cif files, fixed.
+
+June 23rd 2016
+Zero energy at K edge set corresponding to the excited absorbing atom when not SCF calculation (gives a slight shift).
+Spin-orbit E1E1 transition channel included. 
+
+June 9th 2016
+Introduction of Film_zero keyword
+
+June 2nd 2016
+Zero energy is now set at the Fermi energy. All spectra are thus shifted versus previous version.
+This new version contains also the extension to 2D film diffraction (see manual).
+
+March 1st 2016
+Technical modifications. Reading of Cif file without atom_site_occupancy now possible. 
+
+February 9rd 2016
+Parameter p_self_max, for SCF added.
+
+February 9rd 2016
+Core level is now versus Fermi level (--> better relative shift when more than 1 non equivalent absorber).
+Slight change in the parameters for SCF.
+
+February 3rd 2016
+Core level energy better calculated (effect only with SCF).
+
+February 1st 2016
+Self-consistent option slightly improved.
+Default options are now 100 iterations max and 0.1 eV step for convergence.
+
+January 8th 2016
+Automatic reading of the cif files.
+
+January 6th 2016
+Technical modifications.
+
+---------------------------------------------------------------------------------------
+
+December 15th 2015
+E1M1 term now analyzed with spherical tensor (one bug corrected also in its evaluation for magnetic system).
+Polarization defined in the indata not anymore in reduced unit mesh unit, but in the normalized unit cell
+(one still has to take into account the angles between axis but not the difference in modulus of the unit cell parameters). 
+
+October 28th 2015
+Bug fixed for simulation FDM + Spinorbit with some point group (2/m, 4/m...)
+Screening keyword does not need anymore the associated use of Atom keyword.
+
+October 6th 2015
+Edge energies for Z > 93 now complete.
+
+September 1st 2015
+Bug fixed with "sphere_all" keyword.
+Double counting of number of atom fixed for Bormann.
+
+July 28th 2015
+Bug fixed when several adimp or radius
+
+July 26th 2015
+Bug fixed in MPI.
+
+July 24th 2015
+NRIXS simulation are included.
+
+July 20rd 2015
+One (big) bug fixed in core level energy (Epsii) calculation at L23 edges. Introduced in previous version. 
+
+July 3rd 2015
+Speeding up of the FDM solution by Sergey Guda.
+TDDFT slightly improved.
+Numerical instability sometimes occurring with Spinorbit + Hubbard fixed.
+
+June 5th 2015
+Instabilities in TDDFT fixed.
+
+April 27 2015
+Two variables were not initialized what could make problems on linux systems.
+
+April 23 2015
+First bug of April 20 was not completely fixed. It is now the case (I hope).
+
+April 21 2015
+Minor bug fixed when using SCF keyword (sometimes the code stopped at the beginning of the job).
+
+April 20 2015
+- 2 minor bugs corrected:
+   1) When using extract keyword on files larger than 1 000 000 lines (no more limit).
+   2) When using weight to get an average under Polarize keyword, when their sum was zero.
+
+April 15 2015
+- Introduction of the MUMPS solver to solve the FDM matrix, in collaboration with Guda, Soldatov et al, Rostov group.
+  It is still possible to work like before if compiling with mat_solve_gaussian.f routine in place of
+  mat_solve_MUMPS.f
+  Simulation are up to 40 times faster in FDM with MUMS. Results are the same.
+- Occupancy rate is now taking into account for atoms at the same site.
+  Scattering matrix is evaluated taking choosing the surrounding atoms corresponding with maximum rate
+  when more than one are at the same position.
+  Sum over xanes and scattering amplitudes corresponds to the occupancy rate.     
+- Fit on occupancy rates is now possible
+
+February 13th 2015
+- Bug found (with rare effect) when using spinorbit without magnetism.
+- In order to save memory space, the way of calculation of the variation with energy
+ of the interstitial potential is changed.
+ Give very tiny modification of the calculated spectra.
+- Modification of the default core-hole width. Follow now precisely Krauze and Oliver.
+The change is slight for K edge but bigger for L1, L2 and L3 edges.
+- Fundamental constant values (hbar, bohr, Rydb) given with last precision. 
+
+January 5th 2015
+- Other magnetic punctual groups were not found when rotation was needed. Now it is ok.
+- Bug recently incorporated for "Crystal_t" keyword fixed.
+In both cases the code stopped.
+- Specific bug occurring with gfortran compiler fixed.
+It needed the suppression of the "Length_word" keyword.
+
+---------------------------------------------------------------------------------------
+
+December 22nd 2014
+Bug fixed for the symmetry in magnetic system with symmetry 4'/mmm.
+
+December 11th 2014
+A bug fixed in case of antiferro-magnetic compounds (very special case).
+
+November 6th 2014
+Calculation of atomic scattering amplitudes (f', f") improved for the L23 edges.
+Extrapolation included for their calculation, and concatenation of the corresponding files
+before integration (well, it is rather technical... in other words it is easier for the user). 
+
+October 29th 2014 
+A bug fixed (I hope) when spin-orbit + Hubbard. Gave sometimes numerical instabilities.
+
+October 24th 2014
+A bug fixed in the search of equivalent atoms in magnetic systems for some symmetries.
+
+September 19th 2014
+A bug fixed in resonant scattering for antiferromagnetic systems.
+
+September 5th 2014
+A bug found in the magnetic non resonant scattering (for 5 years, gave zero...)
+
+September 3rd 2014
+A bug found in the linux compiler version (gave NaN...)
+
+July 18th 2014
+Bug (recent) found with "Hubbard + spinorbit".
+Keyword "Density_comp" introduced.
+Keyword "Doping" introduced.
+
+April 30th 2014
+Bug found on E_cut energy evaluation when excited valence occupation used (very rarely used).
+
+April 16th 2014
+Bug found in the automatic shift when summing non equivalent atoms. (old bug...)
+Bug found on keyword "EFermi" on linux.
+
+April 7th 2014
+Keyword Folder_dat included to choose the directory for spacegroup.txt and xsect.dat files.
+Routine are now called **.f90 and are in free format.
+
+March 28th 2014
+Stokes parameters included for resonant diffraction.
+Right and left definitions reversed (!).
+A bug corrected for forward scattering calculation, that is (h,k,l) = (0,0,0).
+Keyword "Folder_dat" included.
+
+-------------------------------------------------------------------------------------
+
+December 12th 2013
+A bug found in the "CXY" for data from Wien2k.
+
+December 10th 2013
+Bulk center case now included for potential coming from Wien2k.
+
+November 15th 2013
+Bug found in case of Perdew-Zang exchange-correlation potential.
+
+October 29th 2013
+Bug found occurring sometimes for self-consistent calculations in parallel mode.
+
+October 1st 2013
+Bug found for punctual group with complex representation (as C3, C3h, C4, C4h) with FDM.
+Bug present from May 2013.
+
+September 2013
+Formula corrected for the non-resonant magnetic amplitude (error in the Blume formula)
+Bug corrected in the birefringence correction.
+Bug (introduced in May) for m3m symmetry when working with FDM (gave 0!)
+Magnetic dipole transition in E1M1 and M1M1 corrected.
+Reading of pdb file included (Crystal_p)
+Reading of orientation matrix and DAFS reflections from experimental files (Dafs_exp)
+Keywords Z_absorber and Atom_conf included.
+There is a new file to compile (optic.f)
+
+May 27th 2013
+Magnetic dipole transition in E1M1 and M1M1 corrected.
+
+May 18th 2013
+Speediness of the code improved (vs 2013 version).
+
+May 3rd 2013
+E3E3 term included.
+
+April 26th 2013
+One bug corrected.
+
+April 17th 2013
+Bug corrected when Hubbard + Spinorbit. Density of state calculation improved.
+Minor bugs corrected.
+Note that there is no more the hubbard.f file to compile. (Hubbard staff is included in 
+other routines).
+
+-----------------------------------------------------------------------------------------
+
+November 2012
+One bug corrected in case of magnetic calculation using the One_run process.
+Modification of the interstitial potential in order to make the average  in area at distance less than 2.5 Angstroem from any atom (useful in some cases for molecules).
+
+July 9th 2012
+Optimization of the SCF (better convergence).
+One bug corrected for magnetic RXD calculation (rare occurrence).
+
+June 7th 2012
+SCF calculated by default with a fixed magnetic polarization.
+Hubbard energy correction included in the total energy.
+
+May 16th 2012
+Bug corrected when Linux + TDDFT (gave an aleatory error message).
+
+April 24th 2012
+Bug corrected when Hubbard + FDM.
+
+April 8th 2012
+Bug corrected in option "One_run".
+
+February 21th 2012
+One output format correction.
+
+February 15th 2012
+A bug corrected for calculation TDDFT + self-absorption.
+
+February 2nd 2012
+A bug corrected with spin orbit and imaginary energy.
+
+January 31st 2012
+Birefringence effect included
+Self-absorption for RXD improved
+Interstitial potential calculated in a better way.
+One_run option included.
+
+-----------------------------------------------------------------------------------------
+
+August 12th 2011
+Some bugs fixed in the "scan" part for RXD.
+
+May 18th 2011
+Correction bug on reading of keyword "Self-abs".
+
+April 30th 2011
+Minor bugs corrected. Default edge width modified for Mn, Sc, V, Ti L23.
+
+March 18th 2011
+Minor bugs corrected. Detectable only with specific compilers.
+
+March 2011
+Minor bugs corrected.
+TDDFT part is by default with spinorbit.
+In LAPW, atomic radius is by default the Norman one.
+
+February 2011
+Relative shift of initial states calculated, including magnetic shift.
+By default, L23 and M45 are now calculated without core-hole.
+By default, broadenings at L2 and L3 have different widths.
+Default atomic radius replaced by the Norman radius when the default is too big or too small. 
+Hubbard correction included.
+TDDFT calculation included with local Kernel.
+
+-----------------------------------------------------------------------------------------
+
+August 4th 2010
+Correction of a bug for the Wien2k interface when structure is not cubic or tetragonal.
+For Wien2k interface, no more need in general to modify the number of radius point.
+Calculation of energy of core state now relativistic.
+Definition of starting energy for SCF slightly improved.
+
+July 6th 2010
+Some minor bugs corrected.
+
+June 1st 2010
+- One bug corrected and existing from version March 2009: the magnetic E1E2 was not calculated!
+- E1M1 and M1M1 component now calculated.
+
+May 11th 2010
+- Some bugs corrected in Hubbard and symmetrization in multiple scattering mode.
+
+March 22nd 2010
+- Symmetrization in the multiple scattering mode in the spin-orbit case (thus calculations faster).
+- Hubbard correction implemented
+- TDDFT calculation implemented
+- Some Variables not initialized, now initialized (gave error with specific compilers).
+
+February 1st 2010
+Two minor bugs corrected.
+
+-----------------------------------------------------------------------------------------
+
+May 2009
+One bug corrected in case of punctual symmetry S6.
+
+July 2009 2th
+Some bugs corrected. Convolution slightly modified for XANES.
+
+December 2009
+Bug corrected in the magnetic case with spin-orbit for trigonal symmetry.
+Keyword "scan_conv" created to write the output file name of the scan convoluted file.
+Crossing spin term is now taking into account. This changes very slightly calculations with spin-orbit
+at L23 and M45 edges. (No differences at K edges). 
+
+December 31st 2009
+Bug corrected in Radial Matrix when two edges for E0 and E2 term.
+
+---------------------------------------------------------------------------------------
+
+August 2008 - March 2009
+- Self-consistent calculation included.
+- Some modifications for the evaluation of the muffin-tin radius (in some case values were wrong).
+- The sign of the E1E2 component is changed for DAFS. 
+- There is no more the nesparam.inc file. There is a new file : scf.f.
+
+June and July 2008
+- Some other bugs corrected
+
+May 2008
+- Some bugs corrected
+
+April 2008
+- sigma polarization defined reverse.
+- azimuth defined anti-clock wise for the rotation of the crystal around the Q axis.
+- Atomic potential calculated more precisely.
+
+
+March 2008
+- Symmetrization of the multiple scattering calculation (but with spin-orbit).
+- Calculation of negative energy in multiple scattering.
+- Photoemission calculation.
+- Improvement of the MPI.
+
+---------------------------------------------------------------------------------------
+
+March-June 2007
+- Many modification the program in order to improve the speed when working in FDM model.
+  Real only with the existence of 3 fold axis and sometimes with 4 fold axis. 
+- Non parallel spin axis are now possible
+- With MPI, results are given continuously during the job and not just at the end.
+- Different bugs were corrected.
+
+14 February 2007
+- In routine Symsite, declaration of base_orth as logical forgotten previously. Gave problem
+in compilation with some compiler
+
+6 February 2007
+- Bug found and corrected for the automatic screening in magnetic configuration
+when the non-excited electronic configuration is such that there is less than
+ half electron free for one of the spin for the orbital where comes the screening electron
+(very rare situation).
+- Establishment of the groups of equivalent atoms made less memory consuming. Previously
+when the number of non-equivalent atoms was to high one got stack overflow.
+
+19 January 2007
+- Bug found and corrected when symmetry plane along y=z (or x=z) and no symmetry
+ plane for y=0 and z=0 (or x=0 and z=0). (occurred just in FDM).
+
+15 January 2007
+- Bug found and corrected when 2 fold axis along x (or y) and symmetry plane
+ along y=z (or x=z). (Occurred just in FDM).
+
+10 January 2007
+- Abnormal memory increase under MPI on some compiler corrected (by R. Wilcke)
+- Bad initialization of naltm parameter corrected (previously could stop the program).
+
+8 January 2007
+- For 1 year, for the 4f elements, the screening was by default on the 5d, 
+  it is now again by default on the 4f.
+--> This can modify the results comparing with previous version
+- Better output in bav file to get the atomic electronic configurations.
+

@@ -5,7 +5,11 @@ import numpy as np
 def sign(x): return math.copysign(1, x)
 
 
-def normalize(v): return v/np.linalg.norm(v)
+def normalize(v):
+    n = np.linalg.norm(v)
+    if n > 0:
+        return v/np.linalg.norm(v)
+    else: return np.zeros(v.size)
 
 
 def relDist(a, b):

@@ -1,255 +1,10 @@
-import os, copy, sklearn, shutil, random, itertools, statsmodels, warnings
+import os, copy, sklearn, shutil, itertools, statsmodels, warnings, scipy.signal, scipy.interpolate
 from . import ML, mixture, utils, plotting, smoothLib, curveFitting
-from scipy.optimize import minimize
-from ipywidgets import interact
-import ipywidgets as widgets
 import numpy as np
 import pandas as pd
-import scipy.signal
-import scipy.interpolate
 from scipy.spatial import distance
 from sklearn.exceptions import ConvergenceWarning
 import matplotlib.pyplot as plt
-if utils.isLibExists("lightgbm"):
-    import lightgbm as lgb
-
-
-def plotting_spectra(sample, to_delete, centering, normalize):
-    energy, spectra, parameters = sample.energy, sample.spectra.values.T, sample.params.values
-    if centering:
-        spectra = spectra - np.mean(spectra, axis=1, keepdims=True)
-        if normalize:
-            spectra = spectra / np.std(spectra, axis=1, keepdims=True)
-    if to_delete is not None:
-        spectra = np.delete(spectra,np.sort(to_delete),1)
-        parameters = np.delete(parameters,np.sort(to_delete),0)
-
-    def Range(s):
-        v1 = s[0]
-        v2 = s[1]
-        fig,ax = plotting.createfig(interactive=True, figsize=(13,5))
-        ax.plot(energy[v1:v2], spectra[v1:v2], linewidth=0.1, color='blue')
-        ax.set_xlabel('Energy', fontweight='bold')
-        ax.set_ylabel('Absorption', fontweight='bold')
-        ax.axvline(x=energy[v1], color='black', linestyle='--')
-        ax.axvline(x=energy[v2], color='black', linestyle='--')
-        ax.grid()
-
-    _ = interact(Range,s=widgets.IntRangeSlider(
-            value=[0,len(energy)-1],
-            min=0,
-            max=len(energy)-1,
-            step=1,
-            description='Energy:',
-            disabled=False,
-            continuous_update=False,
-            orientation='horizontal',
-            readout=True,
-            readout_format='d',
-        ))
-    p = pd.DataFrame(data=parameters, columns=sample.params.columns)
-    s = pd.DataFrame(data=spectra.T, columns=sample.spectra.columns)
-    res = ML.Sample(p, s)
-    return res
-
-
-def error(spectra,nPCs):
-    u,s,vT=np.linalg.svd(spectra,full_matrices=False)
-    ur=u[:,:nPCs]
-    sr=np.diag(s[:nPCs])
-    vr=vT[:nPCs,:]
-    #print('Ur:',ur.shape,'Sr:',sr.shape,'Vr:',vr.shape)
-    snew=np.dot(np.dot(ur,sr),vr)
-    return np.mean(np.sqrt(np.mean((spectra-snew)**2, axis=1))/np.sqrt(np.mean((spectra)**2, axis=1)))
-
-
-def plot_error(s,error_plot):
-    fig,ax = plotting.createfig(interactive=True, nrows=1, ncols=2, figsize=(13,5))
-    ax[0].plot(np.arange(1,21),s[0:20],'-o',label='Scree Plot',color='blue')
-    ax[0].set_xlabel('PCs',fontweight='bold')
-    ax[0].set_ylabel('Singular Values',fontweight='bold')
-    ax[0].grid()
-    ax[1].plot(np.arange(1,21),error_plot,'-o',label='Scree Plot',color='red')
-    ax[1].set_xlabel('PCs',fontweight='bold')
-    ax[1].set_ylabel('Error',fontweight='bold')
-    ax[1].grid()
-
-
-def statistic(spectra,log_scale,number=20):
-    u,s,v=np.linalg.svd(spectra)
-    v=v.T
-    error_plot=[]
-    for i in range(0,number):
-        error_plot.append(error(spectra,i))
-
-    if log_scale==True:
-        s=np.log10(s)
-        error_plot=np.log10(error_plot)
-        plot_error(s,error_plot)
-    elif log_scale==False:
-        s=s
-        error_plot=error_plot
-        plot_error(s,error_plot)
-    elif log_scale !=False and log_scale !=True:
-        print('Error in log_scale name')
-
-
-def cross_val_predict(method, X, y):
-    cv = sklearn.model_selection.KFold(n_splits=7, shuffle=True, random_state=0)
-    res = np.zeros(y.shape)
-    for train_index, test_index in cv.split(X):
-        X_train, X_test = X[train_index], X[test_index]
-        y_train, y_test = y[train_index], y[test_index]
-        method.fit(X_train, y_train)
-        res[test_index] = method.predict(X_test).reshape(-1)
-    return res
-
-
-def buildDescriptor(spectra, descriptor_type='PCA'):
-    if descriptor_type == 'PCA':
-        u,s,vT=np.linalg.svd(spectra,full_matrices=False)
-        s=np.diag(s)
-        C = np.dot(s,vT).T
-    elif descriptor_type == 'intervals average':
-        m = 10
-        spectraT = spectra.T
-        C = np.zeros((spectraT.shape[0], m))
-        for i in range(m):
-            ne = spectraT.shape[1]
-            C[:,i] = np.mean(spectraT[:, ne*i//m:ne*(i+1)//m], axis=1)
-    else: raise Exception('Error in typing regressor name')
-    return C
-
-
-def training(descriptor, parameters, regressor_name, number=10):
-    if number>descriptor.shape[1]: number = descriptor.shape[1]
-    clf = [None]*number
-    for i in range(number):
-        y = descriptor[:,i]
-        if regressor_name=='Ridge':
-            clf[i] = sklearn.linear_model.RidgeCV()
-        elif regressor_name=='ExtraTrees':
-            clf[i] = sklearn.ensemble.ExtraTreesRegressor(n_estimators=100,random_state=0,min_samples_leaf=10)
-        elif regressor_name=='RBF':
-            clf[i] = ML.RBF(function='linear', baseRegression='linear')
-        else:
-            print('Error in typing regressor name')
-        clf[i].fit(parameters, y)
-    return clf
-
-def plot_training_error(descriptor, parameters, clf):
-    graf=[]
-    number = len(clf)
-    for i in range(number):
-        y = descriptor[:,i]
-        pred = cross_val_predict(clf[i], parameters, y)
-        graf.append(sklearn.metrics.r2_score(y, pred)*100)
-    fig,ax = plotting.createfig(interactive=True, figsize=(13,5))
-    ax.plot(np.arange(1,number+1),graf,'-o')
-    ax.set_ylabel('Quality %',fontweight='bold')
-    ax.set_xlabel('PCs',fontweight='bold')
-    ax.grid()
-
-def create_C_plot(val1,val2,dim_param,npt,PC,min_val,max_val):
-    if val1 == val2:
-        print('Error: The two values are the same')
-    elif np.remainder(val1,1) !=0 or np.remainder(val2,1) !=0:
-        print('Chosed not integer values')
-    else:
-        matrix_values=np.zeros((npt**2,dim_param))
-        var_vector=np.array(np.meshgrid(np.linspace(min_val, max_val,npt), np.linspace(min_val, max_val,npt))).T.reshape(-1,2)
-        matrix_values[:,val1]=var_vector[:,0]
-        matrix_values[:,val2]=var_vector[:,1]
-        matrix_grid=np.zeros(matrix_values.shape[0])
-        for i in range(matrix_values.shape[0]):
-            matrix_grid[i]=clf[PC].predict(matrix_values[i].reshape(1,-1))
-        return matrix_grid.reshape(npt,npt)
-
-def twoDmap(clf,param,npt,min_val,max_val):
-    dim_param=np.shape(param.values)[1]
-    def selectPC(number):
-        control=number
-        def selectP1(s1):
-            val1=s1
-            def selectP2(s2):
-                val2=s2
-                if val1 == val2:
-                    return(print('The two values are the same'))
-                else:
-                    matrix_values=np.zeros((npt**2,dim_param))
-                    var_vector=np.array(np.meshgrid(np.linspace(min_val, max_val,npt), np.linspace(min_val, max_val,npt))).T.reshape(-1,2)
-                    matrix_values[:,val1]=var_vector[:,0]
-                    matrix_values[:,val2]=var_vector[:,1]
-                    matrix_grid=np.zeros(matrix_values.shape[0])
-                    for i in range(matrix_values.shape[0]):
-                        matrix_grid[i]=clf[number].predict(matrix_values[i].reshape(1,-1))
-                    x= np.linspace(min_val, max_val,npt)
-                    y= np.linspace(min_val, max_val,npt)
-                    X,Y=np.meshgrid(x,y)
-                    Z=matrix_grid.reshape(npt,npt)
-                    dgy,dgx=np.gradient(Z)
-                    fig = plt.figure(figsize=(13,5))
-                    ax = fig.gca()
-                    surf=ax.contourf(X, Y, Z, 30,cmap='Spectral')
-                    ax.tick_params(direction='in',labelsize=15,width=2)
-                    ax.set_xlabel(param.keys()[val1],fontweight='bold')
-                    ax.set_ylabel(param.keys()[val2],fontweight='bold')
-                    fig.colorbar(surf)
-                    ax.streamplot(X, Y, dgx,dgy,color='black')
-            _=interact(selectP2, s2 = widgets.BoundedIntText(value=1, min=0, max=dim_param-1, step=1, description='p2:', disabled=False))
-        _=interact(selectP1, s1 = widgets.BoundedIntText(value=0, min=0, max=dim_param-1, step=1, description='p1:', disabled=False))
-    _=interact(selectPC, number = widgets.BoundedIntText(value=0, min=0, max=20, step=1, description='PC:', disabled=False))
-
-def iso(parameters,PC,C,clf):
-    return (C-clf[PC].predict(parameters.reshape(1,-1))[0])**2
-
-def find_isosurface(param,min_val,max_val,clf,iso_param):
-    PC=iso_param[0]
-    C=iso_param[1]
-    p1=iso_param[2]
-    p2=iso_param[3]
-    #C = C_vector[PC]
-    #C = C_values
-    dim=np.shape(param.values)[1]
-    p_values=np.zeros((1000,2))
-    bnds=np.zeros((dim,2))
-    for i in range(len(bnds)):
-        bnds[p1]=[min_val,max_val]
-        bnds[p2]=[min_val,max_val]
-    for i in range(1000):
-        p=np.zeros(dim)
-        p[p1]=random.uniform(-0.2, 0.2)
-        p[p2]=random.uniform(-0.2, 0.2)
-        #res=minimize(iso, p,args=(PC,C),bounds=bnds)#bounds=bnds)
-        res=minimize(iso, p,args=(PC,C,clf),bounds=bnds)
-        p_values[i][0]=res.x[p1]
-        p_values[i][1]=res.x[p2]
-    return p_values
-
-def plot_isosurfaces(g1,g2,iso_param_1,iso_param_2,param):
-    fig,ax=plotting.createfig(interactive=True, nrows=1, ncols=3, figsize=(13,5))
-    if iso_param_1[2] != iso_param_2[2] or iso_param_1[3] != iso_param_2[3]: print('Error Not common parameters chosen for the plot')
-    else:
-        ax[0].set_title('PC:'+str(iso_param_1[0]))
-        ax[0].plot(g1[:,0],g1[:,1],'o')
-        ax[0].set_xlim(-0.22,0.22)
-        ax[0].set_ylim(-0.22,0.22)
-        ax[0].set_xlabel(param.keys()[iso_param_1[2]],fontweight='bold')
-        ax[0].set_ylabel(param.keys()[iso_param_1[3]],fontweight='bold')
-        ax[0].grid()
-        ax[1].set_title('PC:'+str(iso_param_2[0]))
-        ax[1].plot(g2[:,0],g2[:,1],'o',color='orange')
-        ax[1].set_xlim(-0.22,0.22)
-        ax[1].set_ylim(-0.22,0.22)
-        ax[1].set_xlabel(param.keys()[iso_param_1[2]],fontweight='bold')
-        ax[1].set_ylabel(param.keys()[iso_param_1[3]],fontweight='bold')
-        ax[1].grid()
-        ax[2].set_title('Merging Plot')
-        ax[2].plot(g1[:,0],g1[:,1],'o')
-        ax[2].plot(g2[:,0],g2[:,1],'o',color='orange')
-        ax[2].set_xlabel(param.keys()[iso_param_1[2]],fontweight='bold')
-        ax[2].set_ylabel(param.keys()[iso_param_1[3]],fontweight='bold')
-        ax[2].grid()
 
 
 def findExtrema(sample, extremaType, energyInterval, maxRf=.1, allowExternal=True, maxExtremumPointsDist=5, intensityNormForMaxExtremumPointsDist=1, maxAdditionIter=-1, refineExtremum=True, extremumInterpolationRadius=10, returnIndices=False, plotToFile=None):
@@ -324,7 +79,6 @@ def findExtrema(sample, extremaType, energyInterval, maxRf=.1, allowExternal=Tru
         newGood = copy.deepcopy(good)
         newBad = copy.deepcopy(bad)
         sortedIndices = np.argsort(d)
-        goodExtrIntensities = list(map(lambda x: intensities[x[0]][x[1]], good))
         for badIndex in range(d.shape[0]):
             for goodIndex in sortedIndices[badIndex]:
                 # filtering those which exceed max rfactor
@@ -535,45 +289,6 @@ def stableExtrema(spectra, energy, extremaType, energyInterval, plotFolderPrefix
     return descr, goodSpectrumIndices
 
 
-def stableExtremaOld(spectra, energy, extremaType, energyInterval, fitByPolynomDegree=2, plotResultToFolder=None, plotBadOnly=True):
-    assert extremaType in ['min', 'max'], 'invalid extremaType'
-    assert fitByPolynomDegree in [2,3]
-    extrema_x = np.zeros(len(spectra))
-    extrema_y = np.zeros(len(spectra))
-    extrema_sharpness = np.zeros(len(spectra))
-    for i in range(len(spectra)):
-        spectrum = utils.Spectrum(energy, spectra[i])
-        if plotResultToFolder is None:
-            extrema, extrema_val, d2val = findExtremumByFit(spectrum, energyInterval, fitByPolynomDegree)
-        else:
-            ds, poly = findExtremumByFit(spectrum, energyInterval, fitByPolynomDegree, returnPolynomGraph=True)
-            extrema, extrema_val, d2val = ds
-        if fitByPolynomDegree==2:
-            if extremaType == 'min':
-                assert d2val[0]>=0, 'There is no min for spectrum '+str(i)+' on interval '+str(energyInterval)
-            else:
-                assert d2val[0]<=0, 'There is no max for spectrum '+str(i)+' on interval '+str(energyInterval)
-        j = -1 if extremaType == 'min' else 0
-        extrema_x[i] = extrema[j]
-        extrema_y[i] = extrema_val[j]
-        extrema_sharpness[i] = d2val[j]
-        if plotResultToFolder is not None:
-            if i == 0:
-                if os.path.exists(plotResultToFolder): shutil.rmtree(plotResultToFolder)
-                os.makedirs(plotResultToFolder, exist_ok=True)
-            if plotBadOnly and (extrema_x[i]<energy[0] or extrema_x[i]>energy[-1]):
-                fig, ax = plotting.createfig()
-                ax.plot(energy, poly(energy), label='polynom')
-                ax.plot(energy, spectra[i], label='spectrum')
-                d = np.max(spectra[i])-np.min(spectra[i])
-                ax.set_ylim(np.min(spectra[i])-d*0.1, np.max(spectra[i])+d*0.1)
-                ax.scatter([extrema_x[i]], [extrema_y[i]], 10)
-                ax.legend()
-                plotting.savefig(plotResultToFolder+os.sep+str(i)+'.png', fig)
-                plotting.closefig(fig)
-    return np.array([extrema_x,extrema_y,extrema_sharpness]).T
-
-
 def pcaDescriptor(spectra, count=None, returnU=False, U=None):
     """Build pca descriptor.
     
@@ -641,6 +356,7 @@ def addDescriptors(sample, descriptors):
         else: newD.append(d)
     descriptors = newD
     goodSpectrumIndices_all = None
+    unique_names = []
     for d in descriptors:
         typ = d['type']
         params = copy.deepcopy(d)
@@ -649,6 +365,14 @@ def addDescriptors(sample, descriptors):
         if 'columnName' in params:
             name = params['columnName']
             del params['columnName']
+        name1 = name
+        i = 1
+        while name1 in unique_names:
+            name1 = f'{name}{i}'
+            i += 2
+        name = name1
+        unique_names.append(name)
+
         if typ == 'stableExtrema':
             assert 'extremaType' in params
             if name == typ:
@@ -693,12 +417,14 @@ def addDescriptors(sample, descriptors):
 
                 def defaultSelector(extr_energies, extr_intensities, spectrum, params):
                     if len(extr_energies) > 0:
-                        best_ind = np.argmax(sign*extr_intensities)
+                        best_ind = np.argmax(sign * extr_intensities)
+                        return extr_energies[best_ind], extr_intensities[best_ind]
                     else:
                         best_ind = np.argmax(sign * spectrum.intensity)
-                    return extr_energies[best_ind], extr_intensities[best_ind]
+                        return spectrum.energy[best_ind], spectrum.intensity[best_ind]
                 selector = params['selector'] if 'selector' in params else defaultSelector
-                extr_e, _ = selector(sp.energy[all_extr_ind], sp.intensity[all_extr_ind], sp, ps)
+                e,inte = (sp.energy[all_extr_ind], sp.intensity[all_extr_ind]) if len(all_extr_ind)>0 else ([],[])
+                extr_e, _ = selector(e, inte, sp, ps)
                 extr_i = np.where(sp.energy >= extr_e)[0][0]
                 ai = max(0, extr_i-2)
                 bi = min(ai+5, len(sp.energy))
@@ -808,7 +534,7 @@ def addDescriptors(sample, descriptors):
     return sample, goodSpectrumIndices_all
 
 
-def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names=None, folder='.'):
+def plotDescriptors1d(data, spectra, energy, label_names, desc_points_names=None, folder='.'):
     """Plot 1d graphs of descriptors vs labels
     
     Args:
@@ -830,7 +556,7 @@ def plot_descriptors_1d(data, spectra, energy, label_names, desc_points_names=No
         os.makedirs(folder+os.sep+'by_label'+os.sep+label, exist_ok=True)
         if label not in data.columns: continue
 
-        fig = plotting.plotSample(energy, spectra, color_param=data[label].values, sortByColors=False, fileName=None)
+        fig = plotting.plotSample(energy, spectra, colorParam=data[label].values, sortByColors=False, fileName=None)
         ax = fig.axes[0]
         for desc_points in desc_points_names:
             ax.scatter(data[desc_points[0]], data[desc_points[1]], 10)
@@ -865,7 +591,7 @@ def getXYFromSample(sample, features, label_names, textColumn=None):
 
     Args:
         sample:  sample or DataFrame with descriptors and labels
-        features (list of strings or string): features to use, or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together)
+        features (list of strings or string): features to use, or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
         label_names (list)
         textColumn (str): title of column to use as names
     """
@@ -878,14 +604,27 @@ def getXYFromSample(sample, features, label_names, textColumn=None):
     else:
         assert isinstance(sample, ML.Sample)
         data = sample.params
-        if isinstance(features, str):
-            if features == 'spectra': features = 'spectra_d_0'
-            assert features[:10] == 'spectra_d_', features
-            diffs = [int(s) for s in features[10:].split(',')]
-            X = getSpectraFeatures(sample, diff=diffs)
-        else:
-            X = data.loc[:, features].to_numpy()
-            assert not (set(label_names) & set(features))
+        if isinstance(features, str): features = [features]
+        X = None
+        for fs in features:
+            if 'spectra' in fs:
+                # determine spType
+                if fs[:len('spectra')] != 'spectra':
+                    i = fs.rfind(' ')
+                    assert i>0
+                    spType = fs[:i]
+                    fs = fs[i+1:]
+                else: spType = sample.getDefaultSpType()
+                if fs == 'spectra': fs = 'spectra_d_0'
+                assert fs[:10] == 'spectra_d_', features
+                diffs = [int(s) for s in fs[10:].split(',')]
+                X1 = getSpectraFeatures(sample, diff=diffs, spType=spType)
+            else:
+                X1 = data.loc[:, fs].to_numpy()
+                if len(X1.shape) == 1: X1 = X1.reshape(-1,1)
+                assert not (set(label_names) & set(fs))
+            if X is None: X = X1
+            else: X = np.hstack((X,X1))
     y = data.loc[:, label_names].to_numpy()
     if textColumn is None:
         return X, y
@@ -917,7 +656,11 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
     X,Y = getXYFromSample(sample, features, label_names)
     if printDebug:
         print('Try predict by:', features)
-    tryParams = [{'n_estimators': 40, 'min_samples_leaf': 4}, {'n_estimators': 40, 'min_samples_leaf': 1}]
+    n_estimators = 40
+    if X.shape[1] > 5: n_estimators = 100
+    if X.shape[1] > 10: n_estimators = 200
+    tryParams = [{'n_estimators': n_estimators, 'min_samples_leaf': 4}, {'n_estimators': n_estimators, 'min_samples_leaf': 1}]
+    if X.shape[0] > 500: tryParams = [{'n_estimators': n_estimators}]
     for il, label in enumerate(label_names):
         y = Y[:,il]
         classification = ML.isClassification(y)
@@ -984,7 +727,7 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
     return result
 
 
-def plot_quality_2d(features, label_data, markersize=500, alpha=1, title='', fileName=None, plotMoreFunction=None, plot_axes=None):
+def plot_quality_2d(features, label_data, markersize=None, alpha=None, title='', fileName=None, plotMoreFunction=None, plot_axes=None):
     """
 
     :param features: DataFrame to use as features
@@ -1020,7 +763,7 @@ def check_done(allTrys, columns):
     return False
 
 
-def descriptor_quality(data, label_names, all_features, feature_subset_size=2, cv_parts_count=10, cv_repeat=5, unknown_data=None, textColumn=None, model_class=None, model_regr=None, folder='quality_by_label', printDebug=False):
+def descriptorQuality(data, label_names, all_features, feature_subset_size=2, cv_parts_count=10, cv_repeat=5, unknown_data=None, textColumn=None, model_class=None, model_regr=None, folder='quality_by_label', printDebug=False):
     """Calculate cross-validation result for all feature subsets of the given size for all labels
     
     Args:
@@ -1110,7 +853,7 @@ def descriptor_quality(data, label_names, all_features, feature_subset_size=2, c
                 data1.to_excel(folder + os.sep + label + '_sort_by_exp.xlsx', index=False)
 
 
-def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, folder_prefix='', unknown=None, markersize=500, textsize=8, alpha=1, cv_count=2, plot_only='', doNotPlotRemoteCount=0, textColumn=None, additionalMapPlotFunc=None):
+def plotDescriptors2d(data, descriptor_names, label_names, labelMaps=None, folder_prefix='', unknown=None, markersize=None, textsize=None, alpha=None, cv_count=2, plot_only='', doNotPlotRemoteCount=0, textColumn=None, additionalMapPlotFunc=None, cmap='seaborn husl', edgecolor=None, textcolor=None, linewidth=None, dpi=None, plotPadding=0.1):
     """Plot 2d prediction map.
     
         :param data: (pandas dataframe)  data with descriptors and labels
@@ -1122,9 +865,17 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
         :param doNotPlotRemoteCount: (integer) calculate mean and do not plot the most remote doNotPlotRemoteCount points
         :param textColumn: if given, use to put text inside markers
         :param additionalMapPlotFunc: function(ax) to plot some additional info
+        :param cmap: pyplot color map name, or 'seaborn ...' - seaborn
         returns: saves all graphs to two folders: folder_prefix_by_label, folder_prefix_by descriptors
     """
     assert len(descriptor_names) == 2
+    assert plot_only in ['', 'data', 'data and quality']
+    if edgecolor is None:
+        edgecolor = '#DDD' if plot_only == '' else '#555'
+    if linewidth is None:
+        linewidth = 1
+    if textcolor is None:
+        textcolor = '#FFF' if plot_only == '' else '#000'
     if labelMaps is None: labelMaps = {}
     folder = folder_prefix + '_by_descriptors'+os.sep+descriptor_names[0]+'_'+descriptor_names[1]
     # if os.path.exists(folder): shutil.rmtree(folder)
@@ -1134,8 +885,7 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
     os.makedirs(folder2, exist_ok=True)
     if plot_only != 'data':
         qualityRes = getQuality(data, descriptor_names, label_names, m=1, cv_count=cv_count, returnModels=True)
-
-    colorMap = 'gist_rainbow'
+    colorMap = plotting.parseColorMap(cmap)
     x = data[descriptor_names[0]].to_numpy()
     y = data[descriptor_names[1]].to_numpy()
     if doNotPlotRemoteCount > 0:
@@ -1147,6 +897,17 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
         good_ind = np.setdiff1d(np.arange(len(x)), bad_ind)
         x = x[good_ind]
         y = y[good_ind]
+    x1 = x if unknown is None else np.concatenate([x, unknown[descriptor_names[0]]])
+    y1 = y if unknown is None else np.concatenate([y, unknown[descriptor_names[1]]])
+
+    def getScatterParams(fig):
+        defaultMarkersize, defaulAlpha = plotting.getScatterDefaultParams(x1, y1, fig.dpi)
+        markersize1 = defaultMarkersize if markersize is None else markersize
+        alpha1 = defaulAlpha if alpha is None else alpha
+        if plot_only == '': alpha1 = 1
+        textsize1 = markersize1/2 if textsize is None else textsize
+        return markersize1, alpha1, textsize1
+
     for label in label_names:
         if label not in data.columns: continue
         if plot_only != 'data':
@@ -1162,26 +923,27 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
             fileName2 = folder2 + os.sep + label + os.sep + f'{descriptor_names[0]}  {descriptor_names[1]}'
         else:
             fileName2 = folder2 + os.sep + label + os.sep + f'{quality:.2f} {descriptor_names[0]}  {descriptor_names[1]}'
-        fig, ax = plotting.createfig()
-
-        c = labelData
-        assert np.all(pd.notnull(c))
-        c_min = np.min(c); c_max = np.max(c)
+        fig, ax = plotting.createfig(figdpi=dpi, interactive=True)
+        markersize, alpha, textsize = getScatterParams(fig)
+        assert np.all(pd.notnull(labelData))
+        c_min = np.min(labelData); c_max = np.max(labelData)
         transform = lambda r: (r-c_min) / (c_max - c_min)
         if plot_only == '':
             # contours
-            x_min, x_max = np.min(x), np.max(x)
+            x_min, x_max = np.min(x1), np.max(x1)
             x_min, x_max = x_min-0.2*(x_max-x_min), x_max+0.2*(x_max-x_min)
-            y_min, y_max = np.min(y), np.max(y)
+            y_min, y_max = np.min(y1), np.max(y1)
             y_min, y_max = y_min-0.2*(y_max-y_min), y_max+0.2*(y_max-y_min)
             xx, yy = np.meshgrid(np.linspace(x_min, x_max, 200), np.linspace(y_min, y_max, 200))
             preds0 = model.predict(np.hstack((xx.reshape(-1, 1), yy.reshape(-1, 1))))
             preds = transform(preds0.reshape(xx.shape))
         # print(label,'- classification =', ML.isClassification(data, label))
-        if ML.isClassification(data, label):
-            ticks = np.unique(data[label])
-            # levels = transform( np.append( np.unique(data[label]), data[label].max()+1 ) )
-            levels = transform( np.append( ticks-0.5, np.max(ticks)+0.5 ) )
+        isClassification = ML.isClassification(data, label)
+        if isClassification:
+            ticks = np.unique(labelData)
+            h_tick = np.unique(ticks[1:] - ticks[:-1])[0]
+            assert np.all(ticks[1:] - ticks[:-1] == h_tick), f'contourf use middles between levels to set colors of areas - so if labels are not equally spaced, we have to use labelMaps and equally spaces label ids.\nLabel = {label}'
+            levels = transform(np.append(ticks - h_tick/2, np.max(ticks) + h_tick/2))
             ticksPos = transform(ticks)
         else:
             ticks = np.linspace(data[label].min(), data[label].max(), 10)
@@ -1199,31 +961,33 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
             cont_data.to_csv(fileName2+'.csv', index=False)
 
         # known
+        c = labelData
         c = transform(c)
-        linewidth = 1 if plot_only == '' else 0
-        sc = ax.scatter(x, y, markersize, c=c, cmap=colorMap, vmin=0, vmax=1, alpha=alpha, linewidth=linewidth, edgecolor='black')
+        sc = ax.scatter(x, y, s=markersize**2, c=c, cmap=colorMap, vmin=0, vmax=1, alpha=alpha, linewidth=linewidth, edgecolor=edgecolor)
         if plot_only == '':
             c = transform(predictions)
             if doNotPlotRemoteCount > 0: c = c[good_ind]
-            ax.scatter(x, y, markersize/10, c=c, cmap=colorMap, vmin=0, vmax=1)
+            ax.scatter(x, y, s=(markersize/3)**2, c=c, cmap=colorMap, vmin=0, vmax=1)
 
         if plot_only != '': plotting.addColorBar(sc, fig, ax, labelMaps, label, ticksPos, ticks)
         else: plotting.addColorBar(CF, fig, ax, labelMaps, label, ticksPos, ticks)
 
         # unknown
         if unknown is not None:
-            umarkersize = markersize * 2**2
+            umarkersize = markersize * 1.2
             if plot_only == '':
                 pred_unk = model.predict(unknown.loc[:,descriptor_names])
                 c_params = {'c':transform(pred_unk), 'cmap':colorMap}
             else: c_params = {'c':'white'}
-            ax.scatter(unknown[descriptor_names[0]], unknown[descriptor_names[1]], umarkersize, **c_params, vmin=0, vmax=1, edgecolor='black')
+            ax.scatter(unknown[descriptor_names[0]], unknown[descriptor_names[1]], s=umarkersize**2, **c_params, vmin=0, vmax=1, edgecolor='black')
             for i in range(len(unknown)):
                 if textColumn is None:
                     name = str(i)
                 else:
                     name = unknown.loc[i,textColumn]
-                ax.text(unknown.loc[i, descriptor_names[0]], unknown.loc[i, descriptor_names[1]], name, ha='center', va='center', size=np.sqrt(umarkersize)/2)
+                if textsize == 0: umarkerTextSize = umarkersize/2
+                else: umarkerTextSize = textsize
+                ax.text(unknown.loc[i, descriptor_names[0]], unknown.loc[i, descriptor_names[1]], name, ha='center', va='center', size=umarkerTextSize, color=textcolor)
 
         # text
         if textsize>0:
@@ -1233,50 +997,61 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
                     name = i
                 else:
                     name = data.loc[i,textColumn]
-                ax.text(data.loc[i,descriptor_names[0]], data.loc[i,descriptor_names[1]], str(name), ha='center', va='center', size=textsize)
+                ax.text(data.loc[i,descriptor_names[0]], data.loc[i,descriptor_names[1]], str(name), ha='center', va='center', size=textsize, color=textcolor)
 
         ax.set_xlabel(descriptor_names[0])
         ax.set_ylabel(descriptor_names[1])
-        if plot_only == '':
-            ax.set_title(f'{label} prediction. Acc = {quality:.2f}')
+        if plot_only != 'data':
+            qt = 'Accuracy' if isClassification else 'R2-score'
+            ax.set_title(f'{label} prediction. {qt} = {quality:.2f}')
         else:
             ax.set_title(label)
-        ax.set_xlim(plotting.getPlotLim(x))
-        ax.set_ylim(plotting.getPlotLim(y))
+        ax.set_xlim(plotting.getPlotLim(x, gap=plotPadding))
+        ax.set_ylim(plotting.getPlotLim(y, gap=plotPadding))
+        if unknown is not None:
+            ax.set_xlim(plotting.getPlotLim(np.concatenate([x, unknown[descriptor_names[0]]]), gap=plotPadding))
+            ax.set_ylim(plotting.getPlotLim(np.concatenate([y, unknown[descriptor_names[1]]]), gap=plotPadding))
         if additionalMapPlotFunc is not None:
             additionalMapPlotFunc(ax)
         plotting.savefig(fileName1+'.png', fig)
         plotting.savefig(fileName2+'.png', fig)
-        plotting.closefig(fig)
+        plotting.closefig(fig, interactive=True)
 
         # plot CV result
         if plot_only == '':
-            fig, ax = plotting.createfig()
-            xx = labelData; yy = predictions
+            xx = labelData
+            yy = predictions
             if doNotPlotRemoteCount > 0: yy = yy[good_ind]
-            cx = transform(xx)
-            cy = transform(yy)
-            sc = ax.scatter(xx, yy, markersize, c=cx, cmap=colorMap, vmin=0, vmax=1, alpha=alpha, linewidth=1, edgecolor='black')
-            ax.scatter(xx, yy, markersize / 10, c=cy, cmap=colorMap, vmin=0, vmax=1)
-            plotting.addColorBar(sc, fig, ax, labelMaps, label, ticksPos, ticks)
-            if textsize > 0:
-                k = 0
-                for i in range(data.shape[0]):
-                    if doNotPlotRemoteCount > 0 and i not in good_ind: continue
-                    if textColumn is None:
-                        name = i
-                    else:
-                        name = data.loc[i, textColumn]
-                    ax.text(xx[k], yy[k], str(name), ha='center', va='center', size=textsize)
-                    k += 1
-            ax.set_xlim(plotting.getPlotLim(xx))
-            ax.set_ylim(plotting.getPlotLim(yy))
-            ax.set_title('CV result for label '+label+f'. Acc = {quality:.2f}')
-            ax.set_xlabel('true '+label)
-            ax.set_ylabel('predicted '+label)
-            plotting.savefig(fileName1 + '_cv.png', fig)
-            plotting.savefig(fileName2 + '_cv.png', fig)
-            plotting.closefig(fig)
+            if isClassification:
+                labelMap = labelMaps[label] if label in labelMaps else None
+                plotting.plotConfusionMatrix(xx, yy, label, labelMap=labelMap, fileName=fileName1 + '_cv.png')
+                plotting.plotConfusionMatrix(xx, yy, label, labelMap=labelMap, fileName=fileName2 + '_cv.png')
+            else:
+                fig, ax = plotting.createfig()
+                cx = transform(xx)
+                cy = transform(yy)
+                sc = ax.scatter(xx, yy, s=markersize**2, c=cx, cmap=colorMap, vmin=0, vmax=1, alpha=alpha, linewidth=1, edgecolor=edgecolor)
+                ax.scatter(xx, yy, s=(markersize/3)**2, c=cy, cmap=colorMap, vmin=0, vmax=1)
+                ax.plot([xx.min(), xx.max()], [xx.min(), xx.max()], 'r', lw=2)
+                plotting.addColorBar(sc, fig, ax, labelMaps, label, ticksPos, ticks)
+                if textsize > 0:
+                    k = 0
+                    for i in range(data.shape[0]):
+                        if doNotPlotRemoteCount > 0 and i not in good_ind: continue
+                        if textColumn is None:
+                            name = i
+                        else:
+                            name = data.loc[i, textColumn]
+                        ax.text(xx[k], yy[k], str(name), ha='center', va='center', size=textsize)
+                        k += 1
+                ax.set_xlim(plotting.getPlotLim(xx))
+                ax.set_ylim(plotting.getPlotLim(yy))
+                ax.set_title('CV result for label '+label+f'. R2-score = {quality:.2f}')
+                ax.set_xlabel('true '+label)
+                ax.set_ylabel('predicted '+label)
+                plotting.savefig(fileName1 + '_cv.png', fig)
+                plotting.savefig(fileName2 + '_cv.png', fig)
+                plotting.closefig(fig)
 
             cv_data = pd.DataFrame()
             cv_data['true '+label] = xx
@@ -1285,11 +1060,11 @@ def plot_descriptors_2d(data, descriptor_names, label_names, labelMaps=None, fol
             cv_data.to_csv(fileName2 + '_cv.csv', index=False)
 
 
-def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_class=None, model_regr=None, labelMaps=None, folder='', markersize=500, textsize=8, alpha=1, cv_count=2, repForStdCalc=3, unknown_sample=None, textColumn=None, unknown_data_names=None, fileName=None, plot_diff=True):
+def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_class=None, model_regr=None, labelMaps=None, folder='', markersize=None, textsize=None, alpha=None, cv_count=2, repForStdCalc=3, unknown_sample=None, textColumn=None, unknown_data_names=None, fileName=None, plot_diff=True):
     """Plot cv result graph.
 
         :param sample:  sample (for mixture) or DataFrame with descriptors and labels
-        :param features: (list of strings or string) features to use (x), or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together)
+        :param features: (list of strings or string) features to use (x), or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
         :param label_names: all label names to predict
         :param makeMixtureParams: arguments for mixture.generateMixtureOfSample excluding sample. Sample is divided into train and test and then make mixtures separately. All labels becomes real (concentration1*labelValue1 + concentration2*labelValue2).
         :param model_class: model for classification tasks
@@ -1299,7 +1074,7 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
         :param markersize: markersize for scatter plot
         :param textsize: textsize for textColumn labels
         :param alpha: alpha for scatter plot
-        :param cv_count: cv_count - for cross validation
+        :param cv_count: cv_count - for cross validation, inf means - LOO
         :param repForStdCalc: - number of cv repetitions to calculate std of quality
         :param unknown_sample: sample with unknown labels to make prediction
         :param textColumn: if given, use to put text inside markers
@@ -1307,13 +1082,14 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
         :param fileName: file to save result
         :param plot_diff: True/False - whether to plot error (smoothed difference between true and predicted labels)
     """
+    assert repForStdCalc>=1
     if labelMaps is None: labelMaps = {}
     mix = makeMixtureParams is not None
     os.makedirs(folder, exist_ok=True)
     qualityResult = getQuality(sample, features, label_names, makeMixtureParams=makeMixtureParams, model_class=model_class, model_regr=model_regr, m=repForStdCalc, cv_count=cv_count, returnModels=True)
     cv_result = {}
-    res = getXYFromSample(sample, features, label_names, textColumn)
-    text = None if textColumn is None else res[2]
+    res = getXYFromSample(sample, features, label_names, textColumn if textColumn in sample.paramNames else None)
+    text = None if textColumn is None or textColumn not in sample.paramNames else res[2]
     if unknown_sample is not None:
         res = getXYFromSample(unknown_sample, features, label_names, textColumn)
         unkX, unky = res[0], res[1]
@@ -1353,13 +1129,17 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
 
         def plot(true, pred, quality, filePostfix=''):
             plotFileName = fileNam+'_'+filePostfix
+            pred = pred.reshape(-1)
             if ML.isClassification(true):
-                plotting.plotConfusionMatrix(true, pred, label, fileName=plotFileName + '.png')
+                labelMap = labelMaps[label] if label in labelMaps else None
+                plotting.plotConfusionMatrix(true, pred, label, labelMap=labelMap, fileName=plotFileName + '.png')
             else:
                 err = np.abs(true - pred)
-                plotting.scatter(pred, true, color=err, alpha=alpha, markersize=markersize, text_size=textsize, marker_text=text, xlabel='predicted ' + label, ylabel='true ' + label, title='CV result for label ' + label + f'. Quality = {quality:.2f}', fileName=plotFileName + '.png')
+                def plotIdentity(ax):
+                    ax.plot([pred.min(), pred.max()], [pred.min(), pred.max()], 'r', lw=2)
+                plotting.scatter(pred, true, color=err, alpha=alpha, markersize=markersize, text_size=textsize, marker_text=text, xlabel='predicted ' + label, ylabel='true ' + label, title='CV result for label ' + label + f'. Quality = {quality:.2f}', fileName=plotFileName + '.png', plotMoreFunction=plotIdentity)
                 if plot_diff:
-                    kr = statsmodels.nonparametric.kernel_regression.KernelReg(endog=err, exog=pred, var_type='c', bw=[(np.max(pred)-np.min(pred))/50])
+                    kr = statsmodels.nonparametric.kernel_regression.KernelReg(endog=err, exog=pred, var_type='c', bw=[(np.max(pred)-np.min(pred))/20])
                     gr_pred = np.linspace(np.min(pred), np.max(pred), 200)
                     smoothed_err, smoothed_std = kr.fit(gr_pred)
                     plotting.plotToFile(gr_pred, smoothed_err, 'mean abs diff', xlabel='predicted '+label, ylabel='abs error', title='abs(predicted-true) for label '+label, fileName=plotFileName+'_diff.png')
@@ -1378,8 +1158,23 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
     if textColumn is not None: unk_text = res[2]
     if unknown_data_names is not None: unk_text = unknown_data_names
     if unk_text is None and unknown_sample is not None: unk_text = [str(i) for i in range(unknown_sample.getLength())]
-    for label in cv_result:
-        r = cv_result[label]
+
+    # apply labelMaps
+    if unknown_sample is not None:
+        cv_result_for_print = copy.deepcopy(cv_result)
+        for label in cv_result_for_print:
+            if label not in labelMaps: continue
+            lm = {labelMaps[label][l]: l for l in labelMaps[label]}
+            def convert(vec):
+                return np.array([lm[int(x)] for x in vec])
+            r = cv_result_for_print[label]
+            r['trueLabels'] = convert(r['trueLabels'])
+            if mix:
+                for problemType in r['predictionsForUnknown']:
+                    r['predictionsForUnknown'][problemType] = convert(r['predictionsForUnknown'][problemType])
+            else: r['predictionsForUnknown'] = convert(r['predictionsForUnknown'])
+    for label in cv_result_for_print:
+        r = cv_result_for_print[label]
         with open(r['fileNam'] + '_unkn.txt', 'w') as f:
             s = f"Prediction of {label} by " + r['features'] + '\n'
             s += "quality = " + str(r['quality']) + '\n'
@@ -1392,6 +1187,7 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
                         p = ps[i]
                         pred += f"{unk_text[i]}: {p}"
                         true = unknown_sample.params.loc[i, label]
+                        # print(true)
                         if not np.isnan(true):
                             pred += f" true = {true}  err = {np.abs(true - p)}"
                         pred += "\n"
@@ -1431,9 +1227,7 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
                         for tick in ticks: s += f' prob_{tick}'
                         s += '\n'
                         for i in range(len(probPredictionsForUnknown)):
-                            if textColumn is not None:
-                                s += unk_text[i]
-                            else: s += f'u{i}'
+                            s += unk_text[i]
                             for j in range(len(probPredictionsForUnknown[i])):
                                 s += ' %.2g' % probPredictionsForUnknown[i,j]
                             s += '\n'
@@ -1559,7 +1353,7 @@ def calcCalibrationData(expData, theoryData, componentNameColumn=None, folder=No
     :param multiplierOnlyColumnNames: list of columns to calibrate only by multiplier
     :param shiftOnlyColumnNames: list of columns to calibrate only by shift
     :param stableLinearRegression: throw away 10% of points with max error and rebuild regression
-    :return: dict {descriptorName: [toDiv, toSub]} theory = toDiv*exp + toSub, then calibration:  theoryDescr = (theoryDescr - toSub) / toDiv
+    :return: dict {descriptorName: [toDiv, toSub]} theory = toDiv*exp + toSub, then calibration:  newTheoryDescr = (theoryDescr - toSub) / toDiv
     """
     if excludeColumnNames is None: excludeColumnNames = []
     if multiplierOnlyColumnNames is None: multiplierOnlyColumnNames = []
@@ -1623,13 +1417,15 @@ def calcCalibrationData(expData, theoryData, componentNameColumn=None, folder=No
     return calibration
 
 
-def calibrateSample(sample, calibrationDataForDescriptors=None, calibrationDataForSpectra=None):
+def calibrateSample(sample, calibrationDataForDescriptors=None, calibrationDataForSpectra=None, inplace=False):
     """
     Linear calibration of sample
     :param sample: Sample
     :param calibrationDataForDescriptors: dict {descriptorName: [toDiv, toSub]}  descr = (descr - toSub) / toDiv
     :param calibrationDataForSpectra: dict{'spType':[spectraDivisor, energySub]}  (energySub, spectraDivisor - scalars or arrays)
     """
+    if not inplace:
+        sample = copy.deepcopy(sample)
     if calibrationDataForDescriptors is not None:
         data = sample.params
         for descriptor_name in sample.paramNames:
@@ -1645,11 +1441,16 @@ def calibrateSample(sample, calibrationDataForDescriptors=None, calibrationDataF
             if not isinstance(spectraDivisor, np.ndarray):
                 spectraDivisor = spectraDivisor + np.zeros(n)
             energy = sample.getEnergy(spType=spType)
+            spectra = []
+            commonSub = np.mean(energySub)
+            newEnergy = energy-commonSub
             for i in range(n):
-                sp = sample.getSpectrum(i, spType=spType)
-                sp = np.interp(energy, energy - energySub[i], sp, left=0, right=0)
+                sp = sample.getSpectrum(i, spType=spType, returnIntensityOnly=True)
+                sp = np.interp(newEnergy, energy - energySub[i], sp, left=0, right=0)
                 sp = sp / spectraDivisor[i]
-                sample.setSpectrum(i, sp, spType=spType)
+                spectra.append(sp)
+            sample.setSpectra(spectra=np.array(spectra), energy=newEnergy, spType=spType)
+    return sample
 
 
 def concatCalibratedDatasets(expSample, theorySample, componentNameColumn=None, debugInfo=None):
@@ -1658,6 +1459,7 @@ def concatCalibratedDatasets(expSample, theorySample, componentNameColumn=None, 
     :param expSample: experimental sample
     :param theorySample: thoretical sample
     :param componentNameColumn: to find coinside exp and theory. if None use index
+    :param debugInfo: dict{folder, uncalibratedSample}
     :return: combined sample
     """
     if componentNameColumn is None:
@@ -1681,12 +1483,12 @@ def concatCalibratedDatasets(expSample, theorySample, componentNameColumn=None, 
                 rf = utils.rFactor(expEn, np.interp(expEn, thEn, thSp), expSp)
                 rFactors.append(rf)
                 graphs = (expEn, expSp, 'exp', thEn, thSp, 'calibrated theory')
-                if 'uncolebratedSample' in debugInfo:
-                    uncTheorySample = debugInfo['uncolebratedSample']
+                if 'uncalibratedSample' in debugInfo:
+                    uncTheorySample = debugInfo['uncalibratedSample']
                     uncThSp = uncTheorySample.getSpectra(spType=spType).loc[commTheor[i]]
                     uncThEn = uncTheorySample.getEnergy(spType=spType)
-                    graphs += (uncThEn, uncThSp, 'uncolibrated theory')
-                plotting.plotToFile(*graphs, xlabel='energy', title=f'Comparison of exp spectrum {expComponentNames[commExp[i]]} with calibrated theory. rFactor = {rf}', fileName=f'debug_calibrated_spectra/{spType}_{expComponentNames[commExp[i]]}.png')
+                    graphs += (uncThEn, uncThSp, 'uncalibrated theory')
+                plotting.plotToFile(*graphs, xlabel='energy', title=f'Comparison of exp spectrum {expComponentNames[commExp[i]]} with calibrated theory. rFactor = {rf}', fileName=f'{debugInfo["folder"]}/{spType}_{expComponentNames[commExp[i]]}.png')
             rFactors = np.array(rFactors)
             print(f'Std-mean rFactor between calibrated and true spectra[{spType}] =', np.sqrt(np.mean(rFactors**2)))
 
@@ -1695,18 +1497,19 @@ def concatCalibratedDatasets(expSample, theorySample, componentNameColumn=None, 
     theory = copy.deepcopy(theorySample)
     theory.delRow(commTheor)
     for spType in theory.spTypes():
-        theory.changeEnergy(newEnergy=combined.getEnergy(spType=spType), spType=spType)
+        theory.changeEnergy(energy=combined.getEnergy(spType=spType), spType=spType)
     combined.unionWith(theory)
     return combined
 
 
-def energyImportance(sample, label_names, folder, model=None):
+def energyImportance(sample, label_names, folder, model=None, method='one model', spType=None):
+    assert method in ['one model', 'model for each energy']
     n = sample.getLength()
     if n < 100: min_samples_leaf = 1
     else: min_samples_leaf = 4
     modelIsNone = model is None
-    spectra = sample.spectra.to_numpy()
-    energy = sample.energy
+    spectra = sample.getSpectra(spType=spType).to_numpy()
+    energy = sample.getEnergy(spType=spType)
     denergy = energy[1:]-energy[:-1]
     dspectra = (spectra[:,1:]-spectra[:,:-1])/denergy
     d2spectra = (dspectra[:,1:]-dspectra[:,:-1])/denergy[:-1]
@@ -1715,23 +1518,38 @@ def energyImportance(sample, label_names, folder, model=None):
     for label in label_names:
         classification = ML.isClassification(sample.params, label)
         if modelIsNone:
+            n_estimators = 20 if method == 'model for each energy' else 1000
             if classification:
-                model = sklearn.ensemble.ExtraTreesClassifier(n_estimators=100, min_samples_leaf=min_samples_leaf)
+                model = sklearn.ensemble.ExtraTreesClassifier(n_estimators=n_estimators, min_samples_leaf=min_samples_leaf)
             else:
-                model = sklearn.ensemble.ExtraTreesRegressor(n_estimators=100, min_samples_leaf=min_samples_leaf)
+                model = sklearn.ensemble.ExtraTreesRegressor(n_estimators=n_estimators, min_samples_leaf=min_samples_leaf)
         for isp,sp in enumerate(spectras):
             overall_quality = ML.score_cv(model, sp, sample.params[label], cv_count=10, returnPrediction=False)
             m = len(energies[isp])
             quality = np.zeros(m)
-            for j in range(m):
-                quality[j] = ML.score_cv(model, sp[:,j], sample.params[label], cv_count=10, returnPrediction=False)
+            if method == 'model for each energy':
+                for j in range(m):
+                    quality[j] = ML.score_cv(model, sp[:,j], sample.params[label], cv_count=10, returnPrediction=False)
+            else:
+                model.fit(sp, sample.params[label])
+                quality[:] = model.feature_importances_
             plotting.plotToFile(energies[isp], quality, 'enImportance', title=f'Energy importance for label {label}. Overall quality = {overall_quality:.2f}', fileName=f'{folder}/{label}_d{isp}.png')
         overall_quality = ML.score_cv(model, np.hstack(spectras), sample.params[label], cv_count=10, returnPrediction=False)
         m = len(energies[-1])
         quality = np.zeros(m)
-        for j in range(m):
-            spj = np.hstack((spectras[0][:,j+1].reshape(-1,1), spectras[1][:,j].reshape(-1,1), spectras[2][:,j].reshape(-1,1)))
-            quality[j] = ML.score_cv(model, spj, sample.params[label], cv_count=10, returnPrediction=False)
+        if method == 'model for each energy':
+            for j in range(m):
+                spj = np.hstack((spectras[0][:,j+1].reshape(-1,1), spectras[1][:,j].reshape(-1,1), spectras[2][:,j].reshape(-1,1)))
+                quality[j] = ML.score_cv(model, spj, sample.params[label], cv_count=10, returnPrediction=False)
+        else:
+            sps = np.hstack((spectras[0][:, 1:-1], spectras[1][:, :-1], spectras[2]))
+            assert sps.shape[1] == 3*m
+            model.fit(sps, sample.params[label])
+            f = model.feature_importances_
+            quality[:] = 0
+            quality[:] = quality[:] + f[:m]
+            quality[:] = quality[:] + f[m:2*m]
+            quality[:] = quality[:] + f[2*m:]
         plotting.plotToFile(energies[-1], quality, 'enImportance', title=f'Energy importance for label {label}. Overall quality = {overall_quality:.2f}', fileName=f'{folder}/{label}_d012.png')
 
 
@@ -1780,5 +1598,45 @@ def getSpectraFeatures(sample, diff=None, spType=None):
             if result is None: result = spectra
             else: result = np.hstack((result, spectra))
         smoothWidth = 3 if i == 0 else 0
-        spectra, energy = diffSpectraDataFrame(spectra, energy, smoothWidth)
+        if i < np.max(diff):
+            spectra, energy = diffSpectraDataFrame(spectra, energy, smoothWidth)
     return result
+
+
+def plotProbabilityMapsForLabelPair(sample, features, label_pair, maxPlotCount='all', textColumn=None, unknownSample=None, folder='probMaps', bandwidth=0.2):
+    """
+
+    :param features: (list of strings or string) features to use, or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
+    :param textColumn: if not None, can be absent in sample (for example - mixture sample), but not in unknownSample
+    """
+    assert len(label_pair) == 2
+    xlim = [sample.params[label_pair[0]].min(), sample.params[label_pair[0]].max()]
+    ylim = [sample.params[label_pair[1]].min(), sample.params[label_pair[1]].max()]
+
+    res = getXYFromSample(sample, features, label_pair, textColumn if textColumn in sample.paramNames else None)
+    X, y = res[0], res[1]
+    text = list(map(str, range(len(X)))) if textColumn is None or textColumn not in sample.paramNames else res[2]
+    if unknownSample is not None:
+        res = getXYFromSample(unknownSample, features, [], textColumn)
+        unkX, unky = res[0], res[1]
+        unkText = map(str, range(len(unkX))) if textColumn is None else res[2]
+
+    def plotForOneSpectrum(spectrum, name, trueLabels=None):
+        def density(z):
+            return densityEstimator.predict(spectrum.reshape(1, -1), np.array(z).reshape(1, -1), k=10, bandwidth=bandwidth)[0][0]
+        fileName = f'{folder}/unknown/{name}.png' if trueLabels is None else f'{folder}/{name}.png'
+
+        def plotMoreFunction(ax):
+            ax.scatter([trueLabels[0]], [trueLabels[1]], color='red', s=500)
+        plotting.plotHeatMap(density, xlim, ylim, title=f'Probability density for {name}', xlabel=label_pair[0], ylabel=label_pair[1], fileName=fileName, plotMoreFunction=plotMoreFunction if trueLabels is not None else None)
+
+    if maxPlotCount == 'all': maxPlotCount = len(X)
+    for i in range(min(maxPlotCount, len(X))):
+        X1 = X[np.arange(len(X)) != i, :]
+        y1 = y[np.arange(len(X)) != i, :]
+        densityEstimator = ML.NNKCDE(X1, y1)
+        plotForOneSpectrum(X[i], text[i], y[i])
+    if unknownSample is not None:
+        densityEstimator = ML.NNKCDE(X, y)
+        for i in range(len(unkX)):
+            plotForOneSpectrum(unkX[i], unkText[i])

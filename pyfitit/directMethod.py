@@ -296,7 +296,7 @@ class Estimator:
             if ('local' in calcXanes) and (molecula is not None):
                 if calcXanes['local']: fdmnes.runLocal(folderToSaveResult+'/fdmnes')
                 else: fdmnes.runCluster(folderToSaveResult+'/fdmnes', calcXanes['memory'], calcXanes['nProcs'])
-                xanes = fdmnes.parse_one_folder(folderToSaveResult+'/fdmnes')
+                xanes = fdmnes.parseOneFolder(folderToSaveResult + '/fdmnes')
                 smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(self.exp.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', self.exp, self.norm)
                 with open(folderToSaveResult+'/args_smooth.txt', 'w') as f: json.dump(self.exp.defaultSmoothParams['fdmnes'], f)
                 if self.diffFrom is None:
@@ -352,7 +352,7 @@ class Estimator:
         for i in range(predictedDists.size):
             print("r_{} = {:.3g} ± {:.4g}".format(i,predictedDists[i], RMSE[i]))
             predictedRdf += utils.gauss(arg, predictedDists[i], RMSE[i])/arg**2
-        fig, ax = plotting.createfig()
+        fig, ax = plotting.createfig(interactive=True)
         funcName = 'rdf'; funcParams = {'sigma':np.min(RMSE), 'atoms':atoms}
         for mname in extraMolecules:
             ax.plot(arg, getattr(extraMolecules[mname], funcName)(arg, **funcParams), lw=2, label=mname)
@@ -366,7 +366,7 @@ class Estimator:
             ax.plot(dists, np.zeros(dists.size), 'kP', ms=15, label='predicted dists')
         ax.legend()
         plotting.savefig(folderToSaveResult + os.sep + funcName + '.png', fig)
-        plotting.closefig(fig)
+        plotting.closefig(fig, interactive=True)
 
         plotData = pd.DataFrame()
         # plotData['r'] = arg
@@ -416,7 +416,7 @@ class Estimator:
         else:
             xanesAbsorb = self.prepareSpectrumForPrediction(spectrum, smooth)
         predictedRdf = regressor.predict(xanesAbsorb).reshape(-1)
-        fig, ax = plotting.createfig()
+        fig, ax = plotting.createfig(interactive=True)
         ax.fill_between(arg, predictedRdf - RMSE, predictedRdf + RMSE, color='grey', label='RMSE region (by cv)')
         for mname in extraMolecules:
             ax.plot(arg, getattr(extraMolecules[mname], funcName)(arg, **funcParams), lw=2, label=mname)
@@ -427,7 +427,7 @@ class Estimator:
             ax.plot(arg, trueRdf, lw=2, color='k', label='true ' + funcName)
         ax.legend()
         plotting.savefig(folderToSaveResult + os.sep + funcName + '.png', fig)
-        plotting.closefig(fig)
+        plotting.closefig(fig, interactive=True)
 
         plotData = pd.DataFrame()
         plotData[argName] = arg

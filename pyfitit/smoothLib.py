@@ -1,6 +1,6 @@
 from . import utils
 utils.fixDisplayError()
-import math, copy, os, json, hashlib, gc, scipy
+import math, copy, os, json, hashlib, gc, scipy, statsmodels.nonparametric.kernel_regression
 from . import fdmnes, optimize, plotting, curveFitting
 import numpy as np
 import pandas as pd
@@ -77,17 +77,38 @@ def spline_width(e, Efermi, *g):
     return sigma
 
 
-def simpleSmooth(e, xanes, sigma, kernel='Cauchy', sigma2percent=0.1, gaussWeight=0.2):
-    new_xanes = np.zeros(e.shape)
-    for i in range(e.size):
+def simpleSmooth(e, xanes, sigma, kernel='Cauchy', new_e=None, sigma2percent=0.1, gaussWeight=0.2, assumeZeroInGaps=False, expandParams=None):
+    """
+    Smoothing
+    :param e: argument (energy for xanes spectrum)
+    :param xanes: function values (intensity for xanes spectrum)
+    :param sigma: smooth width, scalar or vector of size same as new_e (or e if new_e=None)
+    :param kernel: smooth kernel: 'Cauchy' 'Gauss' or 'C+G' with gaussWeight
+    :param new_e: new argument for smooth result calculation (default - take e)
+    :param sigma2percent: multiplier of sigma for Gauss kernel when kernel='C+G'
+    :param gaussWeight: multiplier of Gauss kernel when kernel='C+G'
+    :param assumeZeroInGaps: whether to assume, that spectrum = 0 between points (i.e. adf type smoothing)
+    :param expandParams: params of utils.expandByReflection except e, xanes
+    """
+    assert len(e.shape) == 1
+    assert len(xanes.shape) == 1
+    sigma0 = sigma
+    e0, xanes0 = e, xanes
+    if expandParams is not None:
+        e, xanes = utils.expandByReflection(e, xanes, **expandParams)
+    # plotting.plotToFile(e,xanes,'expand', e0,xanes0,'init', fileName=f'debug.png')
+    if new_e is None: new_e = e0
+    new_xanes = np.zeros(new_e.shape)
+    for i in range(new_e.size):
+        sigma = sigma0[i] if isinstance(sigma0, np.ndarray) else sigma0
         if kernel == 'Cauchy':
-            kern = kernelCauchy(e, e[i], sigma)
+            kern = kernelCauchy(e, new_e[i], sigma)
         elif kernel == 'Gauss':
-            kern = kernelGauss(e, e[i], sigma)
+            kern = kernelGauss(e, new_e[i], sigma)
         elif kernel == 'C+G':
-            kern = kernelCauchy(e, e[i], sigma) + gaussWeight*kernelGauss(e, e[i], sigma*sigma2percent)
+            kern = kernelCauchy(e, new_e[i], sigma) + gaussWeight*kernelGauss(e, new_e[i], sigma*sigma2percent)
         else: assert False, 'Unknown kernel name'
-        norm = utils.integral(e, kern)
+        norm = 1 if assumeZeroInGaps else utils.integral(e, kern)
         if norm == 0: norm = 1
         new_xanes[i] = utils.integral(e, xanes*kern)/norm
     return new_xanes
@@ -155,6 +176,9 @@ def smooth_fdmnes_notconv(e0, xanes0, Gamma_hole, Ecent, Elarg, Gamma_max, Eferm
 
 
 def smooth_adf(e0, xanes0, e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi, reflect):
+    """
+    Smooth spectrum
+    """
     # reflect spectrum
     if reflect:
         e0 = np.hstack((e0, e0[-1] + e0[-1]-np.flip(e0,0) ))
@@ -234,7 +258,7 @@ def smooth_piecewise(e0, xanes, Gamma_hole, Gamma_max, Ecent):
     return e0, new_xanes
 
 
-def generalSmooth(e, xanes, sigma):
+def generalSmooth(e, xanes, sigma, kernel='Cauchy'):
     eleft = np.linspace(e[0]-10, e[0]-(e[1]-e[0]), 10)
     xleft = np.zeros(eleft.shape)
     eright = np.linspace(e[-1]+(e[-1]-e[-2]), e[-1]+50, 10)
@@ -243,7 +267,10 @@ def generalSmooth(e, xanes, sigma):
     xanes = np.hstack((xleft,xanes,xright))
     new_xanes = np.zeros(e.shape)
     for i in range(e.size):
-        kern = kernelCauchy(e_new, e[i], sigma[i])
+        if kernel == 'Cauchy':
+            kern = kernelCauchy(e_new, e[i], sigma[i])
+        elif kernel == 'Gauss':
+            kern = kernelGauss(e_new, e[i], sigma[i])
         norm = utils.integral(e_new, kern)
         new_xanes[i] = utils.integral(e_new, xanes*kern)/norm
     return e, new_xanes
@@ -388,46 +415,46 @@ def funcFitSmoothHelper(smooth_params, spectrum, smoothType, exp, norm=None):
     return smoothInterpNorm(smooth_params, spectrum, smoothType, exp.spectrum, exp.intervals['fit_norm'], norm)
 
 
-def smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, fit_norm_interval=None, norm=None, normType='multOnly'):
+def smoothInterpNorm(smoothParams, spectrum, smoothType, expSpectrum, fitNormInterval=None, norm=None, normType='multOnly'):
     assert smoothType in ['fdmnes', 'fdmnes_notconv', 'adf', 'simple_Gauss', 'simple_Cauchy', 'simple_Cauchy_then_Gauss', 'simple_C+G', 'linear', 'Muller', 'piecewise', 'multi_piecewise', 'spline', 'optical']
-    if norm is None and 'norm' in smooth_params: norm = smooth_params['norm']
-    if 'normFixType' in smooth_params: normType = smooth_params['normFixType']
-    shift = smooth_params['shift']
+    if norm is None and 'norm' in smoothParams: norm = smoothParams['norm']
+    if 'normFixType' in smoothParams: normType = smoothParams['normFixType']
+    shift = smoothParams['shift']
     spectrum_energy = spectrum.energy + shift
     # t1 = time.time()
     if smoothType in ['fdmnes', 'fdmnes_notconv', 'adf']:
-        Gamma_hole, Ecent, Elarg, Gamma_max, Efermi = smooth_params['Gamma_hole'], smooth_params['Ecent'], smooth_params['Elarg'], smooth_params['Gamma_max'], smooth_params['Efermi']
+        Gamma_hole, Ecent, Elarg, Gamma_max, Efermi = smoothParams['Gamma_hole'], smoothParams['Ecent'], smoothParams['Elarg'], smoothParams['Gamma_max'], smoothParams['Efermi']
         if not fdmnes.useEpsiiShift: Efermi += shift
         if smoothType in ['fdmnes','fdmnes with linear norm']:
-            fdmnes_en1, res = smooth_fdmnes(spectrum_energy, spectrum.intensity, exp_spectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
+            fdmnes_en1, res = smooth_fdmnes(spectrum_energy, spectrum.intensity, expSpectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
         elif smoothType == 'fdmnes_notconv':
             fdmnes_en1, res = smooth_fdmnes_notconv(spectrum_energy, spectrum.intensity, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi)
         else: # adf
-            fdmnes_en1, res = smooth_adf(spectrum_energy, spectrum.intensity, exp_spectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi, smooth_params['reflect'])
+            fdmnes_en1, res = smooth_adf(spectrum_energy, spectrum.intensity, expSpectrum.energy, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi, smoothParams['reflect'])
     elif smoothType in ['simple_Gauss', 'simple_Cauchy', 'simple_Cauchy_then_Gauss', 'simple_C+G']:
         if smoothType == 'simple_Cauchy_then_Gauss':
-            res = simpleSmooth(spectrum_energy, spectrum.intensity, smooth_params['sigma_C'], kernel='Cauchy')
-            res = simpleSmooth(spectrum_energy, res, smooth_params['sigma_G'], kernel='Gauss')
+            res = simpleSmooth(spectrum_energy, spectrum.intensity, smoothParams['sigma_C'], kernel='Cauchy')
+            res = simpleSmooth(spectrum_energy, res, smoothParams['sigma_G'], kernel='Gauss')
         else:
             if smoothType == 'simple_C+G':
-                res = simpleSmooth(spectrum_energy, spectrum.intensity, smooth_params['sigma'], kernel='C+G', sigma2percent=smooth_params['sigma2percent'], gaussWeight=smooth_params['gaussWeight'])
+                res = simpleSmooth(spectrum_energy, spectrum.intensity, smoothParams['sigma'], kernel='C+G', sigma2percent=smoothParams['sigma2percent'], gaussWeight=smoothParams['gaussWeight'])
             else:
-                res = simpleSmooth(spectrum_energy, spectrum.intensity, smooth_params['sigma'], kernel=smoothType[7:])
+                res = simpleSmooth(spectrum_energy, spectrum.intensity, smoothParams['sigma'], kernel=smoothType[7:])
         fdmnes_en1 = spectrum_energy
     elif smoothType == 'linear':
-        Gamma_hole, Gamma_max, Efermi = getSmoothParams(smooth_params, ['Gamma_hole', 'Gamma_max', 'Efermi'])
+        Gamma_hole, Gamma_max, Efermi = getSmoothParams(smoothParams, ['Gamma_hole', 'Gamma_max', 'Efermi'])
         fdmnes_en1, res = smooth_linear_conv(spectrum_energy, spectrum.intensity, Gamma_hole, Gamma_max, Efermi)
     elif smoothType == 'Muller':
-        group, Efermi, Gamma_hole, alpha1, alpha2, alpha3 = getSmoothParams(smooth_params, ['group', 'Efermi', 'Gamma_hole', 'alpha1', 'alpha2', 'alpha3'])
+        group, Efermi, Gamma_hole, alpha1, alpha2, alpha3 = getSmoothParams(smoothParams, ['group', 'Efermi', 'Gamma_hole', 'alpha1', 'alpha2', 'alpha3'])
         fdmnes_en1, res = smooth_Muller(spectrum_energy, spectrum.intensity, group, Gamma_hole, Efermi, alpha1, alpha2, alpha3)
     elif smoothType == 'piecewise':
-        Gamma_hole, Gamma_max, Ecent = getSmoothParams(smooth_params, ['Gamma_hole', 'Gamma_max', 'Ecent'])
+        Gamma_hole, Gamma_max, Ecent = getSmoothParams(smoothParams, ['Gamma_hole', 'Gamma_max', 'Ecent'])
         fdmnes_en1, res = smooth_piecewise(spectrum_energy, spectrum.intensity, Gamma_hole, Gamma_max, Ecent)
     elif smoothType == 'multi_piecewise':
-        sigma = getSmoothWidth(smoothType, spectrum_energy, smooth_params)
+        sigma = getSmoothWidth(smoothType, spectrum_energy, smoothParams)
         fdmnes_en1, res = generalSmooth(spectrum_energy, spectrum.intensity, sigma)
     elif smoothType == 'spline':
-        sigma = getSmoothWidth(smoothType, spectrum_energy, smooth_params)
+        sigma = getSmoothWidth(smoothType, spectrum_energy, smoothParams)
         fdmnes_en1, res = generalSmooth(spectrum_energy, spectrum.intensity, sigma)
     elif smoothType == 'optical':
         fdmnes_en1 = spectrum.energy
@@ -435,12 +462,12 @@ def smoothInterpNorm(smooth_params, spectrum, smoothType, exp_spectrum, fit_norm
     else: assert False, 'Unknown smooth type '+smoothType
     # t2 = time.time()
     # print("Smooth time=", t2 - t1)
-    if fit_norm_interval is None: fit_norm_interval = [spectrum_energy[0], spectrum_energy[-1]]
-    fit_norm_interval = copy.deepcopy(fit_norm_interval)
-    if spectrum_energy[0] > fit_norm_interval[0]: fit_norm_interval[0] = spectrum_energy[0]
-    if spectrum_energy[-1] < fit_norm_interval[-1]: fit_norm_interval[-1] = spectrum_energy[-1]
-    res, norm = curveFitting.fit_to_experiment_by_norm_or_regression(exp_spectrum.energy, exp_spectrum.intensity, fit_norm_interval, fdmnes_en1, res, 0, norm, normType=normType)
-    return utils.Spectrum(exp_spectrum.energy, res), norm
+    if fitNormInterval is None: fitNormInterval = [spectrum_energy[0], spectrum_energy[-1]]
+    fitNormInterval = list(fitNormInterval)
+    if spectrum_energy[0] > fitNormInterval[0]: fitNormInterval[0] = spectrum_energy[0]
+    if spectrum_energy[-1] < fitNormInterval[-1]: fitNormInterval[-1] = spectrum_energy[-1]
+    res, norm = curveFitting.fit_to_experiment_by_norm_or_regression(expSpectrum.energy, expSpectrum.intensity, fitNormInterval, fdmnes_en1, res, 0, norm, normType=normType)
+    return utils.Spectrum(expSpectrum.energy, res), norm
 
 
 def fitSmoothSimple(spectrum, smoothType, exp_spectrum, initialData=None, fixedParams=None, fit_smooth_interval=None, userBounds=None, plotFileName=None, printDebug=True, smoothInterpNormParams=None):
@@ -612,7 +639,9 @@ def getNorm(normFixType, argsOfList, arg):
 
 
 def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, normFixType, fitDiffFrom):
-    l2 = []
+    lp_str = 'l1' if 'l1' in targetFunc else 'l2'
+    p = 1 if lp_str == 'l1' else 2
+    lp = []
     diffs = []
     es = []
     if fitDiffFrom is not None:
@@ -626,21 +655,21 @@ def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, no
         # print(normOut)
         i = (exp.intervals['fit_smooth'][0]<=exp.spectrum.energy) & (exp.spectrum.energy<=exp.intervals['fit_smooth'][1])
         if fitDiffFrom is None:
-            diff = abs(smoothed_xanes.intensity[i]-exp.spectrum.intensity[i])**2
+            diff = abs(smoothed_xanes.intensity[i]-exp.spectrum.intensity[i])**p
         else:
             fitDiffFromExpXanes_absorb = np.interp(exp.spectrum.energy, fitDiffFromExpXanes.energy, fitDiffFromExpXanes.intensity)
             fitDiffFrom_smoothed_xanes, _ = funcFitSmoothHelper(arg, fitDiffFromXanes, smoothType, exp, norm)
             purity = value(arg, 'purity')
-            diff = abs(purity*(smoothed_xanes.intensity[i]-fitDiffFrom_smoothed_xanes.intensity[i]) - (exp.spectrum.intensity[i]-fitDiffFromExpXanes_absorb[i]))**2
+            diff = abs(purity*(smoothed_xanes.intensity[i]-fitDiffFrom_smoothed_xanes.intensity[i]) - (exp.spectrum.intensity[i]-fitDiffFromExpXanes_absorb[i]))**p
         diffs.append(diff)
         es.append(exp.spectrum.energy[i])
-        partial_func_val = np.sqrt(utils.integral(exp.spectrum.energy[i], diff))
-        l2.append( partial_func_val )
-    if len(expList) == 1: return l2[0]
-    l2 = np.array(l2)
-    if targetFunc == 'mean': return np.mean(l2)
-    elif targetFunc == 'max(l2)': return np.max(l2)
-    elif targetFunc == 'l2(max)':
+        partial_func_val = utils.integral(exp.spectrum.energy[i], diff)**(1/p)
+        lp.append( partial_func_val )
+    if len(expList) == 1: return lp[0]
+    lp = np.array(lp)
+    if targetFunc == 'mean': return np.mean(lp)
+    elif targetFunc == f'max({lp_str})': return np.max(lp)
+    elif targetFunc == f'{lp_str}(max)':
         e = es[0]
         newDiffs = np.zeros([len(expList), e.size])
         newDiffs[0] = diffs[0]
@@ -648,7 +677,7 @@ def funcFitSmoothList(argsOfList, expList, xanesList, smoothType, targetFunc, no
             newDiffs[j] = np.interp(e, es[j], diffs[j])
         maxDiff = np.max(newDiffs, axis=0)
         return np.sqrt(utils.integral(e, maxDiff))
-    else: assert False, 'Unknown target func'
+    else: assert False, 'Unknown target func '+targetFunc
 
 
 # fixParamNames - массив фиксируемых параметров (значения берутся из значений по умолчанию в экспериментах)
@@ -681,7 +710,7 @@ def fitSmooth(expList, xanesList0, smoothType='fdmnes', normType='multOnly', fix
         res = funcFitSmoothList(arg, *params)
         return res
 
-    fmin, smooth_params_vec = optimize.minimize(funcFitSmoothList1, arg0_1, bounds, fun_args=(expList, xanesList, smoothType, targetFunc, normFixType, fitDiffFrom), method='scipy')
+    fmin, smooth_params_vec = optimize.minimize(funcFitSmoothList1, arg0_1, bounds, fun_args=(expList, xanesList, smoothType, targetFunc, normFixType, fitDiffFrom), method='Powell')
     # print(fmin)
     smooth_params = copy.deepcopy(arg0)
     for i in range(len(arg0)): smooth_params[i]['value'] = smooth_params_vec[i]
@@ -754,17 +783,16 @@ def deconvolve(e, xanes, smooth_params):
 # cacheStatus = True if read from cache
 def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_interval, norm=None, folder=None, returnCacheStatus=False, energy=None):
     assert len(exp_spectrum.energy) > 0
+    assert norm is None or 'norm' not in smoothParams, f'norm = {norm}, smoothParams["norm"] = {smoothParams["norm"]}'
+    smoothParams = {pn:smoothParams[pn] for pn in smoothParams}
+    if norm is not None: smoothParams['norm'] = norm
     xanes_df_is_dataframe = isinstance(xanes_df, pd.DataFrame)
     if folder is not None:
         folder = utils.fixPath(folder)
         assert os.path.exists(folder+os.sep+'spectra.txt'), 'File spectra.txt doesn\'t exist in folder '+folder
         smoothFileName = folder+os.sep+'spectra_smooth.txt'
         smoothParamsFileName = folder+os.sep+'spectra_smooth_params.txt'
-        smoothParams1 = {}
-        for p in ['shift', 'Gamma_hole', 'Gamma_max', 'Ecent', 'Elarg', 'Efermi']:
-            smoothParams1[p] = smoothParams[p]
-        smoothParams = smoothParams1
-        smoothParams['norm'] = norm
+        smoothParams = copy.deepcopy(smoothParams)
         smoothParams['useEpsii'] = fdmnes.useEpsiiShift
         with open(folder+os.sep+'spectra.txt', 'rb') as f:
             smoothParams['hash'] = hashlib.md5(f.read()).hexdigest()
@@ -793,7 +821,7 @@ def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_i
     smoothed_xanes = np.zeros([xanes_df.shape[0], exp_spectrum.energy.size])
     for k in range(smoothed_xanes.shape[0]):
         xanes = utils.Spectrum(energy, xanes_df[k,:])
-        smoothed_xanes1, _ = smoothInterpNorm(smoothParams, xanes, smoothType, exp_spectrum, fit_norm_interval,  norm)
+        smoothed_xanes1, _ = smoothInterpNorm(smoothParams, xanes, smoothType, exp_spectrum, fit_norm_interval)
         smoothed_xanes[k] = smoothed_xanes1.intensity
     if xanes_df_is_dataframe:
         res = utils.makeDataFrame(exp_spectrum.energy, smoothed_xanes)
@@ -805,4 +833,34 @@ def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_i
         else:
             return res
     else: return smoothed_xanes, exp_spectrum.energy
+
+
+def removeNoise(energy, intensity, partCount=10, bw=None, debugPlotFile=None):
+    """
+    Use this function twice:
+    1. bw=None: apply statsmodels.nonparametric.kernel_regression.KernelReg for bw estimation and save graph to debugPlotFile.
+    2. bw=[[e1,bw1], [e2,bw2], ...] points to interpolate bw
+    :param partCount: divide spectrum into parts
+    :returns: clearIntensity
+    """
+    if bw is None:
+        res = np.copy(intensity)
+        n = len(energy) // partCount
+        ebw, vbw = [], []
+        for i in range((len(energy) + n - 1) // n):
+            e, inten = energy[i * n:(i + 1) * n], intensity[i * n:(i + 1) * n]
+            ebw.append(np.mean(e))
+            kr = statsmodels.nonparametric.kernel_regression.KernelReg(inten, e, 'c')
+            vbw.append(min(kr.bw, e[-1] - e[0]))
+        if debugPlotFile is not None:
+            plotting.plotToFile(ebw, vbw, 'bw', fileName=debugPlotFile)
+    else:
+        ebw = [t[0] for t in bw]
+        vbw = [t[1] for t in bw]
+        bw1 = np.interp(energy, ebw, vbw)
+        _, res = generalSmooth(energy, intensity, bw1, kernel='Gauss')
+        if debugPlotFile is not None:
+            plotting.plotToFile(energy, bw1, 'bw', fileName=debugPlotFile)
+    return res
+
 

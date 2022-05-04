@@ -271,6 +271,7 @@ def nextLine(s, i0):
     Find first element of next line in string s from position i
     :return: element position (None is end of string encountered)
     """
+    assert i0 >= 0
     if (i0 is None) or (i0 >= len(s)): return None
     i = i0
     while s[i] != '\n':
@@ -314,26 +315,168 @@ def parseNumberSpinMO_Excitations(output, MOcount):
     return number, spin, MO, twoSpins
 
 
-def getNumberSpinMO_DOS(MOcount):
+def getNumberSpinMO_DOS(output, MOcount):
+    # find mo_a values
+    i = output.find('Irreducible Representations, including subspecies')
+    assert i >= 0
+    i = nextLine(output, i)
+    i = nextLine(output, i)
+    i2 = output.find('\n\n', i)
+    assert i2>0
+    syms = output[i:i2].strip().split('\n')
+    for i in range(len(syms)): syms[i] = syms[i].strip()
     number = [];    spin = [];     MO = []
-    for l in range(MOcount):
-        number.append(l + 1)
-        spin.append('Alph')
-        MO.append(str(l + 1) + 'a')
-    for l in range(MOcount):
-        number.append(MOcount + l + 1)
-        spin.append('Beta')
-        MO.append(str(l + 1) + 'a')
+    for sym in syms:
+        for l in range(MOcount):
+            number.append(l + 1)
+            spin.append('Alph')
+            MO.append(str(l + 1) + sym)
+        for l in range(MOcount):
+            number.append(MOcount + l + 1)
+            spin.append('Beta')
+            MO.append(str(l + 1) + sym)
     return number, spin, MO
 
 
-def parseExcitationsDOS(folder, MOcount, fragment, DOS, printOutput=False):
+def findMin(s, start_ind, *substr):
+    i = len(s)
+    for ss in substr:
+      i1 = s.find(ss, start_ind)
+      if i1 >= 0 and i1 < i: i = i1
+    if i == len(s): return -1
+    else: return i
+
+
+def parseExcitationsDOS_oneFile(filename, MOcount, fragment, fragment_l, DOS, printOutput=False):
+    with open(filename, 'r') as file: output = file.read()
+    if DOS:
+        number, spin, MO = getNumberSpinMO_DOS(output, MOcount)
+    else:
+        number, spin, MO, twoSpins = parseNumberSpinMO_Excitations(output, MOcount)
+        if printOutput: print(len(MO), 'transitions found')
+    df = pd.DataFrame()
+    df['Number'] = np.array(number)
+    df['Spin'] = np.array(spin)
+    df['MO'] = np.array(MO)
+
+    i = output.rfind("List of all MOs, ordered by energy, with the most significant SFO gross populations")
+    i1 = output.find(" *** SPIN 1 ***", i)
+    if i1 < 0:
+        if not DOS:
+            assert not twoSpins
+        twoSpins = False
+        df = df.loc[df['Spin']=='Alph']
+        df.reset_index(inplace=True)
+        assert len(np.unique(df['Spin'])) == 1, str(df['Spin'])
+        for l in range(13): i = nextLine(output, i)
+    else:
+        if not DOS:
+            assert twoSpins
+        twoSpins = True
+        i = i1
+        for l in range(6): i = nextLine(output, i)
+    k = findMin(output, i, "\n\n", "\n \n")
+    assert k >= 0
+    spin_str = [output[i:k]]
+    word, i = nextWord(output, k, ignoreNewLine=True)
+    if twoSpins:
+        assert word == '***'
+        assert output[i + 1:i + 7] == 'SPIN 2'
+        for l in range(6): i = nextLine(output, i)
+        k = findMin(output, i, "\n \n", "\n\n", "\n  pauli")
+        assert k >= 0
+        spin_str.append(output[i:k])
+    spin_df = []
+    for s in spin_str:
+        s = np.array([s], dtype=str)
+        s = s.view('U1')
+        i = 0
+        lastHead = s[i:i + 30]
+        spaces = np.array([' '] * 30)
+        while i is not None:
+            if np.all(s[i:i + 30] == spaces): s[i:i + 30] = lastHead
+            else: lastHead = s[i:i + 30]
+            i = nextLine(s, i)
+            # if i > 100000: break
+        s = s.tostring()[::4].decode()
+        data = pd.read_csv(StringIO(s), sep=r'\s+', header=None, skipinitialspace=True, names=['E1', 'Occ1', 'MO_N', 'MO_A', 'percent', 'SFO_N', 'SFO_L', 'E2', 'Occ2', 'Fragment_N', 'Fragment_L'])
+        dt = data.dtypes
+        assert dt['E1'] == np.float64 and dt['Occ1'] == np.float64 and dt['MO_N'] == np.int64 and dt['MO_A'] == object and dt['percent'] == object and dt['SFO_N'] == np.int64 and dt['SFO_L'] == object and dt['E2'] == np.float64 and dt['Occ2'] == np.float64 and dt['Fragment_N'] == np.int64 and dt['Fragment_L'] == object, str(dt)
+        assert data.shape[1] == 11
+        for c in data.columns:
+            if np.sum(pd.isna(data[c])) > 0:
+                ind = np.where(pd.isna(data[c]))[0][0]
+                print('There is NaN in column ' + c + '. Last good lines:')
+                print(data.loc[ind - 3:ind + 3])
+                exit(1)
+        spin_df.append(data)
+    #        print(spin_df[1])
+    if printOutput and not DOS: print(data['SFO_L'])
+
+    orbitals = ["D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2"]
+    if DOS:
+        # initialize arrays to store energies and occupations for MOs
+        energy = np.zeros(df.shape[0])
+        occ = np.zeros(df.shape[0])
+    for orb in orbitals:
+        n = df.shape[0]
+        percent = np.zeros(n)
+        t0 = time.time()
+        for i in range(n):
+            mo = df['MO'][i]
+            j = re.search(r"[^\d]", mo).start()
+            mo_n = int(mo[:j])
+            mo_a = mo[j:]
+            spin = df['Spin'][i]
+            assert spin in ['Alph', 'Beta']
+            if not twoSpins: assert spin == 'Alph', spin
+            sdf = spin_df[0] if spin == 'Alph' else spin_df[1]
+            ind = (sdf['MO_N'] == mo_n) & (sdf['MO_A'] == mo_a) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb) & (sdf['Fragment_L'] == fragment_l) & (sdf['Fragment_N'] == fragment)
+            #if mo == '24AA' and orb == 'D:x2-y2':
+                #print(sdf.dtypes)
+                #print(mo, mo_n, mo_a, orb, fragment, fragment_l)
+                #print(sdf.loc[359:361])
+                #iii = 360
+                #print((sdf.loc[iii,'MO_N'] == mo_n) & (sdf.loc[iii,'MO_A'] == mo_a) & (sdf.loc[iii,'SFO_N'] == 1) & (sdf.loc[iii,'SFO_L'] == orb) & (sdf.loc[iii,'Fragment_L'] == fragment_l) & (sdf.loc[iii,'Fragment_N'] == fragment))
+                #exit(0)
+            sum_ind = np.sum(ind)
+            assert sum_ind <= 1
+            if sum_ind == 1:
+                p = sdf['percent'][ind].values[0]
+                percent[i] = float(p[:-1])
+                if DOS:
+                    e = sdf['E1'][ind].values[0]
+                    o = sdf['Occ1'][ind].values[0]
+                    assert (energy[i] == 0) or (energy[i] == e)
+                    energy[i] = e
+                    occ[i] = o
+            else:
+                assert sum_ind == 0, str(sdf.loc[ind])
+            if printOutput:
+                pdone = i * 100 // (n - 1)
+                if pdone != (i - 1) * 100 // (n - 1):
+                    t = time.time()
+                    if pdone > 0:
+                        print('Orbital ' + orb + '.', pdone, '% done. Left: ', (100 - pdone) * (t - t0) // pdone, 's')
+        df[orb] = percent
+        if printOutput: print(df[orb])
+    if DOS:
+        df['E'] = energy
+        df['Occ'] = occ
+        # change order of columns
+        df = df[['E', 'Number', 'Spin', 'MO', "D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2", 'Occ']]
+        df.loc[df['Spin'] == 'Beta', orbitals] = -df.loc[df['Spin'] == 'Beta', orbitals]
+    return df
+
+
+def parseExcitationsDOS(folder, MOcount, fragment, fragment_l, DOS, printOutput=False):
     """
     Parse all ADF output files from folder.
 
     :param folder:
     :param MOcount:
     :param fragment: fragment number according to FRAGMENTS section in .out file
+    :param fragment_l: name of metallic atom
     :param DOS: True - parse DOS, False - parse excitations
     """
     fnames = glob.glob(folder + os.sep + '*.out')
@@ -343,117 +486,8 @@ def parseExcitationsDOS(folder, MOcount, fragment, DOS, printOutput=False):
 
     for filename in fnames:
         if printOutput: print('File', filename)
-        with open(filename, 'r') as file: output = file.read()
+        df = parseExcitationsDOS_oneFile(filename, MOcount, fragment, fragment_l, DOS, printOutput)
         if DOS:
-            number, spin, MO = getNumberSpinMO_DOS(MOcount)
-        else:
-            number, spin, MO, twoSpins = parseNumberSpinMO_Excitations(output, MOcount)
-            if printOutput: print(len(MO), 'transitions found')
-        df = pd.DataFrame()
-        df['Number'] = np.array(number)
-        df['Spin'] = np.array(spin)
-        df['MO'] = np.array(MO)
-
-        i = output.rfind("List of all MOs, ordered by energy, with the most significant SFO gross populations")
-        i1 = output.find(" *** SPIN 1 ***", i)
-        if i1 < 0:
-            if not DOS:
-                assert not twoSpins
-            twoSpins = False
-            df = df.loc[:df.shape[0] // 2 - 1]
-            assert len(np.unique(df['Spin'])) == 1, str(df['Spin'])
-            for l in range(13): i = nextLine(output, i)
-        else:
-            if not DOS:
-                assert twoSpins
-            twoSpins = True
-            i = i1
-            for l in range(6): i = nextLine(output, i)
-        k = output.find("\n\n", i)
-        spin_str = [output[i:k]]
-        word, i = nextWord(output, k, ignoreNewLine=True)
-        if twoSpins:
-            assert word == '***'
-            assert output[i + 1:i + 7] == 'SPIN 2'
-            for l in range(6): i = nextLine(output, i)
-            k1 = output.find("\n \n", i)
-            k2 = output.find("\n  pauli", i)
-            if k2 < 0: k2 = k1
-            k = min(k1, k2)
-            assert k >= 0
-            spin_str.append(output[i:k])
-        spin_df = []
-        for s in spin_str:
-            s = np.array([s], dtype=str)
-            s = s.view('U1')
-            i = 0
-            lastHead = s[i:i + 30]
-            spaces = np.array([' '] * 30)
-            while i is not None:
-                if np.all(s[i:i + 30] == spaces): s[i:i + 30] = lastHead
-                else: lastHead = s[i:i + 30]
-                i = nextLine(s, i)
-                # if i > 100000: break
-            s = s.tostring()[::4].decode()
-            data = pd.read_csv(StringIO(s), sep=r'\s+', header=None, skipinitialspace=True, names=['E1', 'Occ1', 'MO_N', 'MO_A', 'percent', 'SFO_N', 'SFO_L', 'E2', 'Occ2', 'Fragment_N', 'Fragment_L'])
-            for c in data.columns:
-                if np.sum(pd.isna(data[c])) > 0:
-                    ind = np.where(pd.isna(data[c]))[0][0]
-                    print('There is NaN in column ' + c + '. Last good lines:')
-                    print(data.loc[ind - 3:ind + 3])
-                    exit(1)
-            spin_df.append(data)
-        #        print(spin_df[1])
-        if printOutput and not DOS: print(data['SFO_L'])
-
-        orbitals = ["D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2"]
-        if DOS:
-            # initialize arrays to store energies and occupations for MOs
-            energy = np.zeros(df.shape[0])
-            occ = np.zeros(df.shape[0])
-        for orb in orbitals:
-            n = df.shape[0]
-            percent = np.zeros(n)
-            t0 = time.time()
-            for i in range(n):
-                mo = df['MO'][i]
-                mo_n = int(mo[:-1])
-                mo_a = mo[-1].upper()
-                spin = df['Spin'][i]
-                assert spin in ['Alph', 'Beta']
-                if not twoSpins: assert spin == 'Alph', spin
-                sdf = spin_df[0] if spin == 'Alph' else spin_df[1]
-                # ind0 = (sdf['MO_N'] == mo_n) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb)
-                # if np.sum(ind0) > 0:
-                #     print(sdf.loc[ind0])
-                ind = (sdf['MO_N'] == mo_n) & (sdf['MO_A'] == mo_a) & (sdf['SFO_N'] == 1) & (sdf['SFO_L'] == orb) & (sdf['Fragment_L'] == 'Cr') & (sdf['Fragment_N'] == fragment)
-                sum_ind = np.sum(ind)
-                assert sum_ind <= 1
-                if sum_ind == 1:
-                    p = sdf['percent'][ind].values[0]
-                    percent[i] = float(p[:-1])
-                    if DOS:
-                        e = sdf['E1'][ind].values[0]
-                        o = sdf['Occ1'][ind].values[0]
-                        assert (energy[i] == 0) or (energy[i] == e)
-                        energy[i] = e
-                        occ[i] = o
-                else:
-                    assert sum_ind == 0, str(sdf.loc[ind])
-                if printOutput:
-                    pdone = i * 100 // (n - 1)
-                    if pdone != (i - 1) * 100 // (n - 1):
-                        t = time.time()
-                        if pdone > 0:
-                            print('Orbital ' + orb + '.', pdone, '% done. Left: ', (100 - pdone) * (t - t0) // pdone, 's')
-            df[orb] = percent
-            if printOutput: print(df[orb])
-        if DOS:
-            df['E'] = energy
-            df['Occ'] = occ
-            # change order of columns
-            df = df[['E', 'Number', 'Spin', 'MO', "D:xy", "D:xz", "D:yz", "D:x2-y2", "D:z2", 'Occ']]
-            df.loc[df['Spin'] == 'Beta', orbitals] = -df.loc[df['Spin'] == 'Beta', orbitals]
             df.to_csv(os.path.splitext(filename)[0] + '_DOS_3d.csv', index=False)
         else:
             df.to_csv(os.path.splitext(filename)[0] + '_excitations_3d.csv', index=False)
@@ -485,19 +519,9 @@ def parse_ADFEmis(fileName, returnDOS=False):
     dos_sp = None
     if DOS_exists:
         DOS_en = np.array(DOS_en); DOS = np.array(DOS)
-        DOS_en_unique = np.unique(DOS_en)
-        DOS_unique = np.zeros(len(DOS_en_unique))
-        for i in range(len(DOS_en_unique)):
-            DOS_unique[i] = np.sum(DOS[DOS_en == DOS_en_unique[i]])
-        # make bars
-        de = np.min(DOS_en_unique[1:]-DOS_en_unique[:-1])
-        DOS_en_unique = np.concatenate((DOS_en_unique, DOS_en_unique-de/3, DOS_en_unique+de/3))
-        DOS_unique = np.concatenate((DOS_unique, np.zeros(len(DOS_unique)), np.zeros(len(DOS_unique))))
-        ind = np.argsort(DOS_en_unique)
-        DOS_en_unique = DOS_en_unique[ind]
-        DOS_unique = DOS_unique[ind]
-        
-        dos_sp = utils.Spectrum(DOS_en_unique, DOS_unique)
+        DOS_en,DOS = utils.fixMultiValue(DOS_en, DOS, gatherOp='sum')
+        DOS_en, DOS = utils.makeBars(DOS_en, DOS, base=0)
+        dos_sp = utils.Spectrum(DOS_en, DOS)
     if returnDOS: return spectrum, dos_sp
     else: return spectrum
 

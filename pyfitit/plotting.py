@@ -1,13 +1,14 @@
+import scipy.spatial.distance
+
 from . import utils
 utils.fixDisplayError()
-import os, warnings, json, matplotlib, copy, sklearn
+import os, warnings, json, matplotlib, sklearn, seaborn, cycler, logging
 from . import optimize, ML
 import numpy as np
 import pandas as pd
-from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
+import matplotlib.contour, matplotlib.colors
 from matplotlib.font_manager import FontProperties
-import cycler
 
 
 def createfig(interactive=False, figsize=None, figdpi=None, **kwargs):
@@ -18,7 +19,7 @@ def createfig(interactive=False, figsize=None, figdpi=None, **kwargs):
         if figsize is None: figsize = (16 * 0.5, 9 * 0.5)
         if figdpi is None: figdpi = 100
     else:
-        if figsize is None: figsize = (16 / 3 * 2, 9 / 3 * 2)
+        if figsize is None: figsize = (16 * 0.6, 9 * 0.6)
         if figdpi is None: figdpi = 300
     fig, ax = plt.subplots(figsize=figsize, dpi=figdpi, **kwargs)
     return fig, ax
@@ -32,15 +33,15 @@ def savefig(fileName, fig, figdpi=None):
     fig.savefig(fileName, dpi=figdpi)
 
 
-def closefig(fig):
+def closefig(fig, interactive=False):
     if matplotlib.get_backend() == 'nbAgg': return
     #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
     if fig.number in plt.get_fignums():
-        if utils.isJupyterNotebook(): plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
+        if utils.isJupyterNotebook() and interactive: plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
         plt.close(fig)
     else:
         print('Warning: can\'t close not existent figure')
-    if utils.isJupyterNotebook(): plt.ion()
+    if utils.isJupyterNotebook() and interactive: plt.ion()
 
 
 # append = {'label':..., 'data':..., 'twinx':True} or  [{'label':..., 'data':...}, {'label':..., 'data':...}, ...]
@@ -196,67 +197,100 @@ def wrap(s, n):
     return s
 
 
-#
-def plotToFile(*p, fileName=None, save_csv=True, title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None):
-    """
-    Simple plot multiple graphs to file
-    :param p: sequence of triads x1,y1,label1,x2,y2,label2,....
-    :param fileName:
-    :param save_csv: True/False
-    :param title:
-    :param xlabel:
-    :param ylabel:
-    :param xlim:
-    :param ylim:
-    :param plotMoreFunction: function(ax)
-    :return:
-    """
-    assert len(p)%3 == 0, f'Number of parameters {len(p)} is not multiple of 3'
-    fig, ax = createfig()
-    n = len(p)//3
-    labels = {}
-    for i in range(n):
-        if isinstance(p[i*3+2], str):
-            labels[i] = p[i*3+2]
-            ax.plot(p[i*3], p[i*3+1], label=labels[i])
-        else:
-            params = p[i*3+2]
-            assert isinstance(params, dict)
-            if 'format' in params:
-                fmt = params['format']
-                del params['format']
-                ax.plot(p[i * 3], p[i * 3 + 1], fmt, **params)
-            else:
-                ax.plot(p[i * 3], p[i * 3 + 1], **params)
-            if 'label' in params: labels[i] = params['label']
+def setFigureSettings(ax, title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None, yscale=None, tight_layout=True, grid=False, legend=True):
     if title != '':
-        # print(title)
         title = wrap(title, 100)
         ax.set_title(title)
-    if xlim is not None: ax.set_xlim(xlim[0], xlim[1])
+    if xlim is not None:
+        ax.set_xlim(xlim[0], xlim[1])
+        updateYLim(ax)
     if ylim is not None: ax.set_ylim(ylim[0], ylim[1])
     if xlabel != '': ax.set_xlabel(xlabel)
     if ylabel != '': ax.set_ylabel(ylabel)
     if plotMoreFunction is not None:
         plotMoreFunction(ax)
-    ax.legend()
-    fig.tight_layout()
+    if yscale is not None:
+        ax.set_yscale(yscale)
+
+    l = logging.getLogger()
+    level = l.getEffectiveLevel()
+    l.setLevel(logging.CRITICAL)
+    if legend: ax.legend()
+    l.setLevel(level)
+    if grid: ax.grid()
+    if tight_layout: ax.figure.tight_layout()
+
+
+def plotToFile(*p, axisMatrix=None, axisMatrixKw=None, fileName=None, save_csv=True, showInNotebook=False, **kw):
+    """
+    Simple plot multiple graphs to file
+    :param p: sequence of triads x1,y1,label1,x2,y2,label2,.... You can use dict with plot params instead of label (for example 'fmt' - line format)
+    :param axisMatrix: list(list(*p))
+    :param fileName:
+    :param save_csv: True/False
+    :param kw: title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None (function(ax)), yscale=None, tight_layout=True, grid=False
+    """
+    assert len(p)%3 == 0, f'Number of parameters {len(p)} is not multiple of 3'
+    assert len(p) == 0 or axisMatrix is None
+    assert len(p) > 0 or axisMatrix is not None
+    if axisMatrix is not None: assert isinstance(axisMatrix, list) and isinstance(axisMatrix[0], list) and isinstance(axisMatrix[0][0], tuple)
+    if axisMatrix is None:
+        fig, ax = createfig(interactive=showInNotebook)
+        ax = [[ax]]
+        axisMatrixKw = [[kw]]
+        axisMatrix = [[p]]
+    else:
+        fig, ax = createfig(interactive=showInNotebook, nrows=len(axisMatrix), ncols=len(axisMatrix[0]), squeeze=False)
+    toSave = []
+
+    def plot(ax, p, kw):
+        n = len(p)//3
+        for i in range(n):
+            if isinstance(p[i*3+2], str):
+                label = p[i*3+2]
+                ax.plot(p[i*3], p[i*3+1], label=label)
+            else:
+                params = p[i*3+2]
+                assert isinstance(params, dict)
+                ax.plot(p[i*3], p[i*3+1], **params)
+                label = params['label'] if 'label' in params else str(i)
+            toSave.append({'label':label, 'x':p[i*3], 'y':p[i*3+1]})
+        setFigureSettings(ax, **kw)
+    for i in range(len(axisMatrix)):
+        for j in range(len(axisMatrix[0])):
+            plot(ax[i][j], axisMatrix[i][j], axisMatrixKw[i][j])
     if fileName is None: fileName = 'graph.png'
     folder = os.path.split(os.path.expanduser(fileName))[0]
     if folder != '' and not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
-    fig.tight_layout()
     savefig(fileName, fig)
-    closefig(fig)
+    closefig(fig, interactive=showInNotebook)
 
     if save_csv:
-        with open(os.path.splitext(fileName)[0]+'.csv', 'w') as f:
-            for i in range(n):
-                label = labels[i] if i in labels else str(i)
+        def save(file, obj):
+            if not isinstance(obj, np.ndarray): obj = np.array(obj)
+            obj = obj.reshape(1,-1)
+            np.savetxt(file, obj, delimiter=',')
+        with open(os.path.splitext(fileName)[0]+'.txt', 'w') as f:
+            for item in toSave:
+                label = item['label']
                 f.write(label+' x: ')
-                np.savetxt(f, p[i*3], delimiter=',', newline=',')
-                f.write('\n')
+                save(f,item['x'])
                 f.write(label+' y: ')
-                np.savetxt(f, p[i*3+1], delimiter=',', newline=',')
+                save(f, item['y'])
+
+
+def readPlottingFile(fileName):
+    with open(fileName) as f: s = f.read().strip()
+    d = {}
+    for line in s.split('\n'):
+        name0 = line.split(':')[0]
+        name = name0
+        i = 1
+        while name in d:
+            name = f'{name}_{i}'
+            i+=1
+        d[name] = np.array([float(w) for w in line.split(':')[1].split(',')])
+    return d
 
 
 def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryParams, xanes, N=20, estimator=ML.Normalize(ML.makeQuadric(ML.RidgeCV(alphas=[0.01,0.1,1,10,100])), xOnly=False) ):
@@ -279,6 +313,7 @@ def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryPar
     np.savetxt(outputFileName, evo, header=header)
     # нарисовать график!!!!!!
 
+
 def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
     fig, ax = createfig()
     classNum = predProba.size
@@ -298,78 +333,161 @@ def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
 
 def truncate_colormap(cmapName, minval=0.0, maxval=1.0, n=100):
     import matplotlib.colors as colors
-    cmap = plt.get_cmap(cmapName)
+    if isinstance(cmapName, str): cmap = plt.get_cmap(cmapName)
+    else: cmap = cmapName
     new_cmap = colors.LinearSegmentedColormap.from_list('trunc({n},{a:.2f},{b:.2f})'.format(n=cmapName, a=minval, b=maxval), cmap(np.linspace(minval, maxval, n)))
     return new_cmap
 
 
-def plotSample(energy, spectra, color_param=None, sortByColors=False, fileName=None):
+def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=None, alpha=None, colorBarFormat='%.2g', colorBarLabel=None, cmap='gist_rainbow', **kw):
     """Plot all spectra on the same graph colored by some parameter. Order of plotting is controled by sortByColors parameter
 
     :param energy: energy values
     :param spectra: 2d numpy matrix, each row is a spectrum
-    :param color_param: Values of parameter to use for color, defaults to None
+    :param colorParam: Values of parameter to use for color, defaults to None
     :param sortByColors: Order of plotting: random or sorted by color parameter, defaults to False
-    :param fileName: File to save graph. If none - figure is returned 
+    :param fileName: File to save graph. If none - figure is returned
+    :param alpha: alpha
+    :param cmap: color map name, examples: 'seaborn husl' 'gist_rainbow' 'jet' 'nipy_spectral'
     """
     assert len(energy) == spectra.shape[1]
+    colorMap = parseColorMap(cmap)
+    if alpha is None: alpha = getDefaultSpectraAlpha(len(spectra))
     if isinstance(spectra, pd.DataFrame): spectra = spectra.to_numpy()
     nanExists = False
-    if color_param is not None:
-        indNan = np.isnan(color_param)
+    if colorParam is not None:
+        indNan = np.isnan(colorParam)
         nanExists = np.any(indNan)
         if nanExists:
-            color_param0 = color_param
+            color_param0 = colorParam
             spectra0 = spectra
-            color_param = color_param[~indNan]
+            colorParam = colorParam[~indNan]
             spectra = spectra[~indNan]
     if sortByColors:
-        assert color_param is not None
-        ind = np.argsort(color_param)
+        assert colorParam is not None
+        ind = np.argsort(colorParam)
     else:
         ind = np.random.permutation(spectra.shape[0])
     spectra = spectra[ind]
 
     fig, ax = createfig(interactive=True)
-    if color_param is not None:
-        assert len(color_param) == spectra.shape[0]
-        colors = (color_param-np.min(color_param))/(np.max(color_param)-np.min(color_param)) * 0.9
-        colors = plt.cm.hsv(colors)
+    if colorParam is not None:
+        assert len(colorParam) == spectra.shape[0]
+        c_min, c_max = np.min(colorParam), np.max(colorParam)
+        transform = lambda r: (r - c_min) / (c_max - c_min)
+        colors = transform(colorParam)
+        colors = colorMap(colors)
         colors = colors[ind]
         ax.set_prop_cycle(cycler.cycler('color', colors))
-    else: colors = ['k']*spectra.shape[0]
+        if ML.isClassification(colorParam):
+            ticks = np.unique(colorParam)
+        else:
+            ticks = np.linspace(np.min(colorParam), np.max(colorParam), 10)
+        ticksPos = transform(ticks)
+        addColorBar(mappable=plt.cm.ScalarMappable(norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap=colorMap), fig=fig, ax=ax, labelMaps={}, label='', ticksPos=ticksPos, ticks=ticks, format=colorBarFormat, colorBarLabel=colorBarLabel)
+    else:
+        colors = ['k']*spectra.shape[0]
+        ax.set_prop_cycle(cycler.cycler('color', colors))
 
     for i in range(spectra.shape[0]):
-        ax.plot(energy, spectra[i], lw=0.5, alpha=0.8)
+        ax.plot(energy, spectra[i], lw=0.5, alpha=alpha)
     if nanExists:
         for i in np.where(indNan)[0]:
-            ax.plot(energy, spectra0[i], color='k', lw=0.5, alpha=0.8)
-
+            ax.plot(energy, spectra0[i], color='k', lw=0.5, alpha=alpha)
+    setFigureSettings(ax, **kw)
     if fileName is not None:
         savefig(fileName, fig)
-        closefig(fig)
+        closefig(fig, interactive=True)
     else: return fig
 
 
 def getPlotLim(z, gap=0.1):
-    m = np.min(z)
-    M = np.max(z)
+    z1 = z[np.isfinite(z)]
+    if len(z1) == 0: return None
+    m = np.min(z1)
+    M = np.max(z1)
     d = M-m
     return [m-d*gap, M+d*gap]
 
 
-def addColorBar(mappable, fig, ax, labelMaps, label, ticksPos, ticks):
-    cbar = fig.colorbar(mappable, ax=ax, extend='max', orientation='vertical', ticks=ticksPos, format='%.1g')
+def updateYLim(ax):
+    xlim = ax.get_xlim()
+    ybounds = []
+    for line in ax.lines:
+        x = line.get_xdata()
+        y = line.get_ydata()
+        lim = getPlotLim(y[(xlim[0] <= x) & (x <= xlim[1])])
+        if lim is not None: ybounds.append(lim)
+    ybounds = np.array(ybounds)
+    ylim = [np.min(ybounds[:, 0]), np.max(ybounds[:, 1])]
+    ax.set_ylim(ylim)
+
+
+def addColorBar(mappable, fig, ax, labelMaps, label, ticksPos, ticks, format='%.2g', colorBarLabel=None):
+    if isinstance(mappable, matplotlib.contour.QuadContourSet): ex = {}
+    else: ex = {'extend':'max'}
+    cbar = fig.colorbar(mappable, ax=ax, **ex, orientation='vertical', ticks=ticksPos, format='%.1g', label=colorBarLabel)
+    # old code (not work properly too)
+    # cbar = fig.colorbar(mappable, ax=ax, extend='max', orientation='vertical', ticks=ticksPos, format='%.1g')
     if label in labelMaps:
         cbarTicks = [None]*len(labelMaps[label])
         for name in labelMaps[label]:
             cbarTicks[labelMaps[label][name]] = name
         cbar.ax.set_yticklabels(cbarTicks)
     else:
+        if isinstance(ticks[0], float):
+            ticks = [format % t for t in ticks]
         cbar.ax.set_yticklabels(ticks)
 
 
-def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=None, markersize=500, marker='o', alpha=0.8, title='', xlabel='', ylabel='', fileName='scatter.png', plotMoreFunction=None):
+def parseColorMap(cmap):
+    """
+    :param cmap: pyplot color map name, or 'seaborn ...' - seaborn (if it is map object - returns itself). Examples: 'seaborn husl' 'gist_rainbow' 'jet' 'nipy_spectral'
+    """
+    if 'seaborn' in cmap:
+        colorMap = seaborn.color_palette(cmap.split(' ')[1], as_cmap=True)
+        if np.linalg.norm(np.array(colorMap(0))-colorMap(1)) < 0.2:
+            colorMap = truncate_colormap(colorMap, minval=0, maxval=0.8)
+    else:
+        if isinstance(cmap, str):
+            colorMap = plt.cm.get_cmap(name=cmap)
+        else:
+            colorMap = cmap
+    return colorMap
+
+
+def getScatterDefaultParams(x, y, dpi):
+    if not isinstance(x, np.ndarray): x = np.array(x)
+    if not isinstance(y, np.ndarray): y = np.array(y)
+    scale = 1 #dpi / 300  # 1 - for 300dpi
+    alpha = 0.8
+    markersize = 22
+    minSize = 6
+    maxSize = 30
+    z = np.hstack((x.reshape(-1,1), y.reshape(-1,1)))
+    z = z/np.std(z,axis=0)
+    d = scipy.spatial.distance.cdist(z,z)
+    mind = np.array([np.min(d[i][d[i]>0]) for i in range(len(z))])
+    maxIntersectPercent = 0.5
+    r = np.quantile(mind, q=maxIntersectPercent)
+
+    max = np.max(d)
+    if max > 0:
+        # markersize=1 means 500 markers in diagonal
+        diagonalCount = max/r
+        markersize = np.max([500/diagonalCount,minSize])
+        markersize = np.min([markersize, maxSize])
+        if markersize == minSize:
+            overlapMarkerCount = minSize / (500/diagonalCount)
+            alpha = 1/overlapMarkerCount
+    return markersize*scale, alpha
+
+
+def getDefaultSpectraAlpha(count):
+    return min(1/count*100,1)
+
+
+def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=None, markersize=None, marker='o', alpha=None, edgecolor=None, fileName='scatter.png', **kw):
     """
 
     :param x:
@@ -396,39 +514,33 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     assert len(x) == len(y)
     if color is not None: assert len(color) == len(x)
     fig,ax = createfig()
-    if colorMap == 'hsv':
-        colorMap = truncate_colormap('hsv', minval=0, maxval=0.9)
-        trunc = True
-    else: trunc = False
+    defaultMarkersize, defaulAlpha = getScatterDefaultParams(x, y, fig.dpi)
+    if markersize is None: markersize = defaultMarkersize
+    if alpha is None: alpha = defaulAlpha
+    if edgecolor is None: edgecolor = '#555'
+    colorMap = parseColorMap(colorMap)
     if color is not None:
         c = color
         c_min = np.min(c)
         c_max = np.max(c)
-        coeff = 0.9 if trunc else 1
-        transform = lambda r: (r - c_min) / (c_max - c_min) * coeff
+        transform = lambda r: (r - c_min) / (c_max - c_min)
         if ML.isClassification(color):
             ticks = np.unique(color)
         else:
             ticks = np.linspace(c_min, c_max, 10)
         ticksPos = transform(ticks)
-        sc = ax.scatter(x, y, markersize, marker=marker, c=transform(c), cmap=colorMap, vmin=0, vmax=1, alpha=alpha)
+        sc = ax.scatter(x, y, s=markersize**2, marker=marker, c=transform(c), cmap=colorMap, vmin=0, vmax=1, alpha=alpha, edgecolor=edgecolor)
         addColorBar(sc, fig, ax, {}, '', ticksPos, ticks)
     else:
-        ax.scatter(x, y, markersize, color='green', alpha=alpha)
-    if marker_text is not None:
-        assert len(marker_text) == len(x)
-        if text_size is None: text_size = np.sqrt(markersize)*0.4
+        ax.scatter(x, y, s=markersize**2, color='green', alpha=alpha, edgecolor=edgecolor)
+    if marker_text is not None and (text_size is None or text_size > 0):
+        assert len(marker_text) == len(x), f'{len(marker_text)} != {len(x)}'
+        if text_size is None: text_size = markersize*0.4
         for i in range(len(marker_text)):
             ax.text(x[i], y[i], str(marker_text[i]), ha='center', va='center', size=text_size)
-    if title != '':
-        title = wrap(title, 100)
-        ax.set_title(title)
     ax.set_xlim(getPlotLim(x))
     ax.set_ylim(getPlotLim(y))
-    if xlabel != '': ax.set_xlabel(xlabel)
-    if ylabel != '': ax.set_ylabel(ylabel)
-    if plotMoreFunction is not None:
-        plotMoreFunction(ax)
+    setFigureSettings(ax, **kw)
     savefig(fileName, fig)
     closefig(fig)
     csv_data = pd.DataFrame()
@@ -438,7 +550,22 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     csv_data.to_csv(os.path.splitext(fileName)[0] + '.csv', index=False)
 
 
-def plotConfusionMatrixHelper(conf_mat, accuracy, labelName, uniqueLabelValues, fileName):
+def plotMatrix(mat, cmap=None, ticklabels=None, annot=False, fmt='.2g', fileName=None, **kw):
+    fig, ax = createfig()
+    if ticklabels is not None:
+        assert mat.shape[0] == len(ticklabels) and mat.shape[1] == len(ticklabels)
+        df = pd.DataFrame(data=mat[::-1,:], columns=ticklabels, index=ticklabels[::-1])
+        ax = seaborn.heatmap(df, annot=annot, fmt=fmt, cmap=cmap, ax=ax)
+    else:
+        ax = seaborn.heatmap(mat, annot=annot, fmt=fmt, cmap=cmap)
+    setFigureSettings(ax, **kw)
+    if fileName is not None:
+        savefig(fileName, fig)
+        closefig(fig)
+    else: return fig, ax
+
+
+def plotConfusionMatrixHelper(conf_mat, accuracy, labelName, uniqueLabelValues, fileName, **kw):
     fig, ax = createfig()
     pos = ax.matshow(conf_mat.T, cmap='plasma')
     fig.colorbar(pos, ax=ax)
@@ -446,30 +573,69 @@ def plotConfusionMatrixHelper(conf_mat, accuracy, labelName, uniqueLabelValues, 
     ax.set_title(title)
     ax.set_xlabel('predicted ' + labelName)
     ax.set_ylabel('true ' + labelName)
-    ticks = [''] + ['%g' % v for v in uniqueLabelValues]
+    ticks = ['%g' % v for v in uniqueLabelValues]
     m = len(uniqueLabelValues)
+    ax.xaxis.set_major_locator(matplotlib.ticker.FixedLocator(np.arange(m)))
     ax.set_xticklabels(ticks)
+    ax.yaxis.set_major_locator(matplotlib.ticker.FixedLocator(np.arange(m)))
     ax.set_yticklabels(ticks)
     # print(ticks)
     for i in range(m):
         for j in range(m):
             ax.text(i, j, '%.2g' % conf_mat[i, j], ha='center', va='center', size=10)
+    setFigureSettings(ax, **kw)
     savefig(fileName, fig)
     closefig(fig)
 
 
-def plotConfusionMatrix(trueLabels, predictedLabels, labelName, fileName=''):
+def plotConfusionMatrix(trueLabels, predictedLabels, labelName, labelMap=None, cmap=None, fileName='', **kw):
+    """
+    :param labelMap: dict{userFriendlyLabel:index}
+    """
     n = len(trueLabels)
     assert n == len(predictedLabels)
     conf_mat = sklearn.metrics.confusion_matrix(trueLabels, predictedLabels)/n
+    if labelMap is not None:
+        lm = {labelMap[l]:l for l in labelMap}
+        trueLabels = np.array([lm[int(l)] for l in trueLabels])
+        predictedLabels = np.array([lm[int(l)] for l in predictedLabels])
     # print(conf_mat)
     if fileName == '': fileN = f'conf_matr_{labelName}.png'
     else: fileN = fileName
     acc = np.sum(trueLabels == predictedLabels) / len(trueLabels)
-    plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+    if 'title' not in kw:
+        kw['title'] = 'Confusion matrix for label ' + labelName + f'. Accuracy = {acc:.2f}'
+    if 'xlabel' not in kw:
+        kw['xlabel'] = 'predicted ' + labelName
+    if 'ylabel' not in kw:
+        kw['ylabel'] = 'true ' + labelName
+    plotMatrix(conf_mat, cmap=cmap, ticklabels=np.unique(trueLabels), annot=True, fmt='.2g', fileName=fileN, **kw)
+    # plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
     for j in range(len(np.unique(trueLabels))):
         sum = np.sum(conf_mat[:,j])
         if sum != 0: conf_mat[:,j] /= sum
     fileN = os.path.splitext(fileN)[0] + '_normed' + os.path.splitext(fileN)[1]
-    plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+    plotMatrix(conf_mat, cmap=cmap, ticklabels=np.unique(trueLabels), annot=True, fmt='.2g', fileName=fileN, **kw)
+    # plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+
+
+def plotHeatMap(func, xlim, ylim, N1=50, N2=50, cmap='plasma', fileName='heatmap.png', **kw):
+    """
+    Plot heatmap for func(z), z == [x,y]
+    """
+    axisValues = [np.linspace(xlim[0], xlim[1], N1), np.linspace(ylim[0], ylim[1], N2)]
+    param1mesh, param2mesh = np.meshgrid(axisValues[0], axisValues[1])
+    funcValues = np.zeros(param1mesh.shape)
+    k = 0
+    for i0 in range(N1):
+        for i1 in range(N2):
+            funcValues[i0, i1] = func([param1mesh[i0, i1], param2mesh[i0, i1]])
+            k += 1
+    fig, ax = createfig()
+    CS = plt.contourf(param1mesh, param2mesh, funcValues, cmap=cmap)
+    plt.clabel(CS, fmt='%2.2f', colors='k', fontsize=15, inline=False)
+    fig.colorbar(CS)
+    setFigureSettings(ax, **kw)
+    savefig(fileName, fig)
+    closefig(fig)
 

@@ -33,8 +33,18 @@ See examples folder in this repository.
 - Mikhail Soldatov
 
 ### If you like the software acknowledge it using the references below:
-[A. Martini, S. A. Guda, A. A. Guda, G. Smolentsev, A. Algasov, O. Usoltsev, M. A. Soldatov, A. Bugaev, Yu. Rusalev, C. Lamberti, A. V. Soldatov "PyFitit: the software for quantitative analysis of XANES spectra using machine-learning algorithms" Computer Physics Communications. 2019. DOI: 10.1016/j.cpc.2019.107064](https://doi.org/10.1016/j.cpc.2019.107064)
+
+[A.Martini, A.A. Guda, S.A. Guda, A.L. Bugaev, O.V. Safonova, A.V. Soldatov  Machine Learning Powered by Principal Component Descriptors as the Key for Sorted Structural Fit of XANES // Phys. Chem. Chem. Phys., 2021](https://doi.org/10.1039/D1CP01794B)
+
+[A. Martini, A. L. Bugaev, S. A. Guda, A. A. Guda, E. Priola, E. Borfecchia, S. Smolders, K. Janssens, D. De Vos, and A. V. Soldatov
+Revisiting the Extended X-ray Absorption Fine Structure Fitting Procedure through a Machine Learning-Based Approach // The Journal of Physical Chemistry A Article ASAP](https://doi.org/10.1021/acs.jpca.1c03746)
+
+[Guda A.A., Guda S.A., Martini A., Kravtsova A.N., Algasov A., Bugaev A., Kubrin S.P., Guda L.V., Šot P., van Bokhoven J.A., Copéret C., Soldatov A.V. Understanding X-ray absorption spectra by means of descriptors and machine learning algorithms (2021) npj Computational Materials, 7 (1), art. no. 203](https://doi.org/10.1038/s41524-021-00664-9)
+
+[Kozyr E.G., Bugaev A.L., Guda S.A., Guda A.A., Lomachenko K.A., Janssens K., Smolders S., De Vos D., Soldatov A.V. Speciation of Ru Molecular Complexes in a Homogeneous Catalytic System: Fingerprint XANES Analysis Guided by Machine Learning (2021) Journal of Physical Chemistry C, 125 (50), pp. 27844 - 27852](https://doi.org/10.1021/acs.jpcc.1c09082)
 
 [A. Martini, A.A. Guda, S.A. Guda, A.L. Bugaev, O.V. Safonova, A.V. Soldatov "Machine Learning Powered by Principal Component Descriptors as the Key for Sorted Structural Fit of XANES" // Phys. Chem. Chem. Phys., 2021 DOI: 10.1039/D1CP01794B](https://doi.org/10.1039/D1CP01794B)
 
 [A. Martini, A. A. Guda, S. A. Guda, A. Dulina, F. Tavani, P. D’Angelo, E. Borfecchia, and A. V. Soldatov. Estimating a Set of Pure XANES Spectra from Multicomponent Chemical Mixtures Using a Transformation Matrix-Based Approach //  In: Di Cicco A., Giuli G., Trapananti A. (eds) Synchrotron Radiation Science and Applications. Springer Proceedings in Physics, vol 220. Springer, Cham. DOI: 10.1007/978-3-030-72005-6_6](https://doi.org/10.1007/978-3-030-72005-6_6)
+
+[A. Martini, S. A. Guda, A. A. Guda, G. Smolentsev, A. Algasov, O. Usoltsev, M. A. Soldatov, A. Bugaev, Yu. Rusalev, C. Lamberti, A. V. Soldatov "PyFitit: the software for quantitative analysis of XANES spectra using machine-learning algorithms" Computer Physics Communications. 2019. DOI: 10.1016/j.cpc.2019.107064](https://doi.org/10.1016/j.cpc.2019.107064)

@@ -95,7 +95,7 @@ def fit_to_experiment_by_norm_or_regression(exp_e, exp_xanes, fit_interval, fdmn
             return fdmnes_xan * (norm['a']*exp_e + norm['b']), norm
 
 
-def fit_by_polynom(e1, xan1, fit_interval):
+def fit_by_polynom_old(e1, xan1, fit_interval):
     e, xan = utils.limit(fit_interval, e1, xan1)
 
     def model(t, e0, a):
@@ -114,6 +114,13 @@ def fit_by_polynom(e1, xan1, fit_interval):
     return app
 
 
+def fit_by_polynom(e1, xan1, fit_interval, deg):
+    e, xan = utils.limit(fit_interval, e1, xan1)
+    assert len(e)>0, f"All energies is out of fit interval {fit_interval}. Energy = " + str(e1)
+    p = np.polyfit(e, xan, deg)
+    return np.polyval(p, e1)
+
+
 def findExpEfermi(exp_e, exp_xanes, search_shift_level):
     ind = np.where(exp_xanes>=search_shift_level)[0][0]
     exp_Efermi_left = exp_e[ind]
@@ -125,6 +132,14 @@ def findExpEfermi(exp_e, exp_xanes, search_shift_level):
         i += 1
     exp_Efermi_right = exp_e[i]
     return exp_Efermi_left, exp_Efermi_peak, exp_Efermi_right
+
+
+def findEfermiFast(e, xanes):
+    max_v = np.mean(xanes[-5:])
+    min_v = np.min(xanes)
+    search_level = (max_v+min_v)/2
+    ind = np.where(xanes<=search_level)[0][-1]
+    return e[ind]
 
 
 def findEfermiByArcTan(energy, intensity):

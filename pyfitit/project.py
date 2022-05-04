@@ -1,14 +1,21 @@
 import copy, os, json, jupytext, nbformat
 from . import utils, smoothLib, optimize
-from importlib.machinery import SourceFileLoader
+# from importlib.machinery import SourceFileLoader, ExtensionFileLoader
 from types import MethodType
 import ipywidgets as widgets
-from IPython.display import display, Javascript, HTML
+from IPython.display import display, Javascript
+
 
 def loadProject(projectFile, *params0, **params1):
+    import importlib.util as _importlib_util
     projectFile = utils.fixPath(projectFile)
-    ProjectModule = SourceFileLoader(utils.randomString(10), projectFile).load_module()
+    name = utils.randomString(10)
+    spec = _importlib_util.spec_from_file_location(name, projectFile)
+    ProjectModule = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(ProjectModule)
+    # ProjectModule = SourceFileLoader(name, projectFile).load_module()
     return ProjectModule.projectConstructor(*params0, **params1)
+
 
 def createPartialProject(name = None, expSpectrum = None, intervals = None, fdmnesShift = 0, geometryParamRanges = None, moleculeConstructor = None):
     project = Project()

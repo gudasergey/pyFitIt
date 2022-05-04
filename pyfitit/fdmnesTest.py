@@ -9,11 +9,11 @@ def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, C
 
 
 def parse_one_folder(d):
-    return fdmnes.parse_one_folder(d)
+    return fdmnes.parseOneFolder(d)
 
 
 def get_good_folders(parentFolder):
-    return fdmnes.get_good_folders(parentFolder)
+    return fdmnes.getGoodFolders(parentFolder)
 
 
 def getParams(filename):

@@ -1,0 +1,40 @@
+! General indata file for FDMNES
+! with indata files examples
+
+ 1
+Sim/Test_stand/in/Cu_inp.txt
+
+Sim/Test_stand/in/Ba2ZnUO6_inp.txt
+Sim/Test_stand/in/Ca3Co2O6_inp.txt
+Sim/Test_stand/in/Cr_inp.txt
+Sim/Test_stand/in/Cr_conv_inp.txt
+Sim/Test_stand/in/CuO_inp.txt
+Sim/Test_stand/in/Fe_bio_inp.txt
+Sim/Test_stand/in/Fe2O3_inp.txt
+Sim/Test_stand/in/Fe2O3_selec_inp.txt
+Sim/Test_stand/in/Fe2O3_scf_inp.txt
+Sim/Test_stand/in/Fe2O3_hub_inp.txt
+Sim/Test_stand/in/Fe3O4_inp.txt
+Sim/Test_stand/in/Fe3O4_dd_inp.txt
+Sim/Test_stand/in/Fe3O4_Ag_2D_inp.txt
+Sim/Test_stand/in/FeO6_inp.txt
+Sim/Test_stand/in/GaN_inp.txt
+Sim/Test_stand/in/LiF_NRIXS_inp.txt
+Sim/Test_stand/in/Mult_inp.txt
+Sim/Test_stand/in/NdMg_inp.txt
+Sim/Test_stand/in/NdMg_FDM_mg_inp.txt
+Sim/Test_stand/in/NdMg_FDM_so_inp.txt
+Sim/Test_stand/in/Ni_inp.txt
+Sim/Test_stand/in/Ni_mg_inp.txt
+Sim/Test_stand/in/Pt13_inp.txt
+Sim/Test_stand/in/PuHClO4_VI_inp.txt
+Sim/Test_stand/in/TiO2_lapw_inp.txt
+Sim/Test_stand/in/V2O3_inp.txt
+Sim/Test_stand/in/VO6_inp.txt
+Sim/Test_stand/in/VO6_conv_inp.txt
+Sim/Test_stand/in/VO6_nodipole_inp.txt
+Sim/Test_stand/in/VO6_tddft_inp.txt
+Sim/Test_stand/in/AminoAcid_Optic_inp.txt
+
+
+

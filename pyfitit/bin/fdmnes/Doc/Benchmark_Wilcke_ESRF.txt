@@ -1,0 +1,298 @@
+               HPC Benchmark Tests with FDMNES                        28/03/2019
+               ===============================
+
+                Rainer Wilcke, ESRF, Grenoble
+                      (wilcke@esrf.fr)
+
+This writeup contains the results of the HPC benchmarking tests that were done
+by the ESRF during the HNSci Cloud project in 2018.
+
+It is organized as follows:
+
+1) FDMNES software used for the benchmark test
+2) hardware of the three compute clusters used
+3) benchmarking results
+4) discussion of the results
+
+
+1) The FDMNES Program
+=====================
+
+FDMNES is a program for the calculation of the spectra of the absorption of
+X-rays in material. For this, it processes a user-defined range of energies,
+calculates the resulting spectra and writes them to output.
+
+Depending on the size of the models investigated, it can be very compute and
+memory intensive - up to 100 cores with 100 GB of memory per parallel process
+for up to a week is not uncommon. However, both its input and output data files
+are relatively small, in total typically less than 1 GB. This makes it an
+interesting test case for HPC calculations: a high demand on compute power and a
+low demand on data transfer capacity.
+
+FDMNES uses parallel processing for the calculations, with two levels of
+parallelisation. The principal parallelisation is over the range of energies.
+This can require rather large amounts of memory, and it is often not possible to
+run as many parallel processes on the nodes as there are cores available because
+there is not enough memory to accommodate them. It is then necessary to
+"undersubscribe" the nodes, i.e. to use less parallel processes than cores in
+order to give each process more memory. This parallelisation scales well with
+increasing number of parallel processes.
+
+The energy calculations involve the solution of a sparse matrix equation, which
+in turn can be parallelised. Each energy calculation then uses a user-defined
+number of parallel processes for the matrix calculation. This parallelisation
+goes into saturation at about 4 parallel matrix processes per energy.
+
+In principle, the most efficient way to use the program is to not parallelise
+the matrix calculation and to run the energy calculation on as many parallel
+processes as there are cores. However, if this is not possible because of memory
+requirements, it can be advantageous to parallelise the matrix calculation as
+well, because it uses only little additional memory. This way some of the cores
+that otherwise just would sit idle are used for the matrix calculations,
+resulting in a moderate but still noticeable additional speedup.
+
+The total amount of parallel processes in a FDMNES run is given by
+
+   ntotal = (# processes energy calculation) * (# processes matrix calculation)
+
+
+2) Hardware of the Compute Clusters
+===================================
+
+During the HNSci Cloud project, the program was run on both the OTC and the RHEA
+(Exoscale) clusters, and also on the local compute cluster of the ESRF for
+comparison. Models of different size were computed, identified in the tables
+below by the increasing value of the "radius" parameter on top of each table.
+
+The principal characteristics of the computers used are listed below. Note that
+the OTC "e1.8xlarge" node type was only used in the test case "radius 7.0" to
+find out the effect of using less nodes but with a much larger memory per node.
+These results are easily identified by having 940 GB of memory per node.
+
+RHEA: Titan          128 GB  16 cores, 2.2 GHz
+OTC:  m2.8xlarge.8   256 GB  28 cores, 2.6 GHz
+OTC:  e1.8xlarge     940 GB  18 cores, 2.3 GHz
+ESRF: hpc3/hib3      252 GB  28 cores, 3.3 GHz
+
+The ESRF cluster has some nodes (labeled "hib3") that are connected by the fast
+Infiniband network, whereas some others (labeled "tcp") are not. The two types
+can be mixed in a calculation, in which case the network uses only the slower
+"tcp" connection type. This was used for some tests ("radius 7.0") to find out
+the influence of the network speed on the calculations. If "both" or just "ESRF"
+is stated, there was a mix of both node types used for the calculation.
+
+Just taking into account the clock rate of the processors, the speedup should be
+as follows:
+
+OTC e1.8xlarge    /  RHEA Titan      1.05
+OTC m2.8xlarge.8  /  RHEA Titan      1.18
+ESRF              /  RHEA Titan      1.50
+
+OTC m2.8xlarge.8  /  e1.8xlarge      1.13
+ESRF              /  e1.8xlarge      1.43
+
+ESRF              /  m2.8xlarge.8    1.27
+
+In principle, one would also have to take into account that some of the clusters
+enable hyperthreading on the nodes and others do not. However, in all of the
+cases investigated the nodes were heavily "undersubscribed" with considerably
+less than half of the "virtual CPUs" active in the calculations. Thus every
+process should in principle have run on a real core and hyperthreading effects
+therefore not have played a role.
+
+
+3) Results of the Benchmark Tests
+=================================
+
+All tests were run on homogeneous clusters, i.e. all nodes in a created cluster
+were of the same type. With the exception of OTC for the "7.0" case, the node
+type was always the same for a given cluster provider for all tests.
+
+The labels in the tables below mean:
+nodes           number of nodes available on the created compute cluster
+cores total     number of cores available on the created compute cluster
+cores / node    number of cores available per node
+mem / node      total memory available per node (GB)
+used cor / nd   number of cores used per node for the calculation
+procs           total number of parallel processes for the calculation
+procs energ     number of parallel processes for the energy calculation
+procs matrx     number of parallel processes for the matrix calculation
+used Mem / Proc amount of memory used per parallel process (GB)
+elapsed time s  elapsed time (walltime) in seconds for the complete calculation
+
+radius: 4.4
+cluster  nodes cores cores mem/ used   procs procs procs used     elapsed
+               total /node node cor/nd       energ matrx Mem/Proc time s  
+ESRF         4   112    28  252      8    32     8     4       12   24112
+RHEA         8   128    16  128      4    32     4     8       12   43268
+OTC          4   128    32  256      8    32     8     4       12   21178
+
+radius: 5.5
+cluster  nodes cores cores mem/ used   procs procs procs used     elapsed
+               total /node node cor/nd       energ matrx Mem/Proc time s  
+ESRF (tcp)   4   112    28  252      8    32     8     4       24   57252
+RHEA         8   128    16  128      4    32     4     8       24  102071
+OTC          4   128    32  256      8    32     8     4       24   49957
+
+radius: 6.0
+cluster  nodes cores cores mem/ used   procs procs procs used     elapsed
+               total /node node cor/nd       energ matrx Mem/Proc time s  
+ESRF (tcp)   4   112    28  252      8    32     8     4       32   84041 
+RHEA         8   128    16  128      4    32     4     8       32  158502
+OTC          8   256    32  256      4    32     4     8       32  129869
+
+radius: 7.0
+cluster  nodes cores cores mem/ used   procs procs procs used     elapsed
+               total /node node cor/nd       energ matrx Mem/Proc time s  
+ESRF (ib)    6   168    28  252      4    24     4     6       50  258845
+ESRF (tcp)   8   224    28  252      4    32     4     8       50  229053
+ESRF (ib)    8   224    28  252      4    32     4     8       50  212616
+ESRF (both)  8   224    28  252      2    16    16     1      120  226428
+RHEA         8   128    16  128      2    16     2     8       50  543056
+OTC          8   256    32  256      4    32     4     8       50  252793
+OTC          4   128    32  940      8    32     8     4       50  271005
+OTC          4   128    32  940      8    32    32     1      120  271592
+
+
+4) Discussion of the Results
+============================
+
+As expected both the total elapsed time and the memory used per process increase
+with the size of the problem calculated (indicated by the increasing "radius"
+value in the tables).
+
+It can also be seen that the RHEA cluster is in the cases "radius 4.4" and
+"radius 5.5" considerably slower than the two other clusters, in spite of the
+total number of processes being identical. The cluster is also slower than one
+would expect if this was simply due to the lower clock speed, because it is
+about a factor of 2 slower than the two others, whereas the clock speed would
+account only for a factor 1.5 at most.
+
+In the "radius 6.0" case, this difference is much less pronounced and for the
+"RHEA / OTC" combination compatible with the expected speedup from the clock
+rates. However, in that case the ESRF elapsed time is considerably lower than
+for the two other clusters, which was not the case for ESRF versus OTC in the
+"radius 4.4" and radius 5.5" cases.
+
+The difference seems to be due to the fact that in the first two cases the
+calculations on the RHEA cluster used 8 parallel processes for the matrix
+calculation and only 4 for the energy loop, whereas for the calculations on the
+ESRF and OTC cluster it was 4 for the matrix and 8 for the energies. In the
+"radius 6.0" case both RHEA and OTC used the "8 for matrix, 4 for energies"
+combination, whereas the ESRF still used "4 for matrix, 8 for energies".
+
+This indicates that the parallelisation of the matrix calculation reaches
+saturation when going from 4 to 8 parallel processes, the 4 additional processes
+for the matrix essentially not contributing much speedup. The larger number of
+parallel energy processes, however, is not in saturation and makes the ESRF
+calculations much faster. 
+
+If one assumes that the energy calculation scales indeed linearly with the
+number of processors and the matrix calculation goes completely into saturation
+above 4 parallel processes, then multiplying the ESRF elapsed time for the "6.0"
+case by 2 should correspond to a combination of "4 for matrix, 4 for energy" and
+be comparable to the "8 for matrix, 4 for energy" results of the two other
+clusters. This, however, would give a value of about 168000 seconds for the ESRF
+cluster, which seems too high. In the "4.4" and "5.5" cases, the OTC cluster is
+about 10% faster than the ESRF one, whereas comparing the measured "129869" OTC
+value for the "6.0" case with the hypothetical "16800" is a difference of about
+25%.
+
+It thus seems that the matrix calculation does still contribute a bit to the
+speedup when using more 4 parallel processes.
+
+What remains unexplained is that for the "4.4" and the "5.5" cases the ESRF
+cluster is slower than the "OTC" cluster by about 10%, in spite of the fact that
+from the clock rates one would expect it to be 25% faster. As discussed above,
+the faster ESRF execution for the "6.0" case can be explained with the different
+parallelisation setups and is not a proof for the better hardware performance
+one would expect from the different clock rates. 
+
+However, looking at the "7.0" case, it gets even more unclear. Now the ESRF
+cluster with the "8 matrix, 4 energy" configuration is faster than the same OTC
+configuration by about 20%, approximately what would be expected from the
+difference in clock rates.
+
+It should be noted that the "7.0" case is the only one where the ESRF cluster
+ran with 8 parallel processes for the matrix calculation. It can thus be
+speculated that the attribution of cores to processes and thus the speed of
+memory access from the processes is more favorable in certain configurations on
+the ESRF than on OTC, and less so in other configurations, but this cannot be
+proven from the data. It would be interesting to re-run all these test cases on
+all clusters with a "4 matrix, 8 energy" configuration to have identical
+conditions, but as the clusters are no longer available that is not possible.
+
+Several more conclusions can be drawn from the benchmark results, in particular
+from the "7.0" test case.
+
+The "4 energy, 8 matrix" configuration was run at the ESRF with both a cluster
+having all nodes with Infiniband network (labeled "ib") and one where none of
+the nodes had Infiniband ("tcp"). As expected, the Infiniband configuration is
+faster, but only by about 8%. This is understandable: FDMNES uses very little
+input data and also creates relatively small (compared to the compute effort) 
+output data. There is thus not much need for interprocess communication during
+the calculations and the network speed contributes little to the performance.
+
+From the different configurations ran for case "7.0", one can also see the
+effect of the parallelisation of the matrix calculations.
+
+The first was a "4 energy, 6 matrix, all Infiniband" configuration at the ESRF
+with 8 nodes and 24 cores (processes) used; the third very similar, except that
+it had 8 processes for the matrix calculations and thus 32 cores (processes)
+used. The compute power thus increased by 33%, but the elapsed time decreased
+only by 18%, a clear indication that the parallelisation of the matrix
+calculation does not scale linearly with the number of processes.
+
+On the other hand, at least up to 4 parallel processes for the matrix
+calculation it scales as well as the energy parallelisation, as can be seen fom
+the last two cases with the OTC "940 GB memory" nodes. In both cases there are 4
+nodes and 32 cores (processes) used, but in the one case the configuration is "8
+energy, 4 matrix" and in the other it is "32 energy, 1 matrix". The elapsed
+times are essentially identical, indicating that the parallelisation in the
+matrix calculation is as efficient as the one in the energy calculation.
+
+It can also seen that parallelising only in energy is a quite efficient way to
+run FDMNES, because the ESRF configuration "16 energy, 1 matrix" with 16 used
+cores (processes) takes about the same elapsed time as the "4 energy, 8 matrix"
+configuration which has twice the number of used cores. In other words, 16 cores
+do the job as fast in the first combination as 32 in the second.
+
+However, because of the memory requirements for the energy calculation, this
+first case uses only 2 of the 28 cores available on each node. The number of
+nodes used for the calculation is identical, only there are more processors now
+sitting idle.
+
+Given that the matrix calculation seems to scale well up to 4 parallel
+processes, the best combination would probably be "8 energy, 4 matrix". This
+would use 4 cores on each node and certainly be faster than the "4 energy, 8
+matrix" combination. Of course, it is less efficient in compute performance per
+used core, but the same number of nodes are used (and thus blocked) and the
+elapsed time would be shorter.
+
+Of course, the most efficient way to run FDMNES should be to have all cores
+active in the calculation, but very often (as in this case) that is not possible
+because of the memory requirements. Thus if one takes nodes with the same number
+of cores but a bigger memory available, more of the cores in those nodes can be
+used and this should improve the performance. That was tested with a node type
+from OTC that has 940 GB and 32 cores, thus about 30 GB per core as compared to
+the other OTC type (similar to the ESRF one) that has 8 GB per core (256 GB for
+32 cores). 
+
+Interestingly enough, that combination is not as efficient as one might think.
+
+First, both "940 GB type" runs are slower than the OTC run on the 256 GB nodes, 
+with the same number of processes (32) running. Of course, the 256 GB nodes are
+about 15% faster in clock speed, but on the other hand the 256 GB run used the
+"4 energy, 8 matrix" combination, which is less efficient than the combinations
+used for the 940 GB runs. Taking into account the different clock speeds, all
+three combinations have the same performance, the bigger memory and thus
+resulting higher fraction of used cores per node does not seem to help.
+
+Further, if one compares the "32 energy, 1 matrix" combination for the OTC nodes
+with 940 GB to the ESRF one "16 energy, 1 matrix", again the nodes with bigger
+memory are slower in elapsed time. The ESRF nodes have a 1.43 times higher clock
+speed, but there are only half as many parallel energy processes running. The
+OTC 940 GB combination should thus be about 40% faster than the ESRF run, but
+that is definitely not the case.
+
+The reason for this remains unclear.

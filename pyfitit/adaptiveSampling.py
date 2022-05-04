@@ -1,7 +1,6 @@
-import copy
 import numpy as np
-import time, threading, scipy, traceback
-from scipy.spatial import distance
+import time, threading, scipy, traceback, copy
+# from scipy.spatial import distance
 from scipy.optimize import basinhopping
 from .ML import RBF, isFitted
 from . import utils, ihs, geometry
@@ -90,13 +89,21 @@ class DatasetGenerator:
 class CalculationOrchestrator:
     """ Decides how to calculate dataset: parallel/serialized, whether failed points should be recalculated, etc.
     """
-    def __init__(self, program, calcSampleInParallel=1, existingDatasetGetter=None):
+    def __init__(self, program, lock, calcSampleInParallel=1, existingDatasetGetter=None, debug=False):
         self.calcSampleInParallel = calcSampleInParallel
+        if callable(program):
+            class Prog(CalculationProgram):
+                def __init__(self, func):
+                    self.func = func
+                def calculate(self, x):
+                    return self.func(x), None
+            program = Prog(program)
         self.program = program
         self.generator = None
         self.existingDatasetGetter = existingDatasetGetter
-        self.lock = threading.Lock()
+        self.lock = lock  # lock must be common in orchestrator and program
         self.calcTimes = []
+        self.debug = debug
 
     def run(self, datasetGenerator):
         self.generator = datasetGenerator
@@ -109,12 +116,14 @@ class CalculationOrchestrator:
             self.runSerialized()
 
     def addResult(self, x, res):
-        if hasattr(res, "__len__"):
+        if isinstance(res, tuple):
+            assert len(res) == 2
             self.generator.addResult(x, y=res[0], additionalData=res[1])
         else:
             self.generator.addResult(x, res)
 
     def runSerialized(self):
+        if self.debug: print('Run serialized sampling')
 
         def calculateAndAdd(x):
             res = self.calcAndUpdateTime(x)
@@ -123,26 +132,26 @@ class CalculationOrchestrator:
         if self.existingDatasetGetter is None:
             for x in self.generator.getInitialPoints():
                 calculateAndAdd(x)
-                # call to plot user defined graphs
-                # self.generator.isDatasetReady()
-
         while not self.generator.isDatasetReady():
             x = self.generator.getNewPoint()
             calculateAndAdd(x)
 
     def runParallel(self):
+        if self.debug: print(f'Run parallel sampling by {self.calcSampleInParallel} threads')
         # calculating initial dataset
         if self.existingDatasetGetter is None:
             self.calculateInitial()
-            print("Done initial")
 
         # calculating the rest of the points
+        if self.debug: print("Run lazy parallel execution")
         self.calculateLazy(self.pointSequence())
 
     def calculateInitial(self):
+        if self.debug: print('Calculating initial sample...')
         from multiprocessing.dummy import Pool as ThreadPool
         threadPool = ThreadPool(self.calcSampleInParallel)
         threadPool.map(self.addResultCalculateAndUpdate, self.generator.getInitialPoints())
+        if self.debug: print("Done initial")
 
     def calculateLazy(self, points):
         from pyfitit.executors import LazyThreadPoolExecutor
@@ -153,11 +162,18 @@ class CalculationOrchestrator:
             with self.lock:
                 self.generator.updateResult(index, y, additionalData)
 
+    def processCalculatedFutures(self, done):
+        for index, y, additionalData in [f.result() for f in done]:
+            with self.lock:
+                # print(f'adding result {index}')
+                self.generator.updateResult(index, y, additionalData)
+
     def pointSequence(self):
         with self.lock:
             isReady = self.generator.isDatasetReady()
         while not isReady:
             with self.lock:
+                # print('getting new point')
                 x = self.generator.getNewPoint()
                 index = self.generator.addResult(x, 'calculating')
             yield index, x
@@ -166,7 +182,9 @@ class CalculationOrchestrator:
 
     def calculate(self, pointAndIndex):
         index, x = pointAndIndex
+        if self.debug: print('Calculating for x=',x)
         y, additionalData = self.calcAndUpdateTime(x)
+        if self.debug: print('End calculating for x=', x, 'y=', y, 'additionalData=', additionalData)
         return index, y, additionalData
 
     def calcAndUpdateTime(self, x):
@@ -193,8 +211,10 @@ class CalculationOrchestrator:
 
         dataset = self.existingDatasetGetter()
         assert len(dataset) > 0, 'Loaded dataset is empty. Try starting a fresh dataset generation.'
-        for x, res in dataset:
-            self.addResult(x, res)
+        X, Y = dataset[0], dataset[1]
+        additional = [None]*len(X) if len(dataset) < 3 else dataset[2]
+        for i in range(len(X)):
+            self.addResult(X[i], (Y[i], additional[i]))
 
 
 class CalculationProgram:
@@ -203,6 +223,7 @@ class CalculationProgram:
 
     def calculate(self, x):
         return None, None
+
 
 
 """
@@ -462,69 +483,47 @@ def voronoy(xNormed, scaleGrad=None, xInitial=None):
     return vertices
 
 
-def getExploitByNeighbourVoronoi(xs, settings, paramRanges, yPredictionModel, yDist, fixOut, ysTrue, ysPred, scaleGrad=None):
-    exploitNum = settings['exploitNum']
-    if exploitNum <= 0: return []
-    exploitNeighborsNum = xs.shape[1]
-    predDist = []
-    for i in range(ysTrue.shape[0]):
-        predDist.append(yDist(ysTrue[i], ysPred[i]))
-    exploitOrigins = xs[np.argsort(predDist)[-exploitNum:]]
-
-    pointDists = distance.cdist(exploitOrigins, xs)
-    exploitPoints = []
-    for origin, dists in zip(exploitOrigins, pointDists):
-        sorted_ind_dists = np.argsort(dists)
-        # исправить!!!!! Точки кучкуются с одной стороны. Нужно поменять это на вызов функции getNeighbUniformByDirection(xs, кол-во)
-        # которая работает по следующему алгоритму: берет количество соседей с запасом (все брать нельзя, чтобы понятие 'соседей сохранилось' - это настроечный параметр (множитель dim)). Потом по очереди удаляем из двух точек с минимальным косинусом ту, которая дальше от центра.
-        originNeighborsWithCenter = xs[sorted_ind_dists[:exploitNeighborsNum * 5]]
-        if settings['normalizeGradientsLocally']:
-            originNeighborsWithCenterNormed, max_grad = normalizeGradients(originNeighborsWithCenter, yPredictionModel, paramRanges, yDist, settings['gradEps'])
-        else:
-            originNeighborsWithCenterNormed = scaleX(originNeighborsWithCenter, scaleGrad)
-        vertices = voronoy(originNeighborsWithCenterNormed, paramRanges, fixOut=fixOut, scaleGrad=scaleGrad, xInitial=originNeighborsWithCenter)
-        if len(vertices) == 0: continue
-        vor_dists = np.linalg.norm(origin.reshape(1,-1)-vertices, axis=1)
-        # take only Voronoi vertices close to the origin
-        # это источник наших проблем. Если размерность = 1, то exploitNeighborsNum=1, и точки кучкуются. Может так случится, что они кучкуются с одной стороны от некоторой, а с другой - огромная пропасть!!! Т.е. мы уничтожаем преимущества, которые нам дают диаграммы Вороного.
-        maxDist = dists[sorted_ind_dists[exploitNeighborsNum * 2]] if len(dists) >= exploitNeighborsNum * 2 + 1 else dists[-1]
-        exploitPointCandidates = vertices[vor_dists <= maxDist, :]
-        if len(exploitPointCandidates) == 0:
-            exploitPointCandidates = [vertices[np.argmin(vor_dists)]]
-        # take point, which is the most distant from existed in sample
-        candidateDists = distance.cdist(exploitPointCandidates, xs)
-        bestCand = exploitPointCandidates[np.argmax(np.min(candidateDists, axis=1))]
-        exploitPoints.append(bestCand)
-        # for v in vertices: exploitPoints.append(v)
-    return exploitPoints
-
-
-def calcDistsFromPointToSampleNormed(x0, xs, scaleGrad):
-    xNormed = scaleX(x0, scaleGrad)
-    xsNormed = scaleX(xs, scaleGrad)
-    return np.linalg.norm(xsNormed - xNormed.reshape(1, -1), axis=1)
-
-
 class ErrorPredictingSampler(Sampler):
 
-    def __init__(self, paramRanges, estimator=None, initialPoints=None, exploreNum=5, exploitNum=5, optimizeLp=2, seed=None, checkSampleIsGoodFunc=None, yDist=None, normalizeGradientsGlobally=True, normalizeGradientsLocally=False, fixOut=False, samplerTimeConstraint='default', profilingInfoFile=None, samplingMethod='max-error-neighbor', trueFunc=None, noModel='auto'):
+    def __init__(self, paramRanges, estimator=None, initialIHSDatasetSize=None, initialPoints=None, optimizeLp=2, seed=None, checkSampleIsGoodFunc=None, xDist=None, yDist=None, normalizeGradientsGlobally=True, normalizeGradientsLocally=False, fixOut=False, samplerTimeConstraint='default', profilingInfoFile=None, samplingMethod='auto', trueFunc=None):
         """
 
         :param paramRanges: list of pairs [leftBorder, rightBorder]
+        :param initialIHSDatasetSize: size of initial dataset, generated by IHS
         :param initialPoints: starting dataset
-        :param exploreNum:
-        :param exploitNum:
         :param optimizeLp: p in (0, np.inf] to minimize error: ||yTrue - yPred||_Lp
         :param seed:
         :param checkSampleIsGoodFunc: function(dataset), which returns True when we should stop calculation. dataset = (xs, ys, additionalData)
+        :param xDist: function(x0, xs) returns distance array from point x0 to each point of array xs
         :param yDist: function(y1, y2) returns distance between y1 and y2. If None use np.linalg.norm(y1-y2, ord=np.inf)
-        :param samplerTimeConstraint: dict. Defines how much time can be used for new point sampling (None - no constraints). {'relative':0.3} - relative to the function calculation procedure. {'absolute':5} time in seconds for new point sampling (not including function calculation time). You can combine constrains together: {'relative':0.3, 'absolute':5, 'combine':'max' or 'min'}. If None - perform the most precise point selection. Default: {'relative':0.1, 'absolute':1, 'combine':'max'}
-        :param noModel: True/False/'auto' - fast error calculation. 'auto' means auto switch for large sample
+        :param samplerTimeConstraint: float or func(onePointCalcTime). Defines how much time can be used for new point sampling (None - no constraints). Default:  max(min(onePointCalcTime,5), 0.1)
+        :param samplingMethod: Defines two methods: how to choose candidates for error maximization and how to estimate error.
+            dict. Example: {'candidates':'neighbors', 'errorEst':'model-cv'}. Use 'auto' for auto switching between methods.
+            Candidate methods:
+                'voronoi' - all voronoi vertices (if samplerTimeConstraint=None - for all sample, otherwise - for neighbors of max error points)
+                'neighbors' - random candidates in neighbourhood of max error points
+                'random' - take multiple random points and choose best (error is not used, distance to other points is not used)
+            Error estimation methods:
+                'exact' - use trueFunc for error estimate
+                'model-cv' - use model CV-error estimate
+                'gradient' - use gradient approximation and distance to estimate error. Model is not used
+                'distance' - search the most remote point from neighbors
         """
-        assert samplingMethod in ['voronoi', 'random', 'random-remote', 'max-error-global', 'max-error-exact', 'max-error-neighbor']
+        if isinstance(samplingMethod,str):
+            assert samplingMethod == 'auto'
+            samplingMethod = {'candidates':'neighbors', 'errorEst':'model-cv'}
+            self.autoMethodChoice = True
+        else: self.autoMethodChoice = False
+        assert samplingMethod['candidates'] in ['voronoi', 'neighbors', 'random']
+        assert samplingMethod['errorEst'] in ['exact', 'model-cv', 'gradient', 'distance']
+        if samplingMethod['errorEst'] == 'distance':
+            assert samplingMethod['candidates'] == 'random', 'Other than random candidates are impractical for distance error estimation'
+        if samplingMethod['errorEst'] == 'exact':
+            assert trueFunc is not None
+        # assert samplingMethod in ['voronoi', 'random', 'random-remote', 'max-error-global', 'max-error-exact', 'max-error-neighbor']
         self.samplingMethod = samplingMethod
-        # methods, that can easily expand sample out of initial sample bounds
-        self.canExpand = ['random', 'random-remote', 'max-error-global', 'max-error-exact']
+        # candidate methods, that can easily expand sample out of initial sample bounds. In other methods we add one point (using random-remote) to candidates on each sampling step
+        self.canExpand = ['random']
         self.trueFunc = trueFunc
         assert checkSampleIsGoodFunc is not None, 'You should define checkSampleIsGoodFunc, for example\nlambda dataset: len(dataset[0]) >= 200\nOr use cross-validation error.\ndataset = (xs, ys, additionalData)'
         if seed is None:
@@ -542,22 +541,26 @@ class ErrorPredictingSampler(Sampler):
         self.predictedYs = []
         self.predictedYsCv = None
         self.ysErrors = []
+        self.initialIHSDatasetSize = initialIHSDatasetSize if initialIHSDatasetSize is not None else dim+1
         self.initial = self.mergeInitialWithExternal(initialPoints, seed)
         self.initialMaxDist = None
         self.checkSampleIsGoodFunc = checkSampleIsGoodFunc
         if yDist is None: yDist = lambda y1, y2: np.linalg.norm(y1-y2, ord=np.inf)
         self.yDist = yDist
+        if xDist is None:
+            xDist = self.xDistDefault
+        else:
+            assert not normalizeGradientsGlobally
+            assert not normalizeGradientsLocally
+        self.xDist = xDist
         if dim == 1: normalizeGradientsGlobally = False
         if samplerTimeConstraint is not None:
-            if isinstance(samplerTimeConstraint, str): samplerTimeConstraint = {'relative':0.1, 'absolute':1, 'combine':'max'}
-            assert set(samplerTimeConstraint.keys()) <= {'relative', 'absolute', 'combine'}
-            assert len(samplerTimeConstraint) in [1,3]
-            if 'combine' in samplerTimeConstraint:
-                assert len(samplerTimeConstraint) == 3
-                assert samplerTimeConstraint['combine'] in ['min', 'max']
+            if samplerTimeConstraint == 'default': samplerTimeConstraint = lambda onePointCalcTime: max(min(onePointCalcTime,5), 0.1)
+            if not callable(samplerTimeConstraint):
+                assert isinstance(samplerTimeConstraint, int) or isinstance(samplerTimeConstraint, float)
+                t = samplerTimeConstraint
+                samplerTimeConstraint = lambda _: t
         self.settings = {
-            'exploreNum': exploreNum,
-            'exploitNum': exploitNum,
             'optimizeLp': optimizeLp,
             'normalizeGradientsGlobally': normalizeGradientsGlobally,
             'normalizeGradientsLocally': normalizeGradientsLocally,
@@ -570,6 +573,8 @@ class ErrorPredictingSampler(Sampler):
         self.scaleGrad = None
         if self.settings['normalizeGradientsGlobally']:
             self.appendInitialByScalePoints()
+        else:
+            self.scaleGrad = 1/(self.paramRanges[:,1] - self.paramRanges[:,0])
         # time spent calculating the last cross_val_predict
         self.lastCvCalcTime = 0
         # time at which the last cross_val_predict was performed
@@ -581,15 +586,9 @@ class ErrorPredictingSampler(Sampler):
         self.fitModelTimes = []
         self.errorCalcTimes = Ring(size=10, defaultValue=0)
         self.voronoyTimeMult = Ring(size=10, defaultValue=1)
-        self.trueErrorRatio = Ring(size=20, defaultValue=-1)
+        self.checkSampleIsGoodFuncTimes = Ring(size=100, defaultValue=0)
         self.scaleForDist = np.linalg.norm([x[1]-x[0] for x in paramRanges])
-        if isinstance(noModel, str):
-            assert noModel == 'auto'
-            self.noModel = False
-            self.canSwitchToNoModel = True
-        else:
-            self.noModel = noModel
-            self.canSwitchToNoModel = False
+        self.debug = False
 
     def mergeInitialWithExternal(self, external, seed):
         initial = np.append(self.initialPointsCorners(), self.initialPointsIHS(seed), axis=0)
@@ -611,7 +610,7 @@ class ErrorPredictingSampler(Sampler):
 
     def initialPointsIHS(self, seed):
         N = len(self.paramRanges)
-        sampleCount = N + 1
+        sampleCount = self.initialIHSDatasetSize
         points = (ihs.ihs(N, sampleCount, seed=seed) - 0.5) / sampleCount  # row - is one point
         for j in range(N):
             points[:, j] = self.leftBorder[j] + points[:, j] * (self.rightBorder[j] - self.leftBorder[j])
@@ -672,7 +671,7 @@ class ErrorPredictingSampler(Sampler):
         m = len(self.initial)
         ind = np.arange(m)
         for i in range(m):
-            assert not self.isDublicate(self.initial[i], self.initial[ind!=i, :])
+            assert not self.isDublicate(self.initial[i], self.initial[ind!=i, :]), f"{i}\n{self.initial[i]}\n{self.initial}"
             assert not self.isDublicate(self.initial[i]), 'initial =\n'+str(self.initial)+'\n\nxs =\n'+str(self.xs)
         return self.initial
 
@@ -686,11 +685,16 @@ class ErrorPredictingSampler(Sampler):
 
         xs, ys, additionalData = dataset
         assert np.all(xs[:len(self.xs), :] == self.xs)
+        y_len = None
+        for y in ys:
+            if not isValidY(y): continue
+            if y_len is None: y_len = utils.length(y)
+            assert y_len == utils.length(y), f'Func values in different points have different dimensions: {y_len} != {utils.length(y)}'
         if index > len(self.ys)-1:
             assert not self.isDublicate(xs[index]), f'index={index} len(xs)={len(xs)} xs =\n' + str(xs)
             assert len(self.ys) == len(ys) - 1
             assert index == len(ys) - 1
-            yDim = ys[index].size if isValidY(ys[index]) else 0
+            yDim = utils.length(ys[index]) if isValidY(ys[index]) else 0
             if yDim == 0: yDim = self.ys.shape[1]
             if self.ys.shape[1] == 0 and yDim > 0:
                 self.ys = np.zeros((self.ys.shape[0], yDim))
@@ -700,7 +704,7 @@ class ErrorPredictingSampler(Sampler):
         self.xs = np.copy(xs)
         if isValidY(ys[index]):
             if self.ys.shape[1] == 0:
-                self.ys = np.zeros((self.ys.shape[0], ys[index].size))
+                self.ys = np.zeros((self.ys.shape[0], utils.length(ys[index])))
             self.ys[index] = ys[index]
             self.notValidYsInd = self.notValidYsInd[self.notValidYsInd != index]
         else:
@@ -712,23 +716,17 @@ class ErrorPredictingSampler(Sampler):
 
     def updateDatasetPointInfo(self, dataset, index):
         self.extractDatasetPoint(dataset, index)
+        if self.samplingMethod['errorEst'] == 'distance': return
         if index > len(self.ysErrors)-1:
             assert len(self.ysErrors) == len(self.ys) - 1
             assert index == len(self.ys) - 1
             if self.ys.shape[1] > 0:
-                exactError = self.getError(self.xs[index, :], LOO=True)
-                approx_y = self.predict(self.xs[index, :].reshape(1,-1))
-                approxError = self.getError(self.xs[index, :], LOO=True, trueY=approx_y)
-                if approxError > 0:
-                    self.trueErrorRatio.add(exactError / approxError)
-                self.ysErrors.append(exactError)
+                self.ysErrors.append(self.getError(self.xs[index, :], LOO=True))
             else:
                 self.ysErrors.append(-1)
         else:
             if self.ys.shape[1] > 0:
-                exactError = self.getError(self.xs[index, :], LOO=True)
-                self.trueErrorRatio.add(exactError / self.ysErrors[index])
-                self.ysErrors[index] = exactError
+                self.ysErrors[index] = self.getError(self.xs[index, :], LOO=True)
             else:
                 self.ysErrors[index] = -1
         # update broken points
@@ -738,7 +736,7 @@ class ErrorPredictingSampler(Sampler):
                 self.ysErrors[i] = self.getError(self.xs[i, :], LOO=True)
         # update neighbour info
         if len(self.xs) > 1 and self.ys.shape[1] > 0:
-            dists = calcDistsFromPointToSampleNormed(self.xs[index], self.xs, self.scaleGrad)
+            dists = self.xDist(self.xs[index], self.xs)
             # there is zero dist - we take min non zero dist
             minDist = np.max(np.partition(dists, 2-1)[:2])
             neighbInd = np.where(dists<=minDist*2)[0]
@@ -750,22 +748,20 @@ class ErrorPredictingSampler(Sampler):
             for i in neighbInd:
                 if i == index: continue
                 self.ysErrors[i] = self.getError(self.xs[i, :], LOO=True)
-            if not self.noModel:
+            if self.samplingMethod['errorEst'] == 'model-cv':
                 self.fitModel()
 
     def getMaxErrorPointInds(self):
         ysErrors = np.array(self.ysErrors)
         ind = np.argsort(ysErrors)[::-1]
         maxErrorValue = ysErrors[ind[0]]
-        if any(self.trueErrorRatio.data > 0):
-            trueErrorRatio = np.median(self.trueErrorRatio.data[self.trueErrorRatio.data > 0])
-        else: trueErrorRatio = 1
-        # error of ysError ~ ysError*trueErrorRatio
-        maxErrorCount = np.sum(ysErrors + ysErrors * trueErrorRatio > maxErrorValue)  # number of points assumed to have max error
+        # error of ysError ~ ysError
+        maxErrorCount = np.sum(2*ysErrors > maxErrorValue)  # number of points assumed to have max error
+        assert maxErrorCount > 0, f'All points in starting dataset were not calculating due to errors:\nX='+str(self.xs)+'\nY='+str(self.ys)
         return ind[:maxErrorCount]
 
     def getNewPointCandidates(self, samplingMethod, maxPointNum):
-        if samplingMethod == 'voronoi':
+        if samplingMethod['candidates'] == 'voronoi':
             if self.settings['samplerTimeConstraint'] is None:
                 xNormed = scaleX(self.xs, self.scaleGrad)
                 candidates = voronoy(xNormed=xNormed, scaleGrad=self.scaleGrad, xInitial=self.xs)
@@ -786,7 +782,7 @@ class ErrorPredictingSampler(Sampler):
                     newVoronoyCenterInds = voronoyCenterInds
                     while i_center < len(newVoronoyCenterInds):
                         center = self.xs[voronoyCenterInds[i_center]]
-                        dists = calcDistsFromPointToSampleNormed(center, self.xs, self.scaleGrad)
+                        dists = self.xDist(center, self.xs)
                         neighbInds = np.argsort(dists)[:neighbCount]
                         # delete centers, included in neighbours
                         voronoyCenterInds1 = newVoronoyCenterInds[:i_center + 1]
@@ -807,9 +803,10 @@ class ErrorPredictingSampler(Sampler):
                         candidates = fixOutPoints(candidates, self.paramRanges, throw=not self.settings['fixOut'])
                     if center is not None and len(candidates) > 0:
                         # sort by dist to center
-                        dists = calcDistsFromPointToSampleNormed(center, candidates, self.scaleGrad)
+                        dists = self.xDist(center, candidates)
                         ind = np.argsort(dists)
                         candidates = candidates[ind, :]
+                    assert len(candidates.shape) == 2 or len(candidates) == 0, str(candidates)
                     return candidates
 
                 if neighbCount == self.xs.shape[0]:
@@ -820,23 +817,24 @@ class ErrorPredictingSampler(Sampler):
                     candidates = None
                     for i_center in voronoyCenterInds:
                         x0 = self.xs[i_center]
-                        dists = calcDistsFromPointToSampleNormed(x0, self.xs, self.scaleGrad)
+                        dists = self.xDist(x0, self.xs)
                         neighborsWithCenter = self.xs[np.argsort(dists)[:neighbCount], :]
                         if candidates is None: candidates = runVoronoy(neighborsWithCenter, dt, x0)
-                        else: candidates = np.append(candidates, runVoronoy(neighborsWithCenter, dt, x0), axis=0)
+                        else:
+                            newCand = runVoronoy(neighborsWithCenter, dt, x0)
+                            if len(newCand) > 0:
+                                candidates = np.append(candidates, newCand, axis=0)
                 if len(candidates) > 0:
                     # filter out existing points
                     mask = [not self.isDublicate(x) for x in candidates]
                     candidates = candidates[mask, :]
                 # sort candidates by dist to maxErrorPointInds
-                candidatesNormed = scaleX(candidates, self.scaleGrad)
-                maxErrorPointsNormed = scaleX(self.xs[maxErrorPointInds, :], self.scaleGrad)
-                cd = distance.cdist(candidatesNormed, maxErrorPointsNormed)
+                cd = self.cdist(candidates, self.xs[maxErrorPointInds,:])
                 min_dists = np.min(cd, axis=1)
                 ind = np.argsort(min_dists)
                 candidates = candidates[ind, :]
                 candidates = candidates[:maxPointNum,:]
-        elif samplingMethod == 'max-error-neighbor':
+        elif samplingMethod['candidates'] == 'neighbors':
             maxErrorInds = self.getMaxErrorPointInds()
             maxErrorCount = len(maxErrorInds)
             candidates = np.zeros((maxPointNum, self.xs.shape[1]))
@@ -846,7 +844,7 @@ class ErrorPredictingSampler(Sampler):
                 closestNeighbor, closestDist = self.getClosestNeighbor(maxErrorPoint)
                 assert closestDist > 0
                 candidates[i] = self.getUniquePointFromRandomDirection(closestNeighbor, closestDist)
-        elif samplingMethod in ['max-error-global', 'max-error-exact']:
+        elif samplingMethod['candidates'] == 'random':
             candidates = randomSample(self.paramRanges, self.rng, maxPointNum)
         else:
             assert False, f'Unknown sampling method {samplingMethod}'
@@ -859,25 +857,26 @@ class ErrorPredictingSampler(Sampler):
         if self.xs.shape[0] >= len(self.initial) and self.settings['normalizeGradientsGlobally'] and self.scaleGrad is None:
             self.calculateScale()
 
-        if samplingMethod == 'random':
-            newPoint = np.apply_along_axis(lambda x: self.rng.uniform(low=x[0], high=x[1], size=1), arr=self.getParamBorders(), axis=0)[0]
-        elif samplingMethod == 'random-remote':
+        if self.debug:
+            if self.xs.shape[1] == 2 and len(self.xs) % 10 == 0:
+                self.plotErrorMap(f'graphs/debug/{len(self.xs)}.png')
+
+        if samplingMethod['errorEst'] == 'distance':
+            assert samplingMethod['candidates'] == 'random', 'Other than random candidates are impractical for distance error estimation'
             randomPoints = randomSample(self.paramRanges, self.rng, self.xs.shape[0])
-            d = distance.cdist(randomPoints, self.xs)
+            d = self.cdist(randomPoints, self.xs)
             min_d = np.min(d, axis=1)
             ind = np.argmax(min_d)
             newPoint = randomPoints[ind]
-        # elif samplingMethod == 'voronoi':
-        #     newPoint = self.getFromNeighbourVoronoi()
         else:
             canPredictCount = self.getCanErrorCalcCount()
             candidates = self.getNewPointCandidates(samplingMethod, maxPointNum=canPredictCount)
             if len(candidates) < canPredictCount:  # it can happen only for Voronoy
-                candidates1 = self.getNewPointCandidates(samplingMethod='max-error-neighbor', maxPointNum=canPredictCount-len(candidates))
+                candidates1 = self.getNewPointCandidates(samplingMethod={'candidates':'neighbors', 'errorEst': samplingMethod['errorEst']}, maxPointNum=canPredictCount-len(candidates))
                 candidates = np.append(candidates, candidates1, axis=0)
-            if samplingMethod not in self.canExpand:
-                candidates = np.append(candidates, self.getNewPointHelper(samplingMethod='random-remote').reshape(1,-1), axis=0)
-            if samplingMethod == 'max-error-exact':
+            if samplingMethod['candidates'] not in self.canExpand:
+                candidates = np.append(candidates, self.getNewPointHelper(samplingMethod={'candidates':'random', 'errorEst':'distance'}).reshape(1,-1), axis=0)
+            if samplingMethod['errorEst'] == 'exact':
                 i_max = np.argmax([self.getError(candidate, trueY=self.trueFunc(candidate), calcTime=True) for candidate in candidates])
             else:
                 i_max = np.argmax([self.getError(candidate, calcTime=True) for candidate in candidates])
@@ -893,34 +892,16 @@ class ErrorPredictingSampler(Sampler):
         return self.getNewPointHelper(self.samplingMethod)
 
     def switchToNoModel(self):
-        assert not self.noModel
-        assert self.canSwitchToNoModel
-        self.noModel = True
-        self.trueErrorRatio.data[:] = -1
+        assert self.samplingMethod['errorEst'] == 'model-cv'
+        assert self.autoMethodChoice
+        self.samplingMethod['errorEst'] = 'gradient'
         self.errorCalcTimes.data[:] = 0
-        print('Switch to no model error estimation. Sample size =', len(self.xs))
+        print('Switch to gradient error estimation. Sample size =', len(self.xs))
 
     def getAvailableTime(self):
-        maxTime = np.inf
         if self.settings['samplerTimeConstraint'] is None: return np.inf
-        absoluteMaxTime = np.inf
-        if 'absolute' in self.settings['samplerTimeConstraint']:
-            absoluteMaxTime = self.settings['samplerTimeConstraint']['absolute']
-            maxTime = absoluteMaxTime
-        relMaxTime = np.inf
-        if 'relative' in self.settings['samplerTimeConstraint']:
-            rel = self.settings['samplerTimeConstraint']['relative']
-            assert rel > 0
-            if self.avgPointCalcTime is not None:
-                relMaxTime = rel*self.avgPointCalcTime
-                maxTime = relMaxTime
-        if 'combine' in self.settings['samplerTimeConstraint']:
-            comb = self.settings['samplerTimeConstraint']['combine']
-            if comb == 'min':
-                maxTime = min(absoluteMaxTime, relMaxTime)
-            else:
-                maxTime = max(absoluteMaxTime, relMaxTime)
-        return maxTime
+        if self.avgPointCalcTime is None: return 1
+        return self.settings['samplerTimeConstraint'](self.avgPointCalcTime)
 
     def getCanErrorCalcCount(self):
         meanErrorCalcTime = np.mean(self.errorCalcTimes.data)
@@ -929,14 +910,14 @@ class ErrorPredictingSampler(Sampler):
             if canErrorCalcCount == 0: canErrorCalcCount = 1
         else:
             canErrorCalcCount = len(self.errorCalcTimes.data)
-        if canErrorCalcCount < 10 and not self.noModel and self.canSwitchToNoModel:
+        if canErrorCalcCount < 10 and self.samplingMethod['errorEst']=='model-cv' and self.autoMethodChoice:
             self.switchToNoModel()
             canErrorCalcCount = len(self.errorCalcTimes.data)
         # print('sample size =', len(self.xs), 'canErrorCalcCount =', canErrorCalcCount)
         return canErrorCalcCount
 
     def getClosestNeighbor(self, x0):
-        dists = calcDistsFromPointToSampleNormed(x0, self.xs, self.scaleGrad)
+        dists = self.xDist(x0, self.xs)
         sortedDistIndices = np.argsort(dists)
         closestNeighbor = self.xs[sortedDistIndices[1]]
         closestDist = dists[sortedDistIndices[1]]
@@ -949,7 +930,7 @@ class ErrorPredictingSampler(Sampler):
     def isDublicate(self, x_not_scaled, xs=None):
         if xs is None: xs = self.xs
         if len(xs) == 0: return False
-        d = np.min(np.linalg.norm(scaleX(x_not_scaled, self.scaleGrad).reshape(1,-1) - scaleX(xs, self.scaleGrad), axis=1))
+        d = np.min(self.xDist(x_not_scaled, xs))
         return self.isDublicateByDist(d)
 
     def getUniquePointFromRandomDirection(self, origin, expectedDist):
@@ -959,12 +940,13 @@ class ErrorPredictingSampler(Sampler):
             candidate = direction * expectedDist * self.rng.uniform(low=0.5, high=2.5) + originNormed
             candidate = unscaleX(candidate, self.scaleGrad)
             left, right = self.getParamBorders()
-            candidate = np.clip(candidate, left, right)
-            if not self.isDublicate(candidate):
-                return candidate
+            # candidate = np.clip(candidate, left, right) - results in too many points on boundaries
+            if np.all(left <= candidate) and np.all(candidate <= right):
+                if not self.isDublicate(candidate):
+                    return candidate
 
     def fitModel(self):
-        assert not self.noModel
+        assert self.samplingMethod['errorEst'] == 'model-cv'
         fitModelTimes = np.array(self.fitModelTimes)
         nonZeroTimes = fitModelTimes[fitModelTimes>0]
         if len(nonZeroTimes) == 0: meanTime = 0
@@ -978,8 +960,12 @@ class ErrorPredictingSampler(Sampler):
         if meanTime < self.getAvailableTime()/3:
             t0 = time.time()
             estCopy = copy.deepcopy(self.estimator)
+            wasFitted = False
             try:
-                self.estimator.fit(self.xs, self.ys)
+                ys = self.ys
+                if self.ys.shape[1] == 1 and self.xs.shape[1] > 1: ys = self.ys.reshape(-1)
+                self.estimator.fit(self.xs, ys)
+                wasFitted = True
                 dt = time.time() - t0
                 self.fitModelTimes.append(dt)
                 # print('fit model time =', dt)
@@ -989,17 +975,20 @@ class ErrorPredictingSampler(Sampler):
                     print(traceback.format_exc())
                 self.estimator = estCopy
                 self.fitModelTimes.append(0)
+            if wasFitted:
+                assert isFitted(self.estimator), 'Ordinary ML.isFitted function doesn\'t correctly work. Provide correct function isFitted(estimator) in adaptive sampling arguments'
         else:
             self.fitModelTimes.append(0)
 
     def predict(self, x):
-        if self.noModel:
+        if self.samplingMethod['errorEst'] == 'gradient':
             # predict by 1-NN
-            dists = calcDistsFromPointToSampleNormed(x, self.xs, self.scaleGrad)
+            dists = self.xDist(x.reshape(-1), self.xs)
             ind = np.where(dists>0)[0]
             if len(ind) == 0: return np.zeros((1,self.ys.shape[1]))
             i = np.argmin(dists[ind])
             return self.ys[ind[i]]
+        else: assert self.samplingMethod['errorEst'] == 'model-cv'
         if isFitted(self.estimator):
             res = self.estimator.predict(x)
             return res
@@ -1007,28 +996,15 @@ class ErrorPredictingSampler(Sampler):
             return np.zeros((1,self.ys.shape[1]))
 
     def getError(self, x, LOO=False, trueY=None, calcTime=False):
+        if self.samplingMethod['errorEst'] == 'exact':
+            assert trueY is not None or LOO
+        assert self.samplingMethod['errorEst'] != 'distance'
         if len(self.xs) <= 1: return 0
         t0 = time.time()
-        dists = calcDistsFromPointToSampleNormed(x, self.xs, self.scaleGrad)
+        dists = self.xDist(x, self.xs)
         ind = np.argsort(dists)
         sorted_dists = dists[ind]
         dim = len(x)
-        # if calcTime and self.samplingMethod != 'max-error-exact' and self.noModel:
-        #     firstNonZero = np.where(sorted_dists>0)[0][0]
-        #     if trueY is not None:
-        #         y0 = trueY
-        #         x0 = x
-        #     elif LOO:
-        #         assert firstNonZero>0
-        #         y0 = self.ys[ind[0]]
-        #         x0 = self.xs[ind[0]]
-        #     else:
-        #         y0 = self.ys[ind[firstNonZero+1]]
-        #         x0 = self.xs[ind[firstNonZero+1]]
-        #     grad_y = self.yDist(self.ys[ind[firstNonZero]], y0) / np.linalg.norm(self.xs[ind[firstNonZero]]-x0)
-        #     dt = time.time() - t0
-        #     if calcTime: self.errorCalcTimes.add(dt)
-        #     return (sorted_dists[firstNonZero] * grad_y)**self.settings['optimizeLp'] * sorted_dists[min(dim*2, len(dists)-1)]**dim
         if LOO:
             # there is zero dist
             minDist = sorted_dists[1]
@@ -1042,7 +1018,7 @@ class ErrorPredictingSampler(Sampler):
         else:
             neighbInd = np.where((0 < dists) & (dists <= minDist*2))[0]
             if len(neighbInd) <= 1: neighbInd = ind[1:3] if LOO else ind[:2]
-            grad_y = [self.yDist(y, self.ys[i]) / np.linalg.norm(x-self.xs[i]) for i in neighbInd]
+            grad_y = [self.yDist(y, self.ys[i]) / self.xDist(x, self.xs[i]) for i in neighbInd]
             max_grad_y = np.max(grad_y)
             delta_y = max_grad_y * minDist
             if np.isinf(self.settings['optimizeLp']):
@@ -1050,22 +1026,89 @@ class ErrorPredictingSampler(Sampler):
             else:
                 # near breaks xs gathered in a crowd, so better to optimize Lp
                 result = delta_y**self.settings['optimizeLp'] * sorted_dists[min(dim*2, len(dists)-1)]**dim
-            # dy = [self.yDist(y, self.ys[i]) for i in neighbInd]
-            # if np.isinf(self.settings['optimizeLp']):
-            #     result = np.max(dy)
-            # else:
-            #     # near breaks xs gathered in a crowd, so better to optimize Lp
-            #     result = np.max(dy)**self.settings['optimizeLp'] * sorted_dists[min(dim*2, len(dists)-1)]**dim
         dt = time.time() - t0
         if calcTime: self.errorCalcTimes.add(dt)
         return result
 
     def isGoodEnough(self, dataset):
         try:
-            isGood = self.checkSampleIsGoodFunc(dataset)
+            if np.mean(self.checkSampleIsGoodFuncTimes.data) > self.getAvailableTime():
+                self.checkSampleIsGoodFuncTimes.add(0)
+                isGood = False
+            else:
+                t0 = time.time()
+                isGood = self.checkSampleIsGoodFunc(dataset)
+                self.checkSampleIsGoodFuncTimes.add(time.time()-t0)
         except:
             print('There was error in function checkSampleIsGoodFunc')
             print(traceback.format_exc())
             print('I assume that the sample is not good yet')
             isGood = False
         return isGood
+
+    def xDistDefault(self, x0, xs):
+        assert len(x0.shape) == 1, str(x0.shape)
+        if len(xs.shape) == 1: xs = xs.reshape(1,-1)
+        assert len(xs.shape) == 2, str(xs.shape)
+        assert len(x0) == xs.shape[1]
+        xNormed = scaleX(x0, self.scaleGrad)
+        xsNormed = scaleX(xs, self.scaleGrad)
+        return np.linalg.norm(xsNormed - xNormed.reshape(1, -1), axis=1)
+
+    def cdist(self, a, b):
+        if len(a.shape) == 1: a = a.reshape(1,-1)
+        if len(b.shape) == 1: b = b.reshape(1, -1)
+        assert len(a.shape) == 2 and len(b.shape) == 2
+        swap = False
+        if len(a) > len(b):
+            a,b = b,a
+            swap = True
+        res = np.zeros((len(a), len(b)))
+        for i in range(len(a)):
+            res[i] = self.xDist(a[i], b)
+        if swap: return res.T
+        else: return res
+
+    def plotErrorMap(self, fileName):
+        from . import plotting
+        assert self.xs.shape[1] == 2
+        xsNormed = scaleX(self.xs, self.scaleGrad)
+        def func(xNormed):
+            x = unscaleX(np.array(xNormed), self.scaleGrad)
+            return self.getError(x)
+        def plotMoreFunction(ax):
+            ax.scatter(xsNormed[:,0], xsNormed[:,1], c=self.ys)
+        prNormed = scaleX(self.paramRanges.T, self.scaleGrad)
+        plotting.plotHeatMap(func, prNormed[:,0], prNormed[:,1], N1=100, N2=100, cmap='plasma', fileName=fileName, plotMoreFunction=plotMoreFunction)
+
+
+def nextPointByAdaptiveSampler(X, Y, bounds, **samplerParams):
+    """
+    Return next point x to add to the sample X
+
+    :param X: 2D array (row - one point)
+    :param Y: 1D or 2D array (row - one value, may be multidimentional)
+    :param bounds: array of coordinate intervals [a,b]
+    :returns: next point x (1D array)
+    """
+    if isinstance(X, list): X = np.array(X)
+    if isinstance(Y, list): Y = np.array(Y)
+    if len(X.shape) == 1:
+        print('Assume, that X is column, but not row')
+        X = X.reshape(-1,1)
+    if len(Y.shape) == 1: Y = Y.reshape(-1, 1)
+    if isinstance(bounds, list): bounds = np.array(bounds)
+    if len(bounds.shape) == 1: bounds = bounds.reshape(1, 2)
+    if 'samplerTimeConstraint' not in samplerParams:
+        samplerParams['samplerTimeConstraint'] = 1
+    initial = ErrorPredictingSampler(bounds, checkSampleIsGoodFunc=lambda d: True, **samplerParams).initial
+    sampler = ErrorPredictingSampler(bounds, initialPoints=X, checkSampleIsGoodFunc=lambda dataset: len(dataset[0]) >= len(X), **samplerParams)
+
+    def func(x):
+        for i in range(len(X)):
+            if x == X[i]: return Y[i]
+        assert False, "Calculate function for all the initial points:\n"+str(initial)
+    orchestrator = CalculationOrchestrator(func)
+    generator = DatasetGenerator(sampler, orchestrator)
+    generator.generate()
+    return generator.getNewPoint()

@@ -1,3 +1,5 @@
+import shutil
+
 from scipy.interpolate import Rbf
 import numpy as np
 import pandas as pd
@@ -11,20 +13,15 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 import sklearn.gaussian_process.kernels
 
 
-if utils.isLibExists("keras"):
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore",category=FutureWarning)
-        from keras.models import Sequential
-        from keras.layers.core import Dense, Activation
-        from keras.layers.recurrent import LSTM
-        from keras import optimizers, Model
-        from keras.layers import Dropout, Conv1D, GlobalAveragePooling1D, MaxPooling1D, Embedding, Flatten, Input
-        from keras.layers.normalization import BatchNormalization
-        from keras.utils import np_utils
+if utils.isLibExists("tensorflow"):
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    # with warnings.catch_warnings():
+    #     warnings.filterwarnings("ignore",category=FutureWarning)
+    import tensorflow as tf
 
 
 class Sample:
-    def __init__(self, params, spectra, energy=None):
+    def __init__(self, params, spectra, energy=None, spType='default'):
         """
         Main data container for ML tasks
         :param params: DataFrame of geometry parameters
@@ -36,8 +33,8 @@ class Sample:
         spectra = copy.deepcopy(spectra)
         if energy is not None: energy = copy.deepcopy(energy)
         if not isinstance(spectra, dict):
-            spectras = {'default':spectra}
-            energies = {'default':energy}
+            spectras = {spType:spectra}
+            energies = {spType:energy}
         else:
             spectras = spectra
             energies = energy
@@ -50,7 +47,7 @@ class Sample:
             if first: sp0 = spectra
             if isinstance(spectra, np.ndarray):
                 assert energy is not None
-                assert len(energy) == spectra.shape[1], 'energy vector must contain values for all columns of spectra matrix'
+                assert len(energy) == spectra.shape[1], f'{len(energy)} != {spectra.shape[1]} energy vector must contain values for all columns of spectra matrix'
                 spectra = pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
             elif isinstance(spectra, list):
                 spectra = utils.makeDataFrameFromSpectraList(spectra, energy)
@@ -66,6 +63,7 @@ class Sample:
         self._params = params
         self.folder = None
         self.nameColumn = None
+        self.defaultSpType = self.spTypes()[0]
 
     def getLength(self):
         for spType in self._spectra:
@@ -77,7 +75,22 @@ class Sample:
         return sorted(list(self._spectra.keys()))
 
     def getDefaultSpType(self):
-        return self.spTypes()[0]
+        return self.defaultSpType
+
+    def setDefaultSpType(self, spType):
+        assert spType in self.spTypes()
+        self.defaultSpType = spType
+
+    def renameSpType(self, oldName, newName):
+        assert oldName in self.spTypes()
+        assert newName not in self.spTypes()
+        self._spectra[newName] = self._spectra[oldName]
+        del self._spectra[oldName]
+
+    def delSpType(self, spType):
+        assert spType in self._spectra
+        del self._spectra[spType]
+        del self._energy[spType]
 
     def setSpectra(self, spectra, energy=None, spType=None):
         """
@@ -101,6 +114,8 @@ class Sample:
     def getSpectra(self, spType=None):
         if spType is None: spType = self.getDefaultSpType()
         return self._spectra[spType]
+
+    spectra = property(getSpectra, setSpectra)
 
     def getSpectrum(self, i, spType=None, returnIntensityOnly=False):
         """
@@ -142,8 +157,6 @@ class Sample:
             spectrum = spectrum[list(spectrum.keys())[0]]
         self._spectra[spType].loc[i] = spectrum
 
-    spectra = property(getSpectra, setSpectra)
-
     def setParams(self, params):
         assert isinstance(params, pd.DataFrame)
         self._params = params
@@ -161,6 +174,25 @@ class Sample:
         assert False, 'Do not set energy explicitly. It is done after setting spectra'
 
     energy = property(getEnergy, setEnergy)
+
+    def shiftEnergy(self, shift, spType=None, inplace=False):
+        if spType is None: spType = self.getDefaultSpType()
+        newEnergy = self._energy[spType] + shift
+        sam = self if inplace else self.copy()
+        sam._energy[spType] = newEnergy
+        sam._spectra[spType].columns = ['e_' + str(e) for e in newEnergy]
+        if not inplace: return sam
+
+    def changeEnergy(self, newEnergy, spType=None, inplace=False):
+        if spType is None: spType = self.getDefaultSpType()
+        oldEnergy = self._energy[spType]
+        sam = self if inplace else self.copy()
+        spectra = np.zeros((self.getLength(), len(newEnergy)))
+        oldSpectra = sam._spectra[spType].to_numpy()
+        for i in range(self.getLength()):
+            spectra[i] = np.interp(newEnergy, oldEnergy, oldSpectra[i])
+        sam.setSpectra(spectra, energy=newEnergy, spType=spType)
+        if not inplace: return sam
 
     @classmethod
     def readFolder(cls, folder):
@@ -181,7 +213,8 @@ class Sample:
         res.folder = folder
         return res
 
-    def saveToFolder(self, folder):
+    def saveToFolder(self, folder, plot=False, colorParam=None):
+        if os.path.exists(folder): shutil.rmtree(folder)
         if not os.path.exists(folder): os.makedirs(folder)
         if len(self._spectra) == 1:
             self.spectra.to_csv(folder+os.sep+'spectra.txt', sep=' ', index=False)
@@ -190,6 +223,9 @@ class Sample:
                 self._spectra[spType].to_csv(folder + os.sep + f'{spType}_spectra.txt', sep=' ', index=False)
         self.params.to_csv(folder + os.sep + 'params.txt', sep=' ', index=False)
         self.folder = folder
+        if plot:
+            for spType in self._spectra:
+                plotting.plotSample(self._energy[spType], self._spectra[spType].to_numpy(), fileName=folder + os.sep + f'plot_{spType}.png', colorParam=colorParam)
 
     def copy(self):
         return Sample(self._params, self._spectra)
@@ -205,6 +241,7 @@ class Sample:
         assert (paramData is None) or (paramGenerator is None and project is None)
         assert paramName != ''
         assert paramName not in self.paramNames, f'Parameter {paramName} already exists'
+        if isinstance(paramData, list): paramData = np.array(paramData)
         n = self.params.shape[0]
         if paramData is None:
             if isinstance(paramName, str):  # need to construct one parameter
@@ -230,19 +267,20 @@ class Sample:
         self.paramNames = self.params.columns.to_numpy()
         self.folder = None
 
-    def delRow(self, i):
-        self.params.drop(i, inplace=True)
-        self.params.reset_index(inplace=True, drop=True)
-        for spType in self._spectra:
-            self._spectra[spType].drop(i, inplace=True)
-            self._spectra[spType].reset_index(inplace=True, drop=True)
-
-    def delSpType(self, spType):
-        assert spType in self._spectra
-        del self._spectra[spType]
-        del self._energy[spType]
+    def delRow(self, i, inplace=True):
+        if inplace:
+            sample = self
+        else:
+            sample = self.copy()
+        sample.params.drop(i, inplace=True)
+        sample.params.reset_index(inplace=True, drop=True)
+        for spType in sample._spectra:
+            sample._spectra[spType].drop(i, inplace=True)
+            sample._spectra[spType].reset_index(inplace=True, drop=True)
+        if not inplace: return sample
 
     def takeRows(self, ind):
+        if isinstance(ind, list): ind = np.array(ind)
         if ind.dtype == bool: ind = np.where(ind)[0]
         toDel = np.setdiff1d(np.arange(len(self.params)), ind)
         sample = self.copy()
@@ -258,13 +296,17 @@ class Sample:
         for spType in self._spectra:
             assert np.all(self._spectra[spType].shape[1] == other._spectra[spType].shape[1]), f'spType={spType} {self._spectra[spType].shape[1]} != {other._spectra[spType].shape[1]}'
             assert np.all(self._energy[spType] == other._energy[spType])
-        assert np.all(self.paramNames == other.paramNames), 'Params differ: self = '+str(self.paramNames)+' other = '+str(other.paramNames)
+        assert set(self.paramNames) == set(other.paramNames), 'Params differ: self = ' + str(self.paramNames) + ' other = ' + str(other.paramNames)
         self.params = pd.concat((self.params, other.params), ignore_index=True)
         for spType in self._spectra:
             self._spectra[spType] = pd.concat((self._spectra[spType], other._spectra[spType]), ignore_index=True)
         self.folder = None
 
     def addSpectrumType(self, spectra, spType, energy=None):
+        assert spType not in self.spTypes(), f'Spectrum type {spType} already exists'
+        assert self.getDefaultSpType() != 'default', 'Rename default spType by renameSpType before adding new one'
+        if isinstance(spectra, list):
+            spectra = utils.makeDataFrameFromSpectraList(spectra, energy)
         self.setSpectra(spectra, energy, spType=spType)
 
     def addRow(self, spectrum=None, params=None):
@@ -293,8 +335,9 @@ class Sample:
         for spType in self.spTypes():
             self._spectra[spType].loc[i] = spectrum[spType]
         if params is not None:
+            if isinstance(params, pd.Series): params = params.to_dict()
             assert isinstance(params, dict)
-            assert set(params.keys()) < set(self.paramNames), str(list(params.keys())) + ' not < of ' + str(list(self.paramNames))
+            assert set(params.keys()) <= set(self.paramNames), 'Unknown param names: ' + str(set(self.paramNames) - set(params.keys()))
         else: params = {}
         self.params.loc[i, :] = np.nan
         for p in params: self.params.loc[i, p] = params[p]
@@ -333,6 +376,19 @@ class Sample:
             newEnergy[spType] = energy
             return Sample(self.params, newSpectra, newEnergy)
 
+    def encode(self, columnName, labelEncoder=None):
+        """Run LabelEncoder and returns dict: oldValue -> code as it is used in labelMaps. If labelEncoder is None - create one and return with label Maps"""
+        assert columnName in self.paramNames
+        labelEncoder0 = labelEncoder
+        notNan = pd.notnull(self.params[columnName])
+        if labelEncoder is None:
+            labelEncoder = sklearn.preprocessing.LabelEncoder()
+            labelEncoder.fit(self.params.loc[notNan,columnName])
+        self.params.loc[notNan,columnName] = labelEncoder.transform(self.params.loc[notNan,columnName])
+        labelMap = {c:i for i,c in enumerate(labelEncoder.classes_)}
+        if labelEncoder0 is None: return labelMap, labelEncoder
+        else: return labelMap
+
     def splitUnknown(self, columnNames=None, returnInd=False):
         """
         Divide sample into two parts: known (all columns are not NaN) and unknown (in each row there is NaN). Analyse only float64 columns
@@ -355,11 +411,14 @@ class Sample:
             known = Sample(p.loc[~nan].reset_index(drop=True), {spType: s[spType].loc[~nan].reset_index(drop=True) for spType in s})
             unknown = Sample(p.loc[nan].reset_index(drop=True), {spType: s[spType].loc[nan].reset_index(drop=True) for spType in s})
         known.nameColumn = self.nameColumn
-        unknown.nameColumn = self.nameColumn
+        if unknown is not None: unknown.nameColumn = self.nameColumn
         if returnInd:
             return known, unknown, np.where(~nan)[0], np.where(nan)[0]
         else:
             return known, unknown
+
+    def plot(self, **kw):
+        plotting.plotSample(self.energy, self.spectra, **kw)
 
 
 readSample = Sample.readFolder
@@ -386,9 +445,13 @@ def score_cv(model, X, y, cv_count, returnPrediction=True):
     if isinstance(X, pd.Series): X = X.to_numpy().reshape(-1,1)
     if len(y.shape) == 1: y = y.reshape(-1,1)
     if len(X.shape) == 1: X = X.reshape(-1,1)
+    if cv_count < len(X)/4:
+        cv = sklearn.model_selection.KFold(cv_count, shuffle=True)
+    else:
+        cv = sklearn.model_selection.LeaveOneOut()
     try:
         with warnings.catch_warnings(record=True) as warn:
-            pred = sklearn.model_selection.cross_val_predict(model, X, y, cv=sklearn.model_selection.KFold(cv_count, shuffle=True))
+            pred = sklearn.model_selection.cross_val_predict(model, X, y, cv=cv)
     except Warning:
         pass
     res = sklearn.metrics.accuracy_score(y, pred) if isClassification(y) else sklearn.metrics.r2_score(y, pred)
@@ -683,6 +746,9 @@ class Normalize:
         self.xOnly= params['xOnly']
         return self
 
+    def isFitted(self):
+        return isFitted(self.learner)
+
     # args['xyRanges'] = {'minX':..., 'maxX':..., ...}
     def fit(self, x, y, **args):
         if isinstance(y,np.ndarray) and (len(y.shape)==1): y = y.reshape(-1,1)
@@ -814,6 +880,7 @@ class makeMulti:
 
     def score(self, x, y): return score(x,y,self.predict)
 
+
 class NeuralNetDirect:
     d3 = True
 
@@ -829,13 +896,13 @@ class NeuralNetDirect:
                 validation_data = (np.expand_dims(validation_data[0], axis=2), validation_data[1])
         else: x = x0
         input_dim = x.shape[1]
-        model = Sequential()
-        model.add(Conv1D(100, 5, activation='relu', input_shape=(input_dim,1)))
-        model.add(Flatten())
-        # model.add(Dropout(0.3, seed=0))
-        model.add(Dense(units=10, kernel_initializer='normal', activation='relu'))
-        model.add(Dense(units=1, kernel_initializer='normal'))
-        sgd = optimizers.SGD() # параметры lr=0.3, decay=0, momentum=0.9, nesterov=True уводят в nan
+        model = tf.keras.Sequential()
+        model.add(tf.keras.layers.Conv1D(100, 5, activation='relu', input_shape=(input_dim,1)))
+        model.add(tf.keras.layers.Flatten())
+        # model.add(tf.keras.layers.Dropout(0.3, seed=0))
+        model.add(tf.keras.layers.Dense(units=10, kernel_initializer='normal', activation='relu'))
+        model.add(tf.keras.layers.Dense(units=1, kernel_initializer='normal'))
+        sgd = tf.keras.optimizers.SGD() # параметры lr=0.3, decay=0, momentum=0.9, nesterov=True уводят в nan
         model.compile(loss='mean_squared_error', optimizer=sgd)
         t1 = time.time()
         if validation_data is None: model.fit(x, y, epochs=self.epochs, batch_size=self.batch_size, verbose=self.verbose)
@@ -850,6 +917,7 @@ class NeuralNetDirect:
         return self.model.predict(x)
 
     def score(self, x, y): return score(x,y,self.predict)
+
 
 class NeuralNetDirectClass:
     def __init__(self, epochs):
@@ -1174,7 +1242,7 @@ def isClassification(data, column=None):
             data = np.array(data)
     if data.dtype != 'float64': return True
     ind = ~np.isnan(data)
-    return np.all(np.round(data[ind]) == data[ind])
+    return np.all(np.round(data[ind]) == data[ind]) and len(np.unique(data[ind]))<100
 
 
 def plotPredictionError(x, y, params, method, pathToSave):
@@ -1231,6 +1299,15 @@ def auc(true, pred):
 
 
 def isFitted(estimator):
+    if isinstance(estimator, sklearn.base.BaseEstimator):
+        try:
+            sklearn.utils.validation.check_is_fitted(estimator)
+        except sklearn.exceptions.NotFittedError:
+            return False
+        return True
+    if hasattr(estimator, 'isFitted') and callable(getattr(estimator, 'isFitted')):
+        return estimator.isFitted()
     if hasattr(estimator, "classes_"): return True
     if 0 < len( [k for k,v in inspect.getmembers(estimator) if k.endswith('_') and not k.startswith('__')] ): return True
+    assert hasattr(estimator, 'trained'), 'Your estimator is very unusual. Use your custom isFitted method'
     return estimator.trained

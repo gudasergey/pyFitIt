@@ -1,6 +1,6 @@
 import numpy as np
 from parsy import regex, generate, whitespace, string
-import math, scipy, copy, os
+import math, scipy, copy, os, io
 from . import utils, geometry
 if utils.isLibExists("wbm"):
     from . import wbm
@@ -100,19 +100,31 @@ def parseXYZContent(content):
         return np.array(atomCoords), np.array(atomNames)
 
     table, atomNames = parseContent.parse(content)
+    latticeVectors = None
+    if 'VEC1' in atomNames:
+        # this is a crystal
+        latticeVectors = []
+        for d in range(1,4):
+            vName = f'VEC{d}'
+            assert vName in atomNames
+            i = np.where(atomNames == vName)[0][0]
+            latticeVectors.append(table[i])
+            table = np.delete(table, i, axis=0)
+            atomNames = np.delete(atomNames, i, axis=0)
+        latticeVectors = np.array(latticeVectors)
     atomNumbers = np.array([atom_proton_numbers[an] for an in atomNames])
-    return table, atomNumbers, atomNames
+    return table, atomNumbers, atomNames, latticeVectors
 
 
 class Molecule:
     def __init__(self, fileName=None):
-        self.atom, self.atomNumber, self.atomName, self.az = None, None, None, None
+        self.atom, self.atomNumber, self.atomName, self.az, self.latticeVectors = None, None, None, None, None
         if fileName is not None:
             self.fileName = utils.fixPath(fileName)
             self.construct(*parseXYZFile(self.fileName))
 
-    def construct(self, atom, atomNumber, atomName):
-        self.atom, self.atomNumber, self.atomName = atom, atomNumber, atomName
+    def construct(self, atom, atomNumber, atomName, latticeVectors):
+        self.atom, self.atomNumber, self.atomName, self.latticeVectors = atom, atomNumber, atomName, latticeVectors
         self.az = self.atomNumber  # alias
         self.setParts('0-' + str(len(self.atom) - 1))
 
@@ -158,7 +170,6 @@ class Molecule:
         shifts = final.atom - start.atom
         self.atom += percent*shifts
 
-
     def rotate__Impl(self, axis, center, angle, atomIndices):
         # поворачивает часть молекулы вокруг оси, заданной вектором axis. Положительное направление поворота определяется по правилу закручивающегося в направлении оси буравчика
         newMol = np.copy(self.atom)
@@ -201,15 +212,28 @@ class Molecule:
         for i in self.partsData[partInd]:
             self.atom[i] += shift
 
+    def export_xyz_string(self, cellSize=1):
+        f = io.StringIO()
+        format = lambda a, an: an.rjust(2) + '  ' + str(a[0] * cellSize).rjust(10) + '  ' + str(a[1] * cellSize).rjust(10) + '  ' + str(a[2] * cellSize).rjust(10) + "\n"
+        f.write(str(self.atom.shape[0]) + '\n')
+        f.write('\n')
+        for i in range(self.atom.shape[0]):
+            a = self.atom[i]
+            an = atom_names[self.atomNumber[i]]
+            f.write(format(a, an))
+        if self.latticeVectors is not None:
+            for i in range(3):
+                a = self.latticeVectors[i]
+                an = f'VEC{i + 1}'
+                f.write(format(a, an))
+        f.seek(0)
+        return f.read()
+
     def export_xyz(self, file, cellSize=1):
         d = os.path.split(file)[0]
         if d != '':  os.makedirs(d, exist_ok=True)
         with open(file, 'w') as f:
-            f.write(str(self.atom.shape[0])+'\n')
-            f.write('\n')
-            for i in range(self.atom.shape[0]):
-                a = self.atom[i]; an = atom_names[self.atomNumber[i]]
-                f.write(an.rjust(2)+'  '+str(a[0]*cellSize).rjust(10)+'  '+str(a[1]*cellSize).rjust(10)+'  '+str(a[2]*cellSize).rjust(10)+"\n")
+            f.write(self.export_xyz_string(cellSize))
             f.close()
 
     def export_struct(self, file, a, b, c, alpha, beta, gamma):
@@ -320,8 +344,11 @@ class Molecule:
         return adf
 
     def getSortedDists(self, atoms=None):
+        """
+        Returns sorted distances to atom[0]
+        """
         if atoms is None:
-            ind = np.arange(len(self.az))
+            ind = np.arange(start=0, stop=len(self.az))
         elif isinstance(atoms, str):
             atomName = atoms
             atomNumber = atom_proton_numbers[atomName]
