@@ -299,10 +299,11 @@ class SpectrumCalculator(adaptiveSampling.CalculationProgram):
                 runCluster = getRunner(self.spectralProgram, self.runType)
                 runCluster(folder, self.memory, self.nProcs)
             elif self.runType == 'local':
-                runLocal = getRunner(self.spectralProgram, self.runType)
-                runLocal(folder)
-            else:
-                runUserDefined(self.runCmd, folder)
+                if self.runCmd == '':
+                    runLocal = getRunner(self.spectralProgram, self.runType)
+                    runLocal(folder)
+                else: runUserDefined(self.runCmd, folder)
+            else: runUserDefined(self.runCmd, folder)
         except:
             print('Error while calculation folder', folder, ':\n', traceback.format_exc())
         os.remove(folder+os.sep+'isRunning')

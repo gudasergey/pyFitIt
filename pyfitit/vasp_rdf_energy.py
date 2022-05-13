@@ -180,8 +180,6 @@ def generateInput(params, folder='', **other):
     phi = params['phi']
     r_pdc = params['r_pdc']
 
-    with open(folder + os.sep + 'geometryParams.txt', 'w') as f: json.dump([['theta', theta], ['phi', phi],
-                                                                            ['r_pdc', r_pdc]], f)
     # generate CO molecule at the r_pdc distance from Pd nanocluster
     C, O = generate_CO(theta, phi, r_pdc, Pd)
     # Copy all vasp inputs and generate POSCAR
@@ -207,7 +205,7 @@ def parse_energy(path_to_file):
         return None
 
 
-def parse_one_folder(folder):
+def parseOneFolder(folder):
     if not os.path.exists(folder + os.sep + 'OUTCAR'):
         return None
     rdf = utils.readSpectrum(folder + os.sep + 'RDF_C')

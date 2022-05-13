@@ -496,7 +496,7 @@ class ErrorPredictingSampler(Sampler):
         :param checkSampleIsGoodFunc: function(dataset), which returns True when we should stop calculation. dataset = (xs, ys, additionalData)
         :param xDist: function(x0, xs) returns distance array from point x0 to each point of array xs
         :param yDist: function(y1, y2) returns distance between y1 and y2. If None use np.linalg.norm(y1-y2, ord=np.inf)
-        :param samplerTimeConstraint: float or func(onePointCalcTime). Defines how much time can be used for new point sampling (None - no constraints). Default:  max(min(onePointCalcTime,5), 0.1)
+        :param samplerTimeConstraint: float or func(onePointCalcTime). Defines how much time can be used for new point sampling (None - no constraints). Default:  max(min(onePointCalcTime/10,6)*10, 0.1)
         :param samplingMethod: Defines two methods: how to choose candidates for error maximization and how to estimate error.
             dict. Example: {'candidates':'neighbors', 'errorEst':'model-cv'}. Use 'auto' for auto switching between methods.
             Candidate methods:
@@ -555,7 +555,7 @@ class ErrorPredictingSampler(Sampler):
         self.xDist = xDist
         if dim == 1: normalizeGradientsGlobally = False
         if samplerTimeConstraint is not None:
-            if samplerTimeConstraint == 'default': samplerTimeConstraint = lambda onePointCalcTime: max(min(onePointCalcTime,5), 0.1)
+            if samplerTimeConstraint == 'default': samplerTimeConstraint = lambda onePointCalcTime: max(min(onePointCalcTime/10,6)*10, 0.1)
             if not callable(samplerTimeConstraint):
                 assert isinstance(samplerTimeConstraint, int) or isinstance(samplerTimeConstraint, float)
                 t = samplerTimeConstraint
@@ -981,7 +981,7 @@ class ErrorPredictingSampler(Sampler):
             self.fitModelTimes.append(0)
 
     def predict(self, x):
-        if self.samplingMethod['errorEst'] == 'gradient':
+        if self.samplingMethod['errorEst'] in ['gradient', 'distance']:
             # predict by 1-NN
             dists = self.xDist(x.reshape(-1), self.xs)
             ind = np.where(dists>0)[0]

@@ -297,7 +297,10 @@ def findFDMNES():
     exe = os.path.split(os.path.abspath(__file__))[0] + os.sep + 'bin' + os.sep + 'fdmnes' + os.sep + exe
     if os.path.exists(exe):
         fdmnes_exe = '"' + exe + '"'
-        if os.name != 'nt': os.system(f"chmod +x {fdmnes_exe}")
+        if os.name != 'nt' and not os.access(fdmnes_exe, os.X_OK):
+            ok = os.system(f"chmod +x {fdmnes_exe}")
+            if not ok:
+                raise Exception(f'Add execution permission to the file {fdmnes_exe}')
         return fdmnes_exe
     exe_list = ['fdmnes.exe', 'fdmnes_win32.exe', 'fdmnes_win64.exe'] if os.name == 'nt' else ['fdmnes', 'fdmnes_linux64', 'fdmnes_linux']
     for exe in exe_list:

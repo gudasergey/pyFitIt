@@ -28,7 +28,7 @@ from .project import Project, loadProject, checkProject, saveAsProject, createPa
 from .sampling import generateInputFiles, calcSpectra, collectResults, sampleAdaptively, checkSampleIsGoodByCount, checkSampleIsGoodByCVError
 from .smoothLib import smoothInterpNorm
 from .uiControls import fitSmooth, smoothSliders, FuncModelSliders, SpectrumSliders, xanesSliders, SampleInspector
-from .utils import Spectrum, readSpectrum, readExafs, readSpectra, SpectrumCollection, reloadPyfitit, cacheInFile, loadData, initPyfitit, saveNotebook
+from .utils import Spectrum, readSpectrum, readExafs, readSpectra, SpectrumCollection, reloadPyfitit, cacheInFile, loadData, initPyfitit, saveNotebook, saveAsScript
 
 # used by user in project files
 from types import MethodType
