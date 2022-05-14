@@ -449,7 +449,7 @@ class FuncModel:
             if smooth:
                 shift = params['shift']
                 smoothed, norm = smoothLib.smoothInterpNorm(smoothParams=params, spectrum=sp, smoothType='fdmnes', expSpectrum=expSpectrum, fitNormInterval=energyRange)
-                slf.data['not smoothed'] = FuncModel.createDataItem('plot', x=sp.energy + shift, y=sp.intensity / norm)
+                slf.data['not smoothed'] = FuncModel.createDataItem('plot', x=sp.energy + shift, y=sp.intensity / norm, plot=params['not smoothed'])
             else: smoothed = utils.Spectrum(expSpectrum.energy, np.interp(expSpectrum.energy, sp.energy, sp.intensity))
             slf.data['theory'] = FuncModel.createDataItem('plot', x=smoothed.energy, y=smoothed.intensity, order=1)
 
@@ -484,6 +484,7 @@ class FuncModel:
                 paramProperties['norm'] = {'type':'float', 'domain':[norm*0.5, norm*2], 'default':norm}
         paramProperties['energyRange'] = {'type':'range', 'domain':[expSpectrum.energy[0], expSpectrum.energy[-1]]}
         paramProperties['method'] = {'type': 'list', 'domain': inverseMethod.allowedMethods, 'default':'RBF'}
+        paramProperties['not smoothed'] = {'type': 'bool', 'default': True}
         funcModel = FuncModel(function=xanesPredictorFunc, paramProperties=paramProperties, **kwargs)
         return funcModel
 

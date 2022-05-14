@@ -1910,6 +1910,24 @@ def smoothSliders(expSpectrum, theorySpectrum, shift='auto', smoothType='fdmnes'
         slf.data['smoothed'] = FuncModel.createDataItem('plot', x=smoothed.energy, y=smoothed.intensity)
         slf.data['not smoothed'] = FuncModel.createDataItem('plot', x=theorySpectrum.energy + shift, y=theorySpectrum.intensity / norm, plot=params['not smoothed'])
 
+        if smoothType == 'fdmnes':
+            smoothWidth = smoothLib.YvesWidth(expSpectrum.energy, params['Gamma_hole'], params['Ecent'], params['Elarg'], params['Gamma_max'], params['Efermi'])
+        elif smoothType == 'adf':
+            smoothWidth = smoothLib.YvesWidth(expSpectrum.energy-expSpectrum.energy[0], params['Gamma_hole'], params['Ecent'], params['Elarg'], params['Gamma_max'], params['Efermi'])
+        else: assert False, 'Unknown width'
+        if hasattr(slf, 'ax2'):
+            if not params['smooth width']:
+                slf.ax2.remove()
+                del slf.ax2
+            else: slf.ax2.clear()
+        def plotWidth(ax):
+            if not params['smooth width']: return
+            if not hasattr(slf, 'ax2'): slf.ax2 = ax.twinx()
+            slf.ax2.clear()
+            slf.ax2.plot(expSpectrum.energy, smoothWidth, color='red')
+        slf.data['smooth width for plotting'] = FuncModel.createDataItem('custom', plotter=plotWidth, save=False)
+        slf.data['smooth width'] = FuncModel.createDataItem('plot', x=expSpectrum.energy, y=smoothWidth, plot=False)
+
         slf.data['fitNormInterval1'] = FuncModel.createDataItem('text', transform=None, x=fitNormInterval[0], y=0, str='[', save=False)
         slf.data['fitNormInterval2'] = FuncModel.createDataItem('text', transform=None, x=fitNormInterval[1], y=0, str=']', save=False)
 
@@ -1918,10 +1936,13 @@ def smoothSliders(expSpectrum, theorySpectrum, shift='auto', smoothType='fdmnes'
             ax.set_xlim(energyRange)
             if ylim == 'auto':
                 plotting.updateYLim(ax)
-
         slf.data['xlim'] = FuncModel.createDataItem('custom', plotter=xlim, save=False, order=1000)
+        if ylim == 'manual':
+            def setylim(ax):
+                ax.set_ylim(params['ylim'])
+            slf.data['ylim'] = FuncModel.createDataItem('custom', plotter=setylim, save=False, order=1001)
         error = utils.rFactorSp(smoothed, expSpectrum, sub1=True, interval=energyRange)
-        slf.data['info'] = FuncModel.createDataItem('text', str='norm=%.3g' % norm + '  err=%.3g' % error, order=1001)
+        slf.data['info'] = FuncModel.createDataItem('text', str='norm=%.3g' % norm + '  err=%.3g' % error, order=1002)
         return error
 
     paramProperties = ParamProperties()
@@ -1930,9 +1951,12 @@ def smoothSliders(expSpectrum, theorySpectrum, shift='auto', smoothType='fdmnes'
         paramProperties[p['paramName']] = {'type': 'float', 'domain': [p['leftBorder'], p['rightBorder']], 'default': p['value']}
     paramProperties['energyRange'] = {'type':'range', 'domain':[expSpectrum.energy[0],expSpectrum.energy[-1]]}
     paramProperties['fitNormInterval'] = {'type': 'range', 'domain': [expSpectrum.energy[0], expSpectrum.energy[-1]]}
-    paramProperties['not smoothed'] = {'type': 'bool', 'default': False}
+    paramProperties['not smoothed'] = {'type': 'bool', 'default': True}
+    paramProperties['smooth width'] = {'type': 'bool', 'default': True}
     if ylim != 'auto':
-        paramProperties['ylim'] = {'type': 'range', 'domain': [min(np.min(theorySpectrum.intensity),np.min(expSpectrum.intensity)), max(np.max(theorySpectrum.intensity),np.max(expSpectrum.intensity))]}
+        tmp_norm = theorySpectrum.intensity[-1]/expSpectrum.intensity[-1]
+        paramProperties['ylim'] = {'type': 'range', 'domain': [min(np.min(theorySpectrum.intensity),np.min(expSpectrum.intensity)), max(np.max(theorySpectrum.intensity/tmp_norm),np.max(expSpectrum.intensity))]}
+        print(paramProperties['ylim']['domain'])
     funcModel = FuncModel(function=smoothFunction, paramProperties=paramProperties)
     return FuncModelSliders(funcModel, defaultParams=defaultParams)
 
