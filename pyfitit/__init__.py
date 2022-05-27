@@ -10,6 +10,7 @@ from . import adf, directMethod, fdmnes, feff, fileBrowser, geometry, curveFitti
 from . import inverseMethod, ML, molecule, optimize,  plotting, sampling, smoothLib, descriptor, mixture, adaptiveSampling
 from . import uiControls, msPathGroupManager, funcModel
 
+from .adaptiveSampling import minlpe
 from .descriptor import stableExtrema, efermiDescriptor, pcaDescriptor, relPcaDescriptor, plotDescriptors1d, plotDescriptors2d, descriptorQuality, addDescriptors
 from .directMethod import Estimator as constructDirectEstimator
 from .directMethod import compareDifferentMethods as compareDifferentDirectMethods

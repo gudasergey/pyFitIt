@@ -152,8 +152,8 @@ class Estimator:
         for pName in sample.paramNames:
             self.geometryParamRanges[pName] = [np.min(sample.params[pName]), np.max(sample.params[pName])]
         sample_cv = sample.limit(energyRange=self.proj.intervals['fit_geometry'], inplace=False)
-        res, individualSpectrErrors, predictions = inverseCrossValidation(self.regressor, sample_cv, self.CVcount)
-        output = 'Inverse method relative to constant prediction error = %5.3g\n' % res['relToConstPredError']
+        res, individualSpectrErrors, predictions = ML.crossValidation(self.regressor, sample_cv.params, sample_cv.spectra, CVcount=self.CVcount, YColumnWeights=sample_cv.convertEnergyToWeights())
+        output = 'Inverse method relative to constant prediction error = %5.3g\n' % res
         print(output)
         if self.smooth_type == 'optical' and self.norm is not None:
             assert 'SeparateNorm' in self.regressor.name, self.regressor.name
@@ -164,8 +164,8 @@ class Estimator:
             nsample.setSpectra(nsample_spectra, energy=sample_cv.energy)
             sepNormLearner = sepNorm.learner
             if self.normalize: sepNormLearner = ML.Normalize(sepNormLearner, xOnly=False)
-            res, _, _ = inverseCrossValidation(sepNormLearner, nsample, self.CVcount)
-            output2 = 'relToConstPredError on normalized sample = %5.3g\n' % res['relToConstPredError']
+            res, _, _ = ML.crossValidation(sepNormLearner, nsample.params, nsample.spectra, CVcount=self.CVcount, YColumnWeights=nsample.convertEnergyToWeights())
+            output2 = 'relToConstPredError on normalized sample = %5.3g\n' % res
             output += output2
             print(output2)
             sepNormNormLearner = sepNorm.normLearner
@@ -221,8 +221,8 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     for methodName in allowedMethods:
         method = getMethod(methodName)
         if CVcount >= 2:
-            res, _, _ = inverseCrossValidation(method, sampleTrain, CVcount)
-            print(methodName+' relative to constant prediction error (all energies) = %5.3g\n' % res['relToConstPredError'], flush=True)
+            relToConstPredError, _, _ = ML.crossValidation(method, sampleTrain.params, sampleTrain.spectra, CVcount, YColumnWeights=sampleTrain.convertEnergyToWeights())
+            print(methodName+' relative to constant prediction error (all energies) = %5.3g\n' % relToConstPredError, flush=True)
         method.fit(sampleTrain.params, sampleTrain.spectra[energyColumn])
         predicted = method.predict(sampleTest.params).reshape(-1)
         plotData[methodName+'_'+energyColumn] = predicted
@@ -848,37 +848,14 @@ def multiFitFuncModels(models, combinations='all 1', optimizeParams=None, makeMi
     result.to_excel(statFolder+os.sep+'statistics.xlsx', index=False)
 
 
-def inverseCrossValidation(estimator, sample, CVcount, nonUniformSample=False):
-    if sample.spectra.shape[0] > 20:
-        kf = KFold(n_splits=CVcount, shuffle=True, random_state=0)
-    else:
-        kf = sklearn.model_selection.LeaveOneOut()
-    X = sample.params
-    y = sample.spectra.to_numpy()
-    prediction_spectra = np.zeros(y.shape)
-    for train_index, test_index in kf.split(X):
-        X_train, X_test = X.loc[train_index], X.loc[test_index]
-        y_train, y_test = y[train_index,:], y[test_index,:]
-        estimator.fit(X_train, y_train)
-        prediction_spectra[test_index] = estimator.predict(X_test)
-    N = y.shape[0]
-    if nonUniformSample: weights = ML.getWeightsForNonUniformSample(X)
-    else: weights=None
-    error = relativeToConstantPredictionError(y, prediction_spectra, sample.energy, weights)
-    individualSpectrErrors = np.array([np.sqrt(utils.integral(sample.energy, (y[i] - prediction_spectra[i]) ** 2)) for i in range(N)])
-    rFactors = np.array([utils.rFactor(sample.energy, prediction_spectra[i], y[i]) for i in range(N)])
-    meanL2 = np.mean(individualSpectrErrors)
-    return {'relToConstPredError': error, 'meanL2': meanL2, 'maxRFactor':np.max(rFactors)}, individualSpectrErrors, prediction_spectra
-
-
 def relativeToConstantPredictionError(yTrue, yPred, energy, weights=None):
     if isinstance(yTrue, pd.DataFrame): yTrue = yTrue.to_numpy()
     if isinstance(yPred, pd.DataFrame): yPred = yPred.to_numpy()
     if weights is None: weights = np.ones(yTrue.shape[0])/yTrue.shape[0]
     y_mean = np.mean(yTrue, axis=0)
     N = yTrue.shape[0]
-    u = np.sum(np.array([utils.integral(energy, (yTrue[i] - yPred[i]) ** 2) for i in range(N)])*weights)
-    v = np.sum(np.array([utils.integral(energy, (yTrue[i] - y_mean) ** 2) for i in range(N)])*weights)
+    u = np.sum(np.array([utils.integral(energy, np.abs(yTrue[i] - yPred[i])**2) for i in range(N)])*weights)
+    v = np.sum(np.array([utils.integral(energy, np.abs(yTrue[i] - y_mean)**2) for i in range(N)])*weights)
     return u / v
 
 

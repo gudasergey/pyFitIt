@@ -8,7 +8,7 @@ def generateInput(molecula, radius=5, folder='', Adimp=None, Quadrupole=False, C
     return fdmnes.generateInput(molecula, radius, folder, Adimp, Quadrupole, Convolution, Absorber, Green, Edge, cellSize, electronTransfer, **other)
 
 
-def parse_one_folder(d):
+def parseOneFolder(d):
     return fdmnes.parseOneFolder(d)
 
 
@@ -26,7 +26,7 @@ def peak(p1,p2,a,b,w1=1,w2=1):
 global_counter = 1
 def runLocal(folder='.'):
     global global_counter
-    fileName = 'geometryParams.txt'
+    fileName = 'params.txt'
     with open(folder+os.sep+fileName, 'r') as f: params = json.load(f)
     params = {params[i][0]:params[i][1] for i in range(len(params))}
     p1 = params['centralRing1_Shift']

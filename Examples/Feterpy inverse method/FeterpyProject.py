@@ -120,6 +120,7 @@ def projectConstructor(expFile='exp_ground.txt'):
         'Gamma_max': 24,
         'Efermi': 7109,
         'shift': -152,
+        'norm': 0.0316
     }
     project.moleculeConstructor = MethodType(moleculeConstructor, project)
     return project

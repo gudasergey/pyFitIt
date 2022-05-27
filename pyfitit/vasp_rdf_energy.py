@@ -206,7 +206,7 @@ def parse_energy(path_to_file):
 
 
 def parseOneFolder(folder):
-    if not os.path.exists(folder + os.sep + 'OUTCAR'):
+    if not os.path.exists(folder + os.sep + 'OUTCAR') or not os.path.exists(folder + os.sep + 'RDF_C'):
         return None
     rdf = utils.readSpectrum(folder + os.sep + 'RDF_C')
     energy = parse_energy(folder+os.sep+'OUTCAR') - (-173.54598)

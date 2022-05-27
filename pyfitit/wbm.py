@@ -1,13 +1,13 @@
 # match close atoms in two moleculas by maximum weighted bipartite matching
-import pandas as pd
 import numpy as np
-from . import utils
-if utils.isLibExists("pulp"):
-    import pulp
+import logging
+
 
 # weights - numpy 2-dimensional array
 def wbm(weights):
-    prob = pulp.LpProblem("WBM Problem", pulp.LpMinimize)
+    import pulp
+    pulp.LpSolverDefault.msg = False
+    prob = pulp.LpProblem("WBM_Problem", pulp.LpMinimize)
     m,n = weights.shape
     # print(m,n)
     from_nodes = np.arange(m); to_nodes = np.arange(n)

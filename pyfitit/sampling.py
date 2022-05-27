@@ -149,7 +149,8 @@ def collectResults(spectralProgram='fdmnes', folder='sample', outputFolder='.', 
     os.makedirs(outputFolder, exist_ok=True)
     df_spectra, df_params, goodFolders, badFolders = parseAllFolders(folder, spectralProgram, printOutput=printOutput)
     if df_spectra is None:
-        raise Exception('There is no output data in folder ' + folder)
+        # no good folders
+        return df_spectra, df_params, goodFolders, badFolders
     if isinstance(df_spectra, dict):
         for spType in df_spectra:
             df_spectra[spType].to_csv(os.path.join(outputFolder,f'{spType}_spectra.txt'), sep=' ', index=False)
@@ -180,8 +181,9 @@ class InputFilesGenerator:
 
     def getFolderCount(self):
         os.makedirs(self.folder, exist_ok=True)
-        subfolders = [f for f in os.listdir(self.folder) if os.path.isdir(os.path.join(self.folder, f))]
-        return len(subfolders)
+        subfolders = sorted([f for f in os.listdir(self.folder) if os.path.isdir(os.path.join(self.folder, f))])
+        if len(subfolders) > 0: return int(subfolders[-1])+1
+        return 0
 
     def getFolderForPoint(self, x):
         if self.debug: print('Trying get folder for point', x)
@@ -195,7 +197,9 @@ class InputFilesGenerator:
         for j, name in enumerate(self.paramNames):
             geometryParams[name] = x[j]
         folderOne = os.path.join(self.folder, utils.zfill(self.folderCounter, 200000))
-        if self.debug: print('The folder doesn\'t exist. Creating new', folderOne)
+        assert not os.path.exists(folderOne)
+        if self.debug:
+            print('The folder doesn\'t exist. Creating new', folderOne)
         if isinstance(self.spectralProgram, str):
             molecule = self.moleculeConstructor(geometryParams)
             if molecule is None:
@@ -221,7 +225,10 @@ class InputFilesGenerator:
         for f in os.listdir(self.folder):
             folder = self.folder+os.sep+f
             if not os.path.isdir(folder): continue
-            if np.array_equal(x, loadParams(folder, self.spectralProgram)):
+            xf = np.array(loadParams(folder, self.spectralProgram))
+            nrm = np.abs(x)+np.abs(xf)
+            nrm[nrm==0] = 1
+            if np.max(np.abs(x-xf)/nrm) < 1e-10:
                 if utils.jobIsRunning(folder):
                     raise Exception(f'Running calculation detected in the folder {folder}. Stop it first')
                 if os.path.exists(folder + os.sep + 'isRunning'): os.unlink(folder + os.sep + 'isRunning')
@@ -257,26 +264,27 @@ class SpectrumCalculator(adaptiveSampling.CalculationProgram):
 
     def calculateFolder(self, folder):
         if self.debug: print('SpectrumCalculator: calculating folder', folder)
+        # checking if the folder already has good data
+        with self.lock:
+            r = self.parseAndCollect(folder)
+            if r is not None:
+                if self.debug: print('SpectrumCalculator: we don\'t need to calc. The folder was already calculated', folder)
+                return r
         attemptsDone = 0
         while True:
-            # checking if the folder already has good data
-            isBad = self.checkIfBadFolder(folder)
-            if not isBad or attemptsDone > self.recalculateErrorsAttemptCount:
-                break
+            if attemptsDone >= self.recalculateErrorsAttemptCount+1:
+                if self.debug: print(f'Can\'t calculate folder {folder} after all attempts')
+                return None, None
             if attemptsDone > 0:
                 if self.debug: print(f'Folder {folder} is bad, recalculating')
             self.calculateSpectrum(folder)
             attemptsDone += 1
-            isBad = self.checkIfBadFolder(folder)
-            if isBad and attemptsDone > self.recalculateErrorsAttemptCount:
-                if self.debug: print(f'Can\'t calculate folder {folder} after all attempts')
-        if not isBad:
             with self.lock:
-                if self.debug: print(f'Returning data from {folder} calculation iterations done: {attemptsDone}')
-                ys, additionalData = self.parseAndCollect(folder)
-            return ys, additionalData
-        else:
-            return None, None
+                r = self.parseAndCollect(folder)
+                if r is not None:
+                    if self.debug: print(f'Returning data from {folder} calculation iterations done: {attemptsDone}')
+                    return r
+        return None, None
 
     def configAll(self, runType, runCmd, nProcs, memory):
         self.runType = runType
@@ -308,16 +316,13 @@ class SpectrumCalculator(adaptiveSampling.CalculationProgram):
             print('Error while calculation folder', folder, ':\n', traceback.format_exc())
         os.remove(folder+os.sep+'isRunning')
 
-    def checkIfBadFolder(self, folder):
-        with self.lock:
-            _, _, _, badFolders = parseAllFolders(self.input.folder, self.spectralProgram, printOutput=False)
-        return folder in badFolders
-
     def parseAndCollect(self, folder):
         # for some cases energy is different in different folders, so we can't do loadExistingSpectrum
         # res = loadExistingSpectrum(self.spectralProgram, self.samplePreprocessor, folder)
         df_spectra, df_params, goodFolders, badFolders = collectResults(self.spectralProgram, self.input.folder, self.outputFolder, printOutput=False)
-        assert folder in goodFolders,f'{folder} not in {goodFolders}'
+        if folder not in goodFolders:
+            assert folder in badFolders
+            return None
         i = goodFolders.index(folder)
 
         def getSp(df):
@@ -652,8 +657,7 @@ def checkSampleIsGoodByCVError(maxError, samplePreprocessor, spectralProgram, es
             if debug: plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=False)
             return False
 
-        res = inverseMethod.inverseCrossValidation(estimator, sample, cvCount, nonUniformSample=True)
-        relToConstPredErrorCV = res[0]['relToConstPredError']
+        relToConstPredErrorCV, _, predictedSpectra = ML.crossValidation(estimator, sample.params, sample.spectra, cvCount, nonUniformSample=True, YColumnWeights=sample.convertEnergyToWeights())
         print(f'sampleSize = {n}  relToConstPredError = {relToConstPredErrorCV}')
         if debug: plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=True)
 
@@ -673,7 +677,7 @@ def checkSampleIsGoodByCVError(maxError, samplePreprocessor, spectralProgram, es
             plotFunctionHeatmap(estimator, x=params, y=y, paramNames=[pn1, pn2], title=f'Spectrum at energy = {sample.energy[j]:.0f}', fileName=f"{debugOutputFolder}{os.sep}contour_{lastSpInd:05d}.png", markerText=folderInds)
             relToConstPredError_s = "%.2g" % relToConstPredErrorCV
 
-            plot_error = np.linalg.norm(res[2] - sample.spectra.to_numpy(), ord=np.inf, axis=1)
+            plot_error = np.linalg.norm(predictedSpectra - sample.spectra.to_numpy(), ord=np.inf, axis=1)
             me = np.max(plot_error)
             mes = '%.2g' % me
             fileName = utils.addPostfixIfExists(f"{debugOutputFolder}{os.sep}error_{lastSpInd:05d}.png")
@@ -765,46 +769,13 @@ def checkSampleIsGoodByVASP(spectralProgram, estimator=None, minCountToCheckErro
     return checkSampleIsGood
 
 
-def ensureSettingsAreConsistent(settingsFileName, seed, paramRanges):
-    with open(settingsFileName) as json_file:
-        data = json.load(json_file)
-        assert 'seed' in data, f'seed is not found in settings. Remove {settingsFileName} in working folder'
-        seed = data['seed'] if seed is None else seed
-        assert data['seed'] == seed, \
-            f"Seed in working folder is inconsistent with the given one ({seed} vs {data['seed']})." \
-            f"Set seed=None if you wish to continue calculation"
-
-        assert 'paramRanges' in data, f'paramRanges is not found in settings. Remove {settingsFileName} in working folder'
-        paramNames = [k for k in paramRanges]
-        loadedParamNames = [k for k in data['paramRanges']]
-        assert set(paramNames) == set(loadedParamNames), 'Inconsistent parameters. Remove working folder.'
-        for name in paramNames:
-            assert data['paramRanges'][name][0] <= paramRanges[name][0] and \
-                   data['paramRanges'][name][1] >= paramRanges[name][1], \
-                "Given parameter ranges are more strict than the loaded ones. Restore parameter ranges or clear working folder"
-
-        return seed
-
-
-def writeSettings(settingsFileName, seed, paramRanges):
-    # ensuring seed is not empty, so we can save it
-    seed = int(time.time()) if seed is None else seed
-
-    with open(settingsFileName, 'w') as outfile:
-        json.dump({
-            'seed': seed,
-            'paramRanges': paramRanges,
-        }, outfile)
-
-    return seed
-
-
-def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=None, maxError=0.01, maxSampleSize=None, spectralProgram='fdmnes', samplePreprocessor=None, workingFolder='sample', seed=None, outputFolder='sample_result', debugFolder='sample_debug', runConfiguration=None, adaptiveSamplerParams=None, settingsFileName='settings.json', debug=False):
+def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=None, maxError=0.01, maxSampleSize=None, spectralProgram='fdmnes', samplePreprocessor=None, workingFolder='sample', seed=None, outputFolder=None, debugFolder=None, runConfiguration=None, adaptiveSamplerParams=None, settingsFileName='settings.json', debug=False):
     """
     Calculate sample adaptively
     :param paramRanges: dictionary with geometry parameters region {'paramName':[min,max], 'paramName':[min,max], ...}
     :param moleculeConstructor:
     :param maxError: CV-error to stop sampling
+    :param maxSampleSize: max sample size to stop sampling
     :param spectrCalcParams: see function generateInput in module correspondent to your spectralProgram
     :param spectralProgram: string - one of knownPrograms (see at the top of this file), or dict{'generateInput':func(params,folder), 'parseOneFolder':func(folder), 'createDataframes':func(allData, parentFolder, goodFolders)->(df_spectra,df_params)}
     :param samplePreprocessor: Is applied to y before given it to adaptive sampler, also applied before plotting. Is NOT applied before saving sample. func(sample)->sample and func(spectrum)->spectrum (spectrum - output of parseOneFolder, sample - ML.Sample of output of parseAllFolders) or dict with keys {'smoothParams', 'smoothType', 'expSpectrum', 'fitNormInterval', 'norm':None, 'fitGeometryInterval'}.
@@ -814,8 +785,11 @@ def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=Non
     :param runConfiguration: dict, default = {'runType':'local', 'runCmd':'', 'nProcs':1, 'memory':5000, 'calcSampleInParallel':1, 'recalculateErrorsAttemptCount':0}, runCmd can be command string or function(workingFolder)
     :param adaptiveSamplerParams: dict, default = {'initialIHSDatasetSize':None}
     :param settingsFileName: name of the persistently saved settings, like seed, paramRanges, etc.
+    :param debug: print debug info
     :return:
     """
+    if outputFolder is None: outputFolder = workingFolder+'_result'
+    if debugFolder is None: debugFolder = workingFolder + '_debug'
     if adaptiveSamplerParams is None: adaptiveSamplerParams = {}
     if runConfiguration is None: runConfiguration = {}
     defaultRunConfig = {'runType':'local', 'runCmd':'', 'nProcs':1, 'memory':5000, 'calcSampleInParallel':1, 'recalculateErrorsAttemptCount':0}
@@ -833,16 +807,16 @@ def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=Non
         initialPoints = existingPoints
 
     if settingsFileName in os.listdir(workingFolder):
-        seed = ensureSettingsAreConsistent(workingFolder + os.sep + settingsFileName, seed, paramRanges)
+        seed = adaptiveSampling.ensureSettingsAreConsistent(workingFolder + os.sep + settingsFileName, seed, paramRanges)
     else:
-        seed = writeSettings(workingFolder + os.sep + settingsFileName, seed, paramRanges)
+        seed = adaptiveSampling.writeSettings(workingFolder + os.sep + settingsFileName, seed, paramRanges)
     if callable(maxError): checkSampleIsGoodFunc = maxError
     else: checkSampleIsGoodFunc = checkSampleIsGoodByCVError(maxError=maxError, samplePreprocessor=samplePreprocessor, spectralProgram=spectralProgram, minCountToCheckError=max(len(paramRanges)*2,10), debug=True, maxSampleSize=maxSampleSize, debugOutputFolder=debugFolder)
 
     while True:
         try:
             lock = threading.Lock()
-            sampler = adaptiveSampling.ErrorPredictingSampler(rangeValues, checkSampleIsGoodFunc=checkSampleIsGoodFunc,      seed=seed, initialPoints=initialPoints, **adaptiveSamplerParams)
+            sampler = adaptiveSampling.ErrorPredictingSampler(rangeValues, checkSampleIsGoodFunc=checkSampleIsGoodFunc, seed=seed, initialDataset=initialPoints, **adaptiveSamplerParams, debug=debug)
             folderGen = InputFilesGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder, debug=debug)
             func = SpectrumCalculator(spectralProgram, folderGen, outputFolder, runConfiguration['recalculateErrorsAttemptCount'], samplePreprocessor, debug, lock)
             func.configAll(runConfiguration['runType'], runConfiguration['runCmd'], runConfiguration['nProcs'], runConfiguration['memory'])

@@ -416,12 +416,12 @@ def compare_path0(name1, name2, molecule, sAngle=2, sReff=2, secondCheckR=False,
                     return True
 
 
-def calculate_reff(name,molecule):
+def calculate_reff(name, molecule):
     """
     internal directories. The molecule is NOT the primitive (unperturbed) but the deformed one
     """
     molecule.index=molecule['name']
-    molecule=molecule.drop(['name','number'],axis=1)
+    molecule = molecule.drop(['name','number'], axis=1, errors='ignore')
     l=name.split('_')
     path=molecule.loc[l]
     v=path.values
@@ -884,8 +884,7 @@ class ExafsPredictor:
         for g in self.pathGroups:
             regressor = inverseMethod.getMethod(method)
             sample = samplePreprocessor(self.sample[g])
-            r = inverseMethod.inverseCrossValidation(regressor, sample, CVcount, nonUniformSample=True)[0]
-            res[g] = r['relToConstPredError']
+            res[g],_,_ = ML.crossValidation(regressor, sample.params, sample.spectra, CVcount, nonUniformSample=True)
         return res
 
     def calcSingleSpectrum(self, geomParams, exafsParams, pathGroupName):
@@ -1302,11 +1301,11 @@ class MSPathGroupManager:
             os.makedirs(folder, exist_ok=True)
             shutil.copyfile(self.primitivePath, folder + os.sep + 'molecule.xyz')
             create_input(folder, folder + os.sep + 'molecule.xyz', key)
-        with open(os.path.join(folder, 'geometryParams.txt'), 'w') as f: json.dump([['dummy',0]], f)
+        with open(os.path.join(folder, 'params.txt'), 'w') as f: json.dump([['dummy',0]], f)
 
     def generateDeformationsAdaptive(self, folder, maxSampleSize=500, maxError=0.01, calcSampleInParallel=4, seed=0):
         if self.debug: print('Run adaptive sampling')
-        sampling.sampleAdaptively(self.paramRanges, self.moleculeConstructor, self.feffCards, maxError=maxError, spectralProgram='feff6', samplePreprocessor=samplePreprocessor, workingFolder=folder, seed=seed, outputFolder=self.workingFolder + os.sep + folder+'_result', runConfiguration={'calcSampleInParallel': calcSampleInParallel}, adaptiveSamplerParams={'initialIHSDatasetSize':100}, maxSampleSize=maxSampleSize)
+        sampling.sampleAdaptively(self.paramRanges, self.moleculeConstructor, self.feffCards, maxError=maxError, spectralProgram='feff6', samplePreprocessor=samplePreprocessor, workingFolder=folder, seed=seed, outputFolder=folder+'_result', debugFolder=folder+'_debug', runConfiguration={'calcSampleInParallel': calcSampleInParallel}, adaptiveSamplerParams={'initialIHSDatasetSize':100}, maxSampleSize=maxSampleSize, debug=False)
 
     def extractSelectedPathsForOneFolder(self, shells, inputFolder, outputFolder):
         all_atoms_info = read_xyz_file_with_name_index(inputFolder + os.sep + 'molecule.xyz')
@@ -1339,7 +1338,7 @@ class MSPathGroupManager:
                     attributes0.to_csv(folder_deform_path + os.sep + path_name + '.csv', index=False, header=True)
                     attributes1.to_csv(folder_deform_path + os.sep + path_name + '_attr_' + '.csv', index=False, header=True)
                     if not os.path.isfile(folder_deform_path + os.sep + 'molecule.csv'):
-                        all_atoms_info.to_csv(folder_deform_path + os.sep + 'molecule.csv', index=False, header=True)
+                        all_atoms_info.to_csv(folder_deform_path + os.sep + 'molecule.csv', index=True, index_label='name', header=True)
     
     def extractSelectedPaths(self, shells=None, folder='sample_calc'):
         """
@@ -1538,9 +1537,10 @@ class MSPathGroupManager:
         goodFolders = sorted(os.listdir(folder_paths[0]))
         valueS=[]
         for fold in goodFolders:
-            name,value = getParams(self.workingFolder+os.sep+folder0+os.sep+fold+os.sep+'geometryParams.txt')
+            name,value = getParams(self.workingFolder+os.sep+folder0+os.sep+fold+os.sep+'params.txt')
             #nameS.append(name)
             valueS.append(value)
+        assert len(valueS) > 0, 'No good folders in '+self.workingFolder+os.sep+folder0
         self.names=name
         self.values=valueS
         
@@ -1577,16 +1577,10 @@ class MSPathGroupManager:
         print('Relative to constant prediction error:', exafsPredictor.calcCV(method=method, CVcount=CVcount))
         exafsPredictor.fit(method=method)
         ab = self.paramRanges
-        c = {pn:np.mean(ab[pn]) for pn in ab}
-        mi = {pn:ab[pn][0] for pn in ab}
-        ma = {pn:ab[pn][1] for pn in ab}
-        toCheck = [c, mi, ma]
-        for pn in ab:
-            p = copy.deepcopy(c)
-            p[pn] = ab[pn][0]
-            toCheck.append(copy.deepcopy(p))
-            p[pn] = ab[pn][1]
-            toCheck.append(copy.deepcopy(p))
+        rng = np.random.default_rng(0)
+        toCheck = []
+        for i in range(20):
+            toCheck.append({pn:rng.uniform(*ab[pn]) for pn in ab})
         checkResult = [None]*len(toCheck)
         for i in range(len(toCheck)):
             p = toCheck[i]
@@ -1618,7 +1612,7 @@ class MSPathGroupManager:
                 def plotMoreFunction0(ax): ax.plot(oneMolData['prediction x'], oneMolData['prediction y'], label='chosen paths')
                 def plotMoreFunction1(ax): ax.plot(oneMolData['prediction x_1'], oneMolData['prediction y_1'], label='chosen paths')
             else: plotMoreFunction0,plotMoreFunction1 = None,None
-            title = 'Error=%.3g' % r['error'] + ' ' + utils.dict2str(r['param'])
+            title = 'The worst approximation. Error=%.3g' % r['error'] + ' ' + utils.dict2str(r['param'])
             plotting.plotToFile(axisMatrix=[[(*r['feff-k'], 'feff', *r['prediction-k'], 'prediction')],
                                             [(*r['feff-r'], 'feff', *r['prediction-r'], 'prediction')]],
                                 axisMatrixKw=[[{'xlim':[0, 12], 'xlabel':'k', 'title':title, 'plotMoreFunction':plotMoreFunction0}],

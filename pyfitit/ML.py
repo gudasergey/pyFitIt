@@ -1,6 +1,6 @@
 import shutil
 
-from scipy.interpolate import Rbf
+from scipy.interpolate import Rbf, RBFInterpolator
 import numpy as np
 import pandas as pd
 import math, copy, os, time, warnings, glob, sklearn, inspect
@@ -420,6 +420,13 @@ class Sample:
     def plot(self, **kw):
         plotting.plotSample(self.energy, self.spectra, **kw)
 
+    def convertEnergyToWeights(self):
+        e = self.energy
+        de2 = e[2:]-e[:-2]
+        w = np.insert(de2, 0, e[1]-e[0])
+        w = np.append(w, e[-1]-e[-2])
+        return w/2
+
 
 readSample = Sample.readFolder
 
@@ -471,6 +478,37 @@ def getWeightsForNonUniformSample(x):
     w[w<1e-6] = 1e-6
     w /= np.sum(w)
     return w
+
+
+def crossValidation(estimator, X, Y, CVcount, YColumnWeights=None, nonUniformSample=False):
+    if isinstance(X, pd.DataFrame): X = X.to_numpy()
+    if isinstance(Y, pd.DataFrame): Y = Y.to_numpy()
+    if isinstance(Y, list): Y = np.array(Y)
+    assert isinstance(X, np.ndarray)
+    assert isinstance(Y, np.ndarray)
+    if len(Y.shape) == 1: Y = Y.reshape(-1, 1)
+    N = Y.shape[0]
+    assert len(X) == N
+    if YColumnWeights is None:
+        YColumnWeights = np.ones((1,Y.shape[1]))
+    if N > 20:
+        kf = sklearn.model_selection.KFold(n_splits=CVcount, shuffle=True, random_state=0)
+    else:
+        kf = sklearn.model_selection.LeaveOneOut()
+    predictedY = np.zeros(Y.shape)
+    for train_index, test_index in kf.split(X):
+        X_train, X_test = X[train_index,:], X[test_index,:]
+        y_train, y_test = Y[train_index, :], Y[test_index, :]
+        estimator.fit(X_train, y_train)
+        predictedY[test_index] = estimator.predict(X_test)
+    if nonUniformSample: rowWeights = getWeightsForNonUniformSample(X)
+    else: rowWeights = np.ones(N)
+    individualErrors = np.array([np.sqrt(np.sum(np.abs(Y[i] - predictedY[i])**2 * YColumnWeights)) for i in range(N)])
+    u = np.sum(individualErrors*rowWeights)
+    y_mean = np.mean(Y, axis=0)
+    v = np.sum(np.array([np.sqrt(np.sum(np.abs(Y[i] - y_mean)**2 * YColumnWeights)) for i in range(N)]) * rowWeights)
+    error = u / v
+    return error, individualErrors, predictedY
 
 
 class RBF:
@@ -538,8 +576,8 @@ class RBF:
                 y1 = quadric.predict(x1.reshape(1,-1))
                 grad[i] = np.max([np.linalg.norm(y2 - center_y, ord=np.inf) / h, np.linalg.norm(center_y - y1, ord=np.inf) / h])
             if np.max(grad) == 0:
-                if self.train_x.shape[0] > 1:
-                    warnings.warn('Constant function. Gradient = 0')
+                if self.train_x.shape[0] > 2:
+                    warnings.warn(f'Constant function. Gradient = 0. x.shape={self.train_x.shape}')
                 self.scaleGrad = np.ones((1,n))
             else:
                 grad = grad / np.max(grad)
@@ -559,13 +597,9 @@ class RBF:
                 warnings.filterwarnings("ignore", category=RuntimeWarning)
                 self.base.fit(self.train_x, self.train_y, sample_weight=w)
             self.train_y = self.train_y - self.base.predict(self.train_x)
-        NdimsX = self.train_x.shape[1]
         NdimsY = self.train_y.shape[1]
         assert NdimsY > 0
-        train_points = [self.train_x[:, j] for j in range(NdimsX)]
-        self.interp = [None]*NdimsY
-        for i in range(NdimsY):
-            self.interp[i] = Rbf(*train_points, self.train_y[:,i], function=self.function)
+        self.interp = RBFInterpolator(self.train_x, self.train_y, kernel=self.function, degree=0)
         self.trained = True
 
     def predict(self, x):
@@ -576,14 +610,7 @@ class RBF:
         if self.scaleX:
             x = norm(x, self.minX, self.maxX)
             x = x * self.scaleGrad
-        y = self.train_y
-        if len(y.shape) == 1: y = y.reshape(-1, 1)
-        NdimsX = self.train_x.shape[1]
-        NdimsY = y.shape[1] if len(y.shape) > 1 else 1
-        res = np.zeros([x.shape[0], NdimsY])
-        for i in range(NdimsY):
-            points = [x[:,j] for j in range(NdimsX)]
-            res[:,i] = self.interp[i](*points)
+        res = self.interp(x)
         if self.baseRegression is not None:
             res = res + self.base.predict(x)
         return res
