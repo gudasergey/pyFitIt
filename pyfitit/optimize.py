@@ -526,10 +526,10 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
         best_x_partial = xs_partial[best_ind]
 
         def plot1d(param):
-            plotMap1d(param, targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_1d_target_func')
+            plotMap1d(param, targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=fun_args, paramNames=notFixedParamNames, optimizeMethod='Powell', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_1d_target_func')
 
         def plot2d(param1, param2):
-            plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='scipy', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extraPlotFunc=extraPlotFunc)
+            plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='Powell', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extraPlotFunc=extraPlotFunc)
 
         if plotContourMaps == 'all':
             for i in range(len(notFixedParamNames)):
@@ -575,7 +575,7 @@ def checkConstrains(x, constraints, returnRate=False):
     else: return result
 
 
-def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix=''):
+def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='Powell', N=None, calMapMethod='fast', folder='.', postfix=''):
     assert calMapMethod in ['fast', 'thorough']
     if isinstance(axis, str):
         assert axis in paramNames
@@ -652,7 +652,7 @@ def plotMap1d(axis, fun, xmin, bounds, constraints=(), fun_args=None, paramNames
 
 # axes - a pair of param names or param indexes
 # N = {paramName1:N1, paramName2:N2}
-def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='coord', N=None, calMapMethod='fast', folder='.', postfix='', extraPlotFunc=None):
+def plotMap2d(axes, fun, xmin, bounds, constraints=(), fun_args=None, paramNames=None, optimizeMethod='Powell', N=None, calMapMethod='fast', folder='.', postfix='', extraPlotFunc=None):
     assert calMapMethod in ['fast', 'thorough']
     if isinstance(axes[0], str):
         assert (axes[0] in paramNames) and (axes[1] in paramNames)

@@ -798,7 +798,7 @@ def descriptorQuality(data, label_names, all_features, feature_subset_size=2, cv
             res_d = {'features':','.join(fs), 'quality':quality, 'quality_std':quality_std}
             if unknown_data is not None:
                 model = getQualityResult[label]['model']
-                res_d['predictions'] = model.predict(unknown_data.loc[:,fs])
+                res_d['predictions'] = model.predict(unknown_data.loc[:,fs].to_numpy())
             qualities[label].append(res_d)
     os.makedirs(folder, exist_ok=True)
     for label in qualities:

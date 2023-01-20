@@ -457,8 +457,13 @@ def score_cv(model, X, y, cv_count, returnPrediction=True):
     else:
         cv = sklearn.model_selection.LeaveOneOut()
     try:
+        if len(warnings.filters) > 0:
+            action = warnings.filters[0][0]
+            warnings.filterwarnings("default")
         with warnings.catch_warnings(record=True) as warn:
             pred = sklearn.model_selection.cross_val_predict(model, X, y, cv=cv)
+        if len(warnings.filters) > 0:
+            warnings.filterwarnings(action)
     except Warning:
         pass
     res = sklearn.metrics.accuracy_score(y, pred) if isClassification(y) else sklearn.metrics.r2_score(y, pred)
