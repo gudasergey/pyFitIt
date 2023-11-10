@@ -1,15 +1,25 @@
-import scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, copy, glob, numbers, itertools, pickle, time, re, warnings, sys, types, subprocess, shlex, jupytext, nbformat
+import scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, copy, glob, numbers, itertools, pickle, time, re, warnings, sys, types, subprocess, shlex, jupytext, nbformat, scipy.stats, scipy.spatial, io, platform, shutil, hashlib, builtins
 from IPython.display import display, Javascript, HTML
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 from notebook import notebookapp
-from . import geometry
+
+
+def isLibExists(name):
+    folder = os.path.dirname(os.path.realpath(__file__))
+    if os.path.exists(folder+os.sep+name+'.py'): return True
+    return importlib.util.find_spec(name) is not None
+
+
+if isLibExists('dtaidistance'):
+    from dtaidistance import dtw
 
 
 class Spectrum(object):
     __initialized = False
-    def __init__(self, x, y, xName='energy', yName='intensity', copy=True, checkSorting=True):
+
+    def __init__(self, x, y, xName='energy', yName='intensity', copy=True, checkSorting=True, spectrum_type=None):
         """Spectrum class
 
         :param energy: energy
@@ -34,8 +44,11 @@ class Spectrum(object):
         else:
             self.x = x
             self.y = y
+        assert np.all(np.isfinite(self.x)), f'x = {self.x.tolist()}\ny = {self.y.tolist()}'
+        assert np.all(np.isfinite(self.y)), f'x = {self.x.tolist()}\ny = {self.y.tolist()}'
         self.xName = xName
         self.yName = yName
+        self.type = 'Spectrum' if spectrum_type is None else spectrum_type
         self.__initialized = True
 
     def __getattr__(self, name):
@@ -46,8 +59,14 @@ class Spectrum(object):
 
     def __setattr__(self, name, value):
         if name != '_Spectrum__initialized' and self.__initialized:
-            if name == self.xName: self.x = value
-            elif name == self.yName: self.y = value
+            if name == self.xName or name == 'x':
+                assert len(self.x) == len(value), f'Old length {len(self.x)} != new length {len(value)}'
+            if name == self.yName or name == 'y':
+                assert len(self.y) == len(value), f'Old length {len(self.y)} != new length {len(value)}'
+            if name == self.xName:
+                self.x = value
+            elif name == self.yName:
+                self.y = value
             else: super(Spectrum, self).__setattr__(name, value)
         else:
             super(Spectrum, self).__setattr__(name, value)
@@ -58,11 +77,21 @@ class Spectrum(object):
         n = self.x.size
         data = np.hstack((self.x.reshape([n,1]), self.y.reshape([n,1])))
         np.savetxt(fileName, data, header='energy intensity', comments='')
+
+    def to_string(self):
+        ss = io.StringIO()
+        data = np.hstack((self.x.reshape(-1, 1), self.y.reshape(-1, 1)))
+        # Athena doesn't understand csv format with ';' as delimiter
+        np.savetxt(ss, data, fmt='%.17e', comments='', delimiter=' ')
+        return ss.getvalue()
         
     def clone(self):
-        return Spectrum(self.x, self.y, xName=self.xName, yName=self.yName, copy=True, checkSorting=False)
+        return Spectrum(self.x, self.y, xName=self.xName, yName=self.yName, copy=True, checkSorting=False, spectrum_type=self.type)
 
-    def limit(self, interval, inplace=False):
+    def limit(self, interval):
+        assert len(interval) == 2, str(interval)
+        assert interval[0] < interval[1], str(interval)
+        assert self.x[0] < interval[1] and interval[0] < self.x[-1], f'Spectrum energy interval [{self.x[0]},{self.x[-1]}] doesn\'t intersect with interval {interval}'
         e, inten = limit(interval, self.x, self.y)
         if e[0] != interval[0] and self.x[0] < interval[0] < self.x[-1]:
             e = np.insert(e, 0, interval[0])
@@ -70,20 +99,13 @@ class Spectrum(object):
         if e[-1] != interval[1] and self.x[0] < interval[1] < self.x[-1]:
             e = np.append(e, interval[1])
             inten = np.append(inten, np.interp(interval[1], self.x, self.y))
-        if inplace:
-            self.x = e
-            self.y = inten
-        else:
-            return Spectrum(e, inten, xName=self.xName, yName=self.yName, copy=True)
+        return Spectrum(e, inten, xName=self.xName, yName=self.yName, copy=True, spectrum_type=self.type)
 
-    def changeEnergy(self, newEnergy, inplace=False):
+    def changeEnergy(self, newEnergy, interpArgs=None):
         if self.checkSorting: assert np.all(newEnergy[1:]>=newEnergy[:-1])
-        newInt = np.interp(newEnergy, self.x, self.y)
-        if inplace:
-            self.x = newEnergy
-            self.y = newInt
-        else:
-            return Spectrum(newEnergy, newInt, xName=self.xName, yName=self.yName, copy=True, checkSorting=self.checkSorting)
+        if interpArgs is None: interpArgs = {}
+        newInt = np.interp(newEnergy, self.x, self.y, **interpArgs)
+        return Spectrum(newEnergy, newInt, xName=self.xName, yName=self.yName, copy=True, checkSorting=self.checkSorting, spectrum_type=self.type)
 
     def shiftEnergy(self, shift, inplace=False):
         return self.changeEnergy(newEnergy=self.x+shift, inplace=inplace)
@@ -95,8 +117,9 @@ class Spectrum(object):
         return np.interp(energyValue, self.x, self.y)
 
     def inverse(self, y, select='min'):
+        from . import geometry
         ind = np.where((self.y[:-1] - y) * (self.y[1:] - y) <= 0)[0]
-        assert len(ind) > 0, f'Can\'t find inverse for value {y}'
+        if len(ind) == 0: return None
         if select == 'min': i = ind[0]
         else:
             assert select == 'max'
@@ -105,7 +128,7 @@ class Spectrum(object):
         e,inten = geometry.get_line_intersection(a, b, c, 0, 1, -y)
         return e
 
-    def toExafs(self, Efermi, k_power):
+    def toExafs(self, Efermi, k_power, preserveGrid=False):
         me = 2 * 9.109e-31  # kg
         h = 1.05457e-34  # J*s
         J = 6.24e18  # 1 J = 6.24e18 eV
@@ -113,64 +136,56 @@ class Spectrum(object):
         i = e >= Efermi
         k = np.sqrt((e[i] - Efermi) / J * me / h ** 2 / 1e20)  # J * kg /  (J*s)^2 = kg / (J * s^2) = kg / ( kg*m^2 ) = 1/m^2 = 1e-20 / A^2
         intSqr = (s[i] - 1) * k ** k_power
-        # for j in range(len(k)):
-        #     print(k[j], e[i][j])
-        return Exafs(k, intSqr)
+        if preserveGrid:
+            k1 = np.sign(e-Efermi)*np.sqrt(np.abs(e-Efermi) / J * me / h ** 2 / 1e20)
+            intSqr1 = np.zeros(len(e))
+            intSqr1[i] = intSqr
+        else:
+            k1 = np.linspace(k[0], k[-1], int((k[-1]-k[0])*100))
+            intSqr1 = np.interp(k1, k, intSqr)
+        return Spectrum(k1, intSqr1, xName='k', yName='chi')
 
     def toTuple(self):
         return self.x, self.y
 
-    def __add__(self, other):
+    def makeCommonX(self, other):
         e1 = max(self.x[0], other.x[0])
         e2 = min(self.x[-1], other.x[-1])
         ind1 = (e1 <= self.x) & (self.x <= e2)
         ind2 = (e1 <= other.x) & (other.x <= e2)
         if np.sum(ind1) > np.sum(ind2):
             e = self.x[ind1]
-            s = self.y[ind1] + np.interp(e, other.x, other.y)
+            s1,s2 = self.y[ind1], np.interp(e, other.x, other.y)
         else:
             e = other.x[ind2]
-            s = other.intensity[ind2] + np.interp(e, self.x, self.y)
-        return Spectrum(e, s)
+            s1,s2 = np.interp(e, self.x, self.y), other.y[ind2]
+        return e, s1, s2
+
+    def __add__(self, other):
+        if isinstance(other, numbers.Number):
+            other = Spectrum(self.x, np.zeros(self.x.size)+other)
+        e, s1, s2 = self.makeCommonX(other)
+        return Spectrum(e, s1+s2)
+
+    def __sub__(self, other):
+        if isinstance(other, (int,float)):
+            other = Spectrum(self.x, np.zeros(self.x.size)+other)
+        e, s1, s2 = self.makeCommonX(other)
+        return Spectrum(e, s1-s2)
 
     def __mul__(self, other):
-        assert isinstance(other, numbers.Number)
-        return Spectrum(self.x, self.y*other)
+        if isinstance(other, numbers.Number):
+            return Spectrum(self.x, self.y*other)
+        e, s1, s2 = self.makeCommonX(other)
+        return Spectrum(e, s1*s2)
 
     __rmul__ = __mul__
 
     def __truediv__(self, other):
-        assert isinstance(other, numbers.Number)
-        return Spectrum(self.x, self.y/other)
-
-
-class Exafs:
-    def __init__(self, k, chi):
-        self.k = k
-        self.chi = chi
-
-    def toXanes(self, Efermi, k_power):
-        me = 2 * 9.109e-31  # kg
-        h = 1.05457e-34  # J*s
-        J = 6.24e18  # 1 J = 6.24e18 eV
-        e = self.k**2 * J / me * h**2 * 1e20 + Efermi
-        k = copy.deepcopy(self.k)
-        k[k==1] = 1
-        return Spectrum(e, self.chi/k**k_power + 1)
-
-    def shift(self, dE, Efermi, inplace=False):
-        xan = self.toXanes(Efermi, k_power=0)
-        xan.energy += dE
-        exafs = xan.toExafs(Efermi, k_power=0)
-        if inplace:
-            self.k, self.chi = exafs.k, exafs.chi
-        else:
-            return exafs
-
-    def smooth(self, SO2, sigmaSquare, inplace=False):
-        chi1 = self.chi * np.exp(-2 * self.k ** 2 * sigmaSquare) * SO2
-        if inplace: self.chi = chi1
-        else: return Exafs(self.k, chi1)
+        if isinstance(other, numbers.Number):
+            return Spectrum(self.x, self.y/other)
+        e, s1, s2 = self.makeCommonX(other)
+        return Spectrum(e, s1/s2)
 
 
 class SpectrumCollection:
@@ -262,10 +277,10 @@ def readSpectrum(fileName, skiprows=0, energyColumn=None, intensityColumn=None, 
                 if ncols > 2: print('energyColumn not set in readSpectrum. Use energyColumn=0')
                 energyColumn = 0
         if intensityColumn is None:
-            if ext == '.nor': intensityColumn = 3
-            else:
-                assert ncols == 2, f"intensityColumn not set in readSpectrum and ncols > 2. File: {fileName}"
-                intensityColumn = 1
+            # if ext == '.nor': intensityColumn = 3 - lead to errors in some cases
+            # else:
+            assert ncols == 2, f"intensityColumn not set in readSpectrum and ncols > 2. File: {fileName}"
+            intensityColumn = 1
         if ncols == 2:
             if ncols <= energyColumn:
                 print(f'Warning: wrong energyColumn number {energyColumn} in readSpectrum. It was corrected to 0')
@@ -332,6 +347,76 @@ def readSpectrum(fileName, skiprows=0, energyColumn=None, intensityColumn=None, 
     return result
 
 
+def read_non_uniform_data(file, skiprows=0):
+    """
+    Read spectra from file (columnwise). Try guess=True first
+    """
+    if isinstance(file, str):
+        with open(file, 'r') as f: lines = f.read()
+    else:
+        lines = file.read().decode("utf-8")
+    lines = lines.split('\n')
+    #skip lines
+    lines = lines[skiprows:]
+    lines = [l.strip() for l in lines]
+    # delete empty lines
+    lines = [l for l in lines if len(l) > 0]
+    # if last line contains ',' but not '.', than ',' is integer part feature
+    if ',' in lines[-1] and '.' not in lines[-1]:
+        lines = [l.replace(',', '.') for l in lines]
+    # check non-whitespace separators
+    separators = [',', ';']
+    if separators[0] in lines[-1]: assert separators[1] not in lines[-1], 'Two different separators are used. Can\'t guess data format'
+    if separators[1] in lines[-1]: assert separators[0] not in lines[-1], 'Two different separators are used. Can\'t guess data format'
+    for sep in separators:
+        lines = [l.replace(sep, '\t') for l in lines]
+    # delete lines which are not numbers
+    is_numbers = [re.match(r"^[\d.eE+\-\s]*$", l) is not None for l in lines]
+    # remove not numbers in the footer
+    while len(is_numbers)>0 and not is_numbers[-1]:
+        is_numbers = is_numbers[:-1]
+        lines = lines[:-1]
+    # get header - last not number line
+    ind = np.where(~np.array(is_numbers))[0]
+    if len(ind) > 0:
+        nh = ind[-1]
+        header = lines[nh]
+    else:
+        nh = -1
+        header = None
+    lines = [l for i,l in enumerate(lines) if is_numbers[i] and i > nh]
+    assert len(lines) > 0, 'Unknown file format. Can\'t guess'
+    result = []
+    if header is not None:
+        header = re.split(r"[\s;]+", header)
+        if header[0] in ['#', '!', ';', '//']: header = header[1:]
+    for i in range(len(lines)):
+        numbers = re.findall(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', lines[i])
+        result.append(np.array([float(n) for n in numbers]))
+    assert len(result) > 0, 'Unknown file format. Can\'t guess'
+    return result, header
+
+
+def read_data(file, skiprows=0, separator=r'\s+', decimal=".", guess=True):
+    """
+    Read spectra from file (columnwise). Try guess=True first
+    """
+    if guess:
+        data, header = read_non_uniform_data(file, skiprows=0)
+        ncols = len(data[-1])
+        for row in data:
+            assert len(row) == ncols, f'Rows with different number of columns detected: {len(row)} and {ncols}'
+        if header is not None:
+            assert len(header) == ncols, f'Header contains different number of columns: {len(header)} != {ncols}'
+        result = np.array(data)
+    else:
+        result = pd.read_csv(file, sep=separator, decimal=decimal, skiprows=skiprows, header=None)
+        result = result.select_dtypes(include=np.number)
+        header = result.columns
+        result = result.to_numpy()
+    return result, header
+
+
 def fixMultiValue(x, y, gatherOp):
     """
     For non-unique x returns x1,y1 with unique sorted x-values and gathered y
@@ -355,7 +440,7 @@ def fixMultiValue(x, y, gatherOp):
 
 def readExafs(fileName, skiprows=0, energyColumn=0, intensityColumn=1, separator=r'\s+', decimal="."):
     spectrum = readSpectrum(fileName, skiprows, energyColumn, intensityColumn, separator, decimal)
-    return Exafs(spectrum.energy, spectrum.intensity)
+    return Exafs(spectrum.x, spectrum.y)
 
 
 def adjustSpectrum(s, maxSpectrumPoints, intervals):
@@ -363,19 +448,16 @@ def adjustSpectrum(s, maxSpectrumPoints, intervals):
     M = np.max([intervals['fit_norm'][1], intervals['fit_smooth'][1], intervals['fit_geometry'][1], intervals['plot'][1]])
     res = copy.deepcopy(s)
     if m > M: return res
-    ind = (res.energy>=m) & (res.energy<=M)
-    res.energy = res.energy[ind]
-    assert len(res.energy)>2, 'Too few energies are situated in the intervals ['+str(m)+', '+str(M)+']. Energy = '+str(s.energy)
-    res.intensity = res.intensity[ind]
-    if res.energy.size <= maxSpectrumPoints: return res
-    var = np.cumsum(np.abs(res.intensity[1:]-res.intensity[:-1]))
+    ind = (res.x>=m) & (res.x<=M)
+    assert np.sum(ind)>2, 'Too few energies are situated in the intervals ['+str(m)+', '+str(M)+']. Energy = '+str(s.x)
+    res = Spectrum(res.x[ind], res.y[ind], xName=res.xName, yName=res.yName, spectrum_type=res.type)
+    if res.x.size <= maxSpectrumPoints: return res
+    var = np.cumsum(np.abs(res.y[1:]-res.y[:-1]))
     var = np.insert(var, 0, 0)
     var_edges = np.linspace(0,var[-1],maxSpectrumPoints)
     dists = scipy.spatial.distance.cdist(var.reshape(-1,1), var_edges.reshape(-1,1))
     ind = np.unique(np.argmin(dists, axis=0))
-    res.energy = res.energy[ind]
-    res.intensity = res.intensity[ind]
-    return res
+    return Spectrum(res.x[ind], res.y[ind], xName=res.xName, yName=res.yName, spectrum_type=res.type)
 
 
 def integral(x,y):
@@ -397,14 +479,18 @@ def norm_lp(x, y, p):
     return integral(x, np.abs(y)**p) ** (1/p)
 
 
-def findNextMinimum(y, i0):
+def findNextMinimum(y, i0, direction=+1):
     i = i0
     n = y.size
-    if i==0: i=1
-    if i==n-1: return i
+    if i==0:
+        if direction==+1: i=1
+        else: return i
+    if i==n-1:
+        if direction==+1: return i
+        else: i = n-2
     while not ((y[i-1]>=y[i]) and (y[i]<=y[i+1])):
-        i += 1
-        if i>=n-1: return i
+        i += direction
+        if i>=n-1 or i <= 0: return i
     return i
 
 
@@ -427,7 +513,7 @@ def findNearest(a, value, returnInd=False, direction='both', ignoreDirectionIfEm
     :param returnInd: True/False
     :param direction: 'left', 'right' or 'both'
     :param ignoreDirectionIfEmpty: True/False
-    :return: for empty array a (or left/right parts of a): nan if returnInd else None
+    :return: nearest value or index, for empty array a (or left/right parts of a): nan if returnInd else None
     """
     assert np.isscalar(value)
     assert isinstance(a, np.ndarray)
@@ -557,12 +643,6 @@ def makePiramids(e, a, h):
     return eNew, aNew
 
 
-def isLibExists(name):
-    folder = os.path.dirname(os.path.realpath(__file__))
-    if os.path.exists(folder+os.sep+name+'.py'): return True
-    return importlib.util.find_spec(name) is not None
-
-
 def fixPath(p):
     if p == '': return ''
     return str(pathlib.PurePath(p))
@@ -650,14 +730,16 @@ def findFile(folder='.', postfix=None, mask=None, check_unique=True, ignoreSlurm
         else: return None
 
 
-def wrap(s, maxLineLen, maxLineCount=None):
+def wrap(s:str, maxLineLen, maxLineCount=None):
     if len(s) <= maxLineLen: return s
     i_last = 0
     i = i_last + maxLineLen
     lines = []
     while i < len(s):
-        i1 = s.rfind(' ', i_last, i)
-        if i1 == -1: i1 = i
+        i1 = s.rfind(' ', i_last+1, i)
+        if i1 == -1:
+            i1 = s.rfind('_', i_last + 1, i)
+            if i1 == -1: i1 = i
         lines.append(s[i_last:i1])
         i_last = i1
         i = i_last + maxLineLen
@@ -708,27 +790,37 @@ def makeDataFrame(energy, spectra):
     return pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
 
 
-def makeDataFrameFromSpectraList(spectra, energy=None):
+def makeDataFrameFromSpectraList(spectra, energy=None, interpArgs=None):
     assert isinstance(spectra, list)
+    if interpArgs is None: interpArgs = {}
     energy0 = energy
     m = len(spectra)
     if energy is None:
         energies = np.array([])
-        for s in spectra: energies = np.append(energies, s.energy)
-        energies = np.sort(energies)
-        max_count = np.max([len(s.energy) for s in spectra])
+        for s in spectra: energies = np.append(energies, s.x)
+        energies = np.unique(energies)
+        max_count = np.max([len(s.x) for s in spectra])
         step = len(energies) // max_count
-        energy = np.unique(energies[::step])
+        if step == 0: step = 1
+        energy = energies[::step]
+        if energy[-1] != energies[-1]: energy = np.append(energy, energies[-1])
     n = len(energy)
     sp_matr = np.zeros((m,n))
     for i,s in enumerate(spectra):
         if isinstance(s, np.ndarray):
             assert energy0 is not None
-            assert len(s) == len(energy)
-            sp_matr[i] = np.interp(energy, energy, s)
+            assert len(s) == len(energy), f'{len(s)} != {len(energy)}'
+            sp_matr[i] = np.interp(energy, energy, s, **interpArgs)
         else:
-            sp_matr[i] = np.interp(energy, s.energy, s.intensity)
+            sp_matr[i] = np.interp(energy, s.x, s.y, **interpArgs)
     return makeDataFrame(energy, sp_matr)
+
+
+def isArrayEqual(a, b):
+    assert isinstance(a, np.ndarray) and isinstance(b, np.ndarray)
+    if np.any(a.shape != b.shape): return False
+    if np.any(a != b): return False
+    return True
 
 
 def isObjectArraysEqual(a, b):
@@ -769,28 +861,101 @@ def find_nearest_in_sorted_array(array, value):
         return array[idx], idx
 
 
-def rFactorSp(theory, exp, weight=None, p=2, sub1=False, interval=None):
+def spectrumNorm(theory, exp, normName='L2', weight=None, interval=None, fit=None):
+    """
+    Supported normName: L1, L2, L??,  relative ... (divide by mean of theory and exp same norms), wasserstein, cosine, braycurtis, canberra, chebyshev, cityblock, correlation, DTW
+    """
+    from . import curveFitting
+    if weight is not None:
+        assert len(weight) == len(exp.x), 'Weight should be defined for exp spectrum'
+    else: weight = np.ones(len(exp.x))
+    theor_x, exp_x = theory.x, exp.x
+    theor_y, exp_y = theory.y, exp.y
+    if interval is not None:
+        ind = (interval[0]<=exp_x) & (exp_x<=interval[1])
+        exp_x, exp_y = exp_x[ind], exp_y[ind]
+        weight = weight[ind]
+    else: interval = [exp_x[0], exp_x[-1]]
+    if len(theor_x) != len(exp_x) or np.any(theor_x != exp_x):
+        theor_y = np.interp(exp_x, theor_x, theor_y)
+        theor_x = exp_x
+    if fit is not None:
+        theor_y, _ = curveFitting.fit_to_experiment_by_norm_or_regression(exp_x, exp_y, interval, exp_x, theor_y, 0, None, normType=fit)
+    relative = normName[:len('relative')] == 'relative'
+    if relative: normName = normName[normName.index(' ')+1:]
+    if re.match(r'L\d+', normName):
+        p = float(normName[1:])
+        norm = lambda x, diff: integral(x, np.abs(diff*np.conj(diff))**p * weight) ** (1/p)
+        result = norm(exp_x, exp_y-theor_y)
+    elif normName == 'wasserstein': result = scipy.stats.wasserstein_distance(theor_y, exp_x)
+    elif normName == 'cosine': result = scipy.spatial.distance.cosine(theor_y, exp_x)
+    elif normName == 'braycurtis': result = scipy.spatial.distance.braycurtis(theor_y, exp_x)
+    elif normName == 'canberra': result = scipy.spatial.distance.canberra(theor_y, exp_x)
+    elif normName == 'chebyshev': result = scipy.spatial.distance.chebyshev(theor_y, exp_x)
+    elif normName == 'cityblock': result = scipy.spatial.distance.cityblock(theor_y, exp_x)
+    elif normName == 'correlation': result = scipy.spatial.distance.correlation(theor_y, exp_x)
+    elif normName == 'DTW': result = dtw.distance(theor_y, exp_x)
+    else: assert False, 'Unknown norm name '+normName
+    if relative: result = result / ((norm(exp_x, exp_y) + norm(exp_x, theor_y))/2)
+    return result
+
+
+def rFactorSp(theory, exp, weight=None, p=2, sub1=False, interval=None, fit=None, normalize=None, divBy='exp', returnSpectra=False):
     """
         :param p: power in Lp norm |theory-exp|^p/|exp|^p
         :param sub1: whether to divide in norm by |exp|^p or by |exp-1|^p
+        :param fit: None or argument of normType of curveFitting.fit_to_experiment_by_norm_or_regression
+        :param normalize: normalize spectra before comparison ('L1', 'L2', None)
+        :param divBy: 'exp' or 'theory' or '1'
     """
-    et, e = theory.energy, exp.energy
-    yt, ye = theory.intensity, exp.intensity
-    if interval is not None:
-        ind = (interval[0]<=e) & (e<=interval[1])
-        e, ye = e[ind], ye[ind]
+    from . import curveFitting
+    theory = copy.deepcopy(theory)
+    exp = copy.deepcopy(exp)
+    if weight is not None:
+        assert len(weight) == len(exp.x), 'Weight should be defined for exp spectrum'
+    et, e = theory.x, exp.x
+    yt, ye = theory.y, exp.y
+    if interval is None: interval = [max(e[0],et[0]), min(e[-1], et[-1])]
+    ind = (interval[0]<=e) & (e<=interval[1])
+    e,ye = e[ind],ye[ind]
+    if weight is not None:
+        weight = weight[ind]
     if len(et) != len(e) or np.any(et != e):
         yt = np.interp(e, et, yt)
-    return rFactor(e, yt, ye, weight=weight, p=p, sub1=sub1)
+    if fit is not None:
+        yt, _ = curveFitting.fit_to_experiment_by_norm_or_regression(e, ye, interval, e, yt, 0, None, normType=fit)
+    if normalize is not None:
+        assert normalize in ['L1', 'L2']
+        p2 = 1 if normalize == 'L1' else 2
+        if weight is None: weight = np.ones(len(e))
+        if sub1:
+            yt = yt-1
+            ye = ye-1
+            sub1 = False
+        norm = lambda y: integral(e, np.abs(y * np.conj(y)) ** (p2 / 2) * weight)**(1/p2)
+        yt = yt / norm(yt)
+        ye = ye / norm(ye)
+    res = rFactor(e, yt, ye, weight=weight, p=p, sub1=sub1, divBy=divBy)
+    if returnSpectra: return res, Spectrum(e, yt), Spectrum(e, ye)
+    else: return res
 
 
-def rFactor(e, theory, exp, weight=None, p=2, sub1=False):
+def rFactor(e, theory, exp, weight=None, p=2, sub1=False, divBy='exp'):
     assert len(e) == len(theory), f'{len(e)} != {len(theory)}'
     assert len(e) == len(exp), f'{len(e)} != {len(exp)}'
+    assert divBy in ['exp', 'theory', '1']
     if weight is None: weight = np.ones(len(e))
     assert len(weight) == len(e)
-    exp1 = exp-1 if sub1 else exp
-    return integral(e, np.abs((theory - exp)*np.conj(theory - exp))**(p/2) * weight) / integral(e, np.abs(exp1*np.conj(exp1))**(p/2) * weight)
+    if sub1:
+        exp = exp-1
+        theory = theory-1
+    if divBy == '1':
+        denom = 1
+    else:
+        if divBy == 'exp': denom_y = exp
+        elif divBy == 'theory': denom_y = theory
+        denom = integral(e, np.abs(denom_y * np.conj(denom_y)) ** (p / 2) * weight)
+    return integral(e, np.abs((theory - exp)*np.conj(theory - exp))**(p/2) * weight) / denom
 
 
 def save_pkl(obj, fileName):
@@ -829,30 +994,6 @@ def loadData(file_name):
         assert ext == '.json'
         with open(file_name, 'r') as f:
             return json.load(f)
-
-
-def cacheInFile(file_name, calc_func, is_changed_func=None):
-    """
-    Returns cached object or calculates new by calc_func and saves if cache doesn't exist or if is_changed_func(saved_obj)=True
-    :param file_name: .json or .pkl file
-    :param calc_func: func() -> obj
-    :param is_changed_func: func(saved_obj)
-    :return: cached or new object
-    """
-    if os.path.exists(file_name):
-        saved = loadData(file_name)
-        if is_changed_func is None:
-            return saved
-        else:
-            if is_changed_func(saved):
-                res = calc_func()
-                saveData(res, file_name)
-                return res
-            else: return saved
-    else:
-        res = calc_func()
-        saveData(res, file_name)
-        return res
 
 
 def appendToBeginningOfFile(fileName, s):
@@ -927,15 +1068,30 @@ def makeBars(x, y, base=0):
     return x,y
 
 
-def is_numeric(obj):
+def is_str_float(s):
     try:
-        obj+obj, obj-obj, obj*obj, obj**obj, obj/obj
+        float(s) # for int, long and float
+    except ValueError:
+        return False
+    return True
+
+
+def is_numeric(obj):
+    if isinstance(obj, (float, int, np.int64)): return True
+    try:
+        with warnings.catch_warnings(record=True) as warn:
+            obj+obj, obj-obj, obj*obj, obj**obj, obj/obj
     except ZeroDivisionError:
         return True
     except Exception:
         return False
     else:
         return True
+
+
+def isArray(obj):
+    if isinstance(obj, (dict, str)): return False
+    return hasattr(obj, "__len__")
 
 
 def length(x):
@@ -1000,31 +1156,78 @@ def inside(x, interval):
     return np.all((interval[0]<=x) & (x<=interval[1]))
 
 
-class CacheInMemory:
-    """
-    Contains dataDict - dictionary with different data for speedup the calculations. Evaluate new data only if dependData was changed
-    """
-    def __init__(self):
-        self.dataDict = {}
+def hash(obj):
+    def pickle_hash(obj):
+        return hashlib.md5(pickle.dumps(obj)).hexdigest()
+    def dict_hash(d):
+        return pickle_hash(json.dumps({k:hash(v) for k,v in d.items()}, sort_keys=True, cls=NumpyEncoder))
+    # try:
+    if isinstance(obj, dict):
+        return dict_hash(obj)
+    elif isinstance(obj, (list,tuple)):
+        return pickle_hash(obj)
+    elif isinstance(obj, pd.DataFrame):
+        return pickle_hash(pd.util.hash_pandas_object(obj).sum())
+    elif isinstance(obj, pd.Series):
+        return pickle_hash(pd.util.hash_pandas_object(obj))
+    else:
+        return pickle_hash(obj)
+    # except:
+    #     import traceback
+    #     print('The was an error while calculation hash of the object: ', obj)
+    #     print('I use pickle.dumps, but it can return different values for the same data')
+    #     print(traceback.format_exc())
+    #     traceback.print_stack()
+    #     return pickle_hash(obj)
 
-    def getHash(self, o):
-        return hash(pickle.dumps(o))
+
+class Cache:
+    def __init__(self, folder=None, debug=False):
+        """
+        Method getFromCacheOrEval(dataName, evalFunc, dependData) evaluates new data only if dependData was changed.
+        If folder is None the class stores data in memory.
+        The disk stores data with the same name for all variants of dependData (but memory cache don't and if we can't find in memory, we load from disk)
+        """
+        self.dataDict = {}
+        self.folder = folder
+        if folder is not None:
+            os.makedirs(folder, exist_ok=True)
+        self.debug = debug
 
     def getIfUpToDate(self, dataName, dependData):
         if dataName in self.dataDict:
-            hash, data = self.dataDict[dataName]
-            if hash == self.getHash(dependData):
-                return data
-
-        return None
+            h, data = self.dataDict[dataName]
+            if h == hash(dependData):
+                if self.debug: print(f'key {dataName} with hash {h} was found in memory cache')
+                return 'memory', data
+        # try to read from disk
+        if self.folder is not None:
+            h = hash(dependData)
+            fileName = self.folder +os.sep+ f'{dataName}_{h}.pkl'
+            if os.path.exists(fileName):
+                if self.debug: print(f'key {dataName} with hash {h} was found in disk cache')
+                data = loadData(fileName)
+                self.dataDict[dataName] = (h, data)
+                return 'disk', data
+        return None, None
 
     def getFromCacheOrEval(self, dataName, evalFunc, dependData):
-        data = self.getIfUpToDate(dataName, dependData)
-        if data is None:
+        src, data = self.getIfUpToDate(dataName, dependData)
+        if src is None:
             data = evalFunc()
-            self.dataDict[dataName] = (self.getHash(dependData), data)
-
+            self.updateEntry(dataName, data, dependData)
+            if self.debug: print(f'key {dataName} was not found in cache and was evaluated')
+        # we should not return the same reference, because otherwise user can change data inside cache
+        data = copy.deepcopy(data)
         return data
+
+    def updateEntry(self, dataName, data, dependData):
+        data = copy.deepcopy(data)
+        h = hash(dependData)
+        self.dataDict[dataName] = (h, data)
+        if self.folder is not None:
+            fileName = self.folder + os.sep + f'{dataName}_{h}.pkl'
+            saveData(data, fileName)
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -1092,8 +1295,72 @@ def jobIsRunning(folder):
     if slurmFiles is None or len(slurmFiles) == 0: return False
     lastFile = slurmFiles[-1]
     id = int(os.path.splitext(os.path.split(lastFile)[-1])[0][6:])
-    output, code = runCommand(f"squeue -j {id} -h")
-    output = output.strip()
-    if code != 0: return False
-    if output != '' and str(id) in output: return True
+    if shutil.which('squeue') is not None:
+        output, code = runCommand(f"squeue -j {id} -h")
+        output = output.strip()
+        if code != 0: return False
+        if output != '' and str(id) in output: return True
     return False
+
+
+def disableCatchWarnings():
+    action = None
+    if len(warnings.filters) > 0:
+        action = warnings.filters[0][0]
+        warnings.filterwarnings("default")
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+    return action
+
+
+def restoreCatchWarnings(action):
+    if len(warnings.filters) > 0:
+        warnings.filterwarnings(action)
+
+
+def isFlask():
+    if not isLibExists('flask'): return False
+    action = disableCatchWarnings()
+    import flask
+    restoreCatchWarnings(action)
+    return flask.has_request_context()
+
+
+def fixFlaskChmod():
+    #if os.getuid() != 0: return
+    if platform.system() == 'Windows': return
+    if not isFlask(): return
+    r = os.stat(__file__)
+    user = r.st_uid
+    group = r.st_gid
+    d = os.path.split(os.path.realpath(__file__))[0]
+    d = d+os.sep+'__pycache__'
+    if not os.path.exists(d): return
+    for f in os.listdir(d):
+        ff = d+os.sep+f
+        r = os.stat(ff)
+        if r.st_uid == 0:
+            os.chown(ff, user, group)
+
+
+def readFile(path, notExistResult=''):
+    if not os.path.exists(path): return notExistResult
+    with open(path) as f:
+        return f.read()
+
+
+def isUniform(e):
+    de = e[1:]-e[:-1]
+    assert np.all(de >= 0), f'Array is not sorted: {e}'
+    if np.max(de)-np.min(de) < np.mean(de)*1e-6: return True
+    else: return False
+
+
+def loadLibrary(path):
+    import importlib.util as _importlib_util
+    path = fixPath(path)
+    name = randomString(10)
+    spec = _importlib_util.spec_from_file_location(name, path)
+    module = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

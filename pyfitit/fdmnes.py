@@ -297,7 +297,7 @@ def findFDMNES():
     exe = os.path.split(os.path.abspath(__file__))[0] + os.sep + 'bin' + os.sep + 'fdmnes' + os.sep + exe
     if os.path.exists(exe):
         fdmnes_exe = '"' + exe + '"'
-        if os.name != 'nt' and not os.access(fdmnes_exe, os.X_OK):
+        if os.name != 'nt' and os.system(f'test -x {fdmnes_exe}')!=0:
             code = os.system(f"chmod +x {fdmnes_exe}")
             if code != 0:
                 raise Exception(f'Add execution permission to the file {fdmnes_exe}')
@@ -321,32 +321,4 @@ def runLocal(folder='.'):
 
 def runCluster(folder='.', memory=5000, nProcs=1):
     output, returncode = utils.runCommand(f"run-cluster-and-wait -m {memory} -n {nProcs} fdmnes", folder, outputTxtFile=None)
-
-
-def calcForAllxyzInFolder(xyzfolder, calcFolder, continueCalculation, nProcs=6, memory=10000, calcSampleInParallel=5, recalculateErrorsAttemptCount=2, generateOnly=False, **fdmnesParams):
-    if os.path.exists(calcFolder):
-        if not continueCalculation: shutil.rmtree(calcFolder)
-    os.makedirs(calcFolder, exist_ok=True)
-    generateAbsorber = False
-    if 'Absorber' in fdmnesParams:
-        absorber = fdmnesParams['Absorber']
-        if absorber[:3] == 'all':
-            generateAbsorber = True
-            assert len(absorber.split(' ')) == 2
-            absorber = absorber.split(' ')[1]
-    for f in glob.glob(xyzfolder+'/*.xyz'):
-        m = Molecule(f)
-        d = os.path.splitext(os.path.split(f)[1])[0]
-        if generateAbsorber:
-            ind = np.where(m.atomName == absorber)[0]
-            assert len(ind) > 0
-            ind = ind + 1
-            fdmnesParams['Absorber'] = ' '.join(str(i) for i in ind)
-        generateInput(m, folder=os.path.join(calcFolder,d), **fdmnesParams)
-        with open(os.path.join(calcFolder,d,"geometryParams.txt"), "w") as text_file: text_file.write("[[\"dummy\",0]]")
-        m.export_xyz(os.path.join(calcFolder,d,"molecule.xyz"))
-
-    if generateOnly: return
-    from . import sampling
-    sampling.calcSpectra('fdmnes', runType='run-cluster', nProcs=nProcs, memory=memory, calcSampleInParallel=calcSampleInParallel, folder=calcFolder, recalculateErrorsAttemptCount=recalculateErrorsAttemptCount, continueCalculation=continueCalculation)
 

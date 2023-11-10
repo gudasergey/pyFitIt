@@ -74,7 +74,7 @@ class ControlsManager:
         self.saver = saver
         self.context.plotData = {}
         self.context.controls = controls
-        self.context.cache = utils.CacheInMemory()
+        self.context.cache = utils.Cache()
         self.context.addToStatus = self.addToStatus
         self.context.addDebugToStatus = self.addDebugToStatus
         self.context.setStatus = self.setStatus
@@ -270,10 +270,10 @@ class ControlsBuilder:
         self.buildResult = []
         self.controlsStack = []
 
-    def addSlider(self, name, min, max, step, value, type='f'):
+    def addSlider(self, name, min, max, step, value, type='f', readout_format='.3g'):
         if type == 'f':
             s = widgets.FloatSlider(description=name, min=min, max=max, step=step, value=value,
-                                    orientation='horizontal', continuous_update=False, readout_format='.3g')
+                                    orientation='horizontal', continuous_update=False, readout_format=readout_format)
         elif type == 'i':
             s = widgets.IntSlider(description=name, min=min, max=max, step=step, value=value,
                                   orientation='horizontal', continuous_update=False)
@@ -524,7 +524,7 @@ class FuncModelSliders:
             if pp['type'] == 'float':
                 a, b = pp['domain']
                 if val is None: val = (a+b)/2
-                builder.addSlider(name=pn, min=a, max=b, step=(b-a)/50, value=val)
+                builder.addSlider(name=pn, min=a, max=b, step=(b-a)/50, value=val, readout_format='.4g')
                 fit = self.defaultParams['fit '+pn] if 'fit '+pn in self.defaultParams else True
                 builder.addCheckbox(name='fit '+pn, value=fit)
             elif pp['type'] == 'int':
@@ -781,7 +781,7 @@ class SpectrumFittingBackend:
     def __init__(self, sample, project, theoryProcessingPipeline, manager):
         self.paramsHash = None
         self.manager = manager
-        self.cache = utils.CacheInMemory()
+        self.cache = utils.Cache()
 
         self.exp_energy = project.spectrum.energy
         self.theory_energy = sample.energy
@@ -855,7 +855,7 @@ class SpectrumFittingBackend:
             assert words[1] == 'smooth', 'Unknown transform: '+tr_type
 
             def smoothSample():
-                res_int, res_energy = smoothLib.smoothDataFrame(tr_params, intensity, smoothType=words[0], exp_spectrum=self.project.spectrum, fit_norm_interval=[0,0], norm=1, energy=energy)
+                res_int, res_energy = smoothLib.smoothDataFrame(tr_params, intensity, smoothType=words[0], expSpectrum=self.project.spectrum, fitNormInterval=[0, 0], norm=1, energy=energy)
                 return res_int, res_energy
             intensity, energy = self.cache.getFromCacheOrEval(dataName=tr_name+' of dataset', evalFunc=smoothSample, dependData=[tr_params, intensity])
         assert len(intensity.shape) == 2, tr_type

@@ -1,9 +1,8 @@
-import shutil
-
-from scipy.interpolate import Rbf, RBFInterpolator
+from typing import Optional
+from scipy.interpolate import RBFInterpolator
 import numpy as np
 import pandas as pd
-import math, copy, os, time, warnings, glob, sklearn, inspect
+import math, copy, os, time, warnings, glob, sklearn, inspect, json, re, shutil
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from pyfitit.enhancedGpr import EnhancedGaussianProcessRegressor
@@ -21,17 +20,20 @@ if utils.isLibExists("tensorflow"):
 
 
 class Sample:
-    def __init__(self, params, spectra, energy=None, spType='default'):
+    def __init__(self, params, spectra, energy=None, spType='default', meta=None, encodeLabels=False, interpArgs=None):
         """
         Main data container for ML tasks
         :param params: DataFrame of geometry parameters
         :param spectra: list or Dataframe of spectra (column names: 'e_7443 e_7444.5 ...). For the case of several types of spectra - can be dict 'spectraType':list/spectraDataFrame. Spectra in list can have different energies
         :param energy: to initialize Sample by numpy matrix (to build correct column names of dataframe). Dict, if spectra is dict
+        :param meta: dict with keys 'nameColumn', 'labels', 'labelMaps', 'features'. labelMaps=dict{label: map(str->int)}
         """
         assert isinstance(params, pd.DataFrame), 'params should be pandas DataFrame object'
         params = copy.deepcopy(params)
+        params = fixDtypes(params)
         spectra = copy.deepcopy(spectra)
         if energy is not None: energy = copy.deepcopy(energy)
+        meta = copy.deepcopy(meta)
         if not isinstance(spectra, dict):
             spectras = {spType:spectra}
             energies = {spType:energy}
@@ -43,14 +45,16 @@ class Sample:
         first = True
         for spType in spectras:
             spectra = spectras[spType]
+            assert len(spectra) > 0
             energy = energies[spType]
             if first: sp0 = spectra
+            first = False
             if isinstance(spectra, np.ndarray):
                 assert energy is not None
                 assert len(energy) == spectra.shape[1], f'{len(energy)} != {spectra.shape[1]} energy vector must contain values for all columns of spectra matrix'
                 spectra = pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
             elif isinstance(spectra, list):
-                spectra = utils.makeDataFrameFromSpectraList(spectra, energy)
+                spectra = utils.makeDataFrameFromSpectraList(spectra, energy, interpArgs=interpArgs)
             else:
                 assert isinstance(spectra, pd.DataFrame), 'spectra should be pandas DataFrame object'
             assert len(params)==0 or params.shape[0] == spectra.shape[0], str(params.shape[0]) + ' != ' + str(spectra.shape[0])
@@ -62,14 +66,76 @@ class Sample:
         self.paramNames = params.columns.to_numpy()
         self._params = params
         self.folder = None
-        self.nameColumn = None
         self.defaultSpType = self.spTypes()[0]
+        if meta is None: meta = {'defaultSpType': self.defaultSpType}
+        assert set(meta.keys()) <= {'nameColumn', 'labels', 'labelMaps', 'features', 'userDefined', 'defaultSpType'}
+        if 'defaultSpType' in meta: self.defaultSpType = meta['defaultSpType']
+        self._nameColumn: Optional[str] = None
+        if 'nameColumn' in meta: self.setNameColumn(meta['nameColumn'])
+        self.labels = []
+        if 'labels' in meta:
+            assert isinstance(meta['labels'], list)
+            self.labels = meta['labels']
+            for label in self.labels:
+                assert label in self.paramNames, f'Label {label} not in params: {self.paramNames.tolist()}'
+        self.labelMaps = {}
+        if 'labelMaps' in meta:
+            assert isinstance(meta['labelMaps'], dict)
+            self.labelMaps = copy.deepcopy(meta['labelMaps'])
+            for label in self.labelMaps:
+                assert label in self.paramNames, f'Label {label} not in params: {self.paramNames.tolist()}'
+                assert label in self.labels, f'Label {label} not in labels: {self.labels}'
+                if encodeLabels:
+                    # Check the data is not encoded yet
+                    d = self.params[label]
+                    d = d[pd.notnull(d)]
+                    assert set(d) <= set(self.labelMaps[label].keys()), f'For label {label} unknown label values detected: {set(d)}. Known: {set(self.labelMaps[label].keys())}. If you have encoded data, set encodeLabels=False'
+        self.features = []
+        if 'features' in meta:
+            assert isinstance(meta['features'], list)
+            self.features = meta['features']
+            for f in self.features:
+                assert f in self.paramNames, f'Feature {f} not in params: {self.paramNames.tolist()}'
+        if encodeLabels:
+            if 'labelMaps' in meta:
+                for label in meta['labelMaps']:
+                    del self.labelMaps[label]
+                    init_label = self.params[label]
+                    self.encode(label, meta['labelMaps'][label])
+                    decoded = self.decode(label, values=self.params[label])
+                    ind = pd.notnull(init_label)
+                    assert np.all(init_label[ind] == decoded[ind]), f'\n{init_label[ind].tolist()} !=\n{decoded[ind].tolist()}'
+            else:
+                self.calcLabelMaps()
+        self.userDefined = None
+        if 'userDefined' in meta:
+            assert isinstance(meta['userDefined'], dict)
+            self.userDefined = meta['userDefined']
+        self.check()
 
-    def getLength(self):
-        for spType in self._spectra:
-            n = self.getSpectra(spType).shape[0]
-            break
-        return n
+    def check(self):
+        nparam = self.params.shape[0]
+        for spType,spectra in self._spectra.items():
+            assert spectra.shape[0] == nparam, f'{spectra.shape[0]} != {nparam} for spType={spType}.\nAll spectra Sample must have the same count'
+            assert len(self.getEnergy(spType)) == spectra.shape[1], f'{len(self.getEnergy(spType))} != {spectra.shape[1]}'
+        assert np.all(self.paramNames == self.params.columns)
+        for l in self.labels: assert l in self.paramNames, f'{l} not in params: {self.paramNames.tolist()}'
+        self.checkNameColumn(self.nameColumn)
+        for label in self.labelMaps:
+            assert label in self.paramNames, f'{l} not in params: {self.paramNames.tolist()}'
+            self.checkEncodedLabel(label)
+            assert self.params.dtypes[label] == 'float64', 'dtype of encoded label must be float, because int doesn\'t support NaN'
+            lab_vals = sorted(list(self.labelMaps[label].keys()))
+            # assert np.any(lab_vals != np.arange(len(lab_vals))), f'For label {label} trivial encoding detected: {self.labelMaps[label]}'
+
+    def __len__(self):
+        spType = self.getDefaultSpType()
+        return self.getSpectra(spType).shape[0]
+
+    def __hash__(self):
+        return hash((utils.hash(self._spectra), utils.hash(self.params), utils.hash(self.meta), self.defaultSpType, self.folder))
+
+    def getLength(self): return len(self)
 
     def spTypes(self):
         return sorted(list(self._spectra.keys()))
@@ -78,14 +144,18 @@ class Sample:
         return self.defaultSpType
 
     def setDefaultSpType(self, spType):
-        assert spType in self.spTypes()
+        assert spType in self.spTypes(), f'{spType} not in {self.spTypes()}'
         self.defaultSpType = spType
 
     def renameSpType(self, oldName, newName):
-        assert oldName in self.spTypes()
+        assert oldName in self.spTypes(), f'{oldName} not in {self.spTypes()}'
         assert newName not in self.spTypes()
         self._spectra[newName] = self._spectra[oldName]
+        self._energy[newName] = self._energy[oldName]
         del self._spectra[oldName]
+        del self._energy[oldName]
+        if self.getDefaultSpType() == oldName:
+            self.setDefaultSpType(newName)
 
     def delSpType(self, spType):
         assert spType in self._spectra
@@ -117,25 +187,54 @@ class Sample:
 
     spectra = property(getSpectra, setSpectra)
 
-    def getSpectrum(self, i, spType=None, returnIntensityOnly=False):
+    def checkNameColumn(self, colName):
+        if colName is not None:
+            uniqNames, counts = np.unique(self.params[colName], return_counts=True)
+            assert np.all(counts == 1), f'Duplicate names in column {colName} were found: ' + str(list(uniqNames[counts != 1]))
+
+    def setNameColumn(self, colName):
+        if colName is not None:
+            assert colName in self.paramNames, f'{colName} not in params: {self.paramNames.tolist()}'
+            assert self.params[colName].dtype == 'object', 'Wrong type of name column: ' + str(self.params[colName].dtype)
+            for i in range(len(self.params)):
+                if not isinstance(self.params.loc[i, colName], str):
+                    self.params.loc[i, colName] = str(self.params.loc[i, colName])
+            self.checkNameColumn(colName)
+        self._nameColumn = colName
+
+    nameColumn = property(lambda self: self._nameColumn, setNameColumn)
+
+    def getSpectrum(self, ind=None, name=None, spType=None, returnIntensityOnly=False):
         """
-        By default returns spectrum of default spType
+        By default returns spectrum of default spType. If spType=='all types' returns dict spType->spectrum
         """
+        if name is None:
+            assert ind is not None
+        else:
+            assert ind is None
+            ind = self.getIndByName(name)
         res = {}
         for spT in self._spectra:
-            intensity = self._spectra[spT].loc[i].to_numpy().reshape(-1)
+            intensity = self._spectra[spT].loc[ind].to_numpy().reshape(-1)
             if returnIntensityOnly:
                 res[spT] = intensity
             else:
                 res[spT] = utils.Spectrum(self.getEnergy(spType=spT), intensity)
         if spType is None: spType = self.getDefaultSpType()
+        if spType == 'all types': return res
         return res[spType]
 
     def getIndByName(self, name):
         assert self.nameColumn is not None
-        i = np.where(self._params[self.nameColumn].to_numpy() == name)[0]
-        assert len(i) == 1, str(i)
-        return i[0]
+        if isinstance(name, str): names = [name]
+        else: names = name
+        ind = []
+        for n in names:
+            i = np.where(self._params[self.nameColumn].to_numpy() == n)[0]
+            assert len(i) == 1, f'Indexes of {n}: {i}. All names: {self._params[self.nameColumn].tolist()}'
+            ind.append(i[0])
+        if isinstance(name, str): return ind[0]
+        else: return ind
 
     def setSpectrum(self, i, spectrum, spType=None):
         """
@@ -175,6 +274,17 @@ class Sample:
 
     energy = property(getEnergy, setEnergy)
 
+    @property
+    def meta(self):
+        res = {}
+        if self.nameColumn is not None: res['nameColumn'] = self.nameColumn
+        if len(self.labels) > 0: res['labels'] = self.labels
+        if len(self.labelMaps) > 0: res['labelMaps'] = self.labelMaps
+        if len(self.features) > 0: res['features'] = self.features
+        if self.userDefined is not None: res['userDefined'] = self.userDefined
+        res['defaultSpType'] = self.defaultSpType
+        return res
+
     def shiftEnergy(self, shift, spType=None, inplace=False):
         if spType is None: spType = self.getDefaultSpType()
         newEnergy = self._energy[spType] + shift
@@ -183,62 +293,118 @@ class Sample:
         sam._spectra[spType].columns = ['e_' + str(e) for e in newEnergy]
         if not inplace: return sam
 
-    def changeEnergy(self, newEnergy, spType=None, inplace=False):
+    def changeEnergy(self, newEnergy, spType=None, inplace=False, interpArgs=None):
         if spType is None: spType = self.getDefaultSpType()
+        if interpArgs is None: interpArgs = {}
         oldEnergy = self._energy[spType]
         sam = self if inplace else self.copy()
         spectra = np.zeros((self.getLength(), len(newEnergy)))
         oldSpectra = sam._spectra[spType].to_numpy()
         for i in range(self.getLength()):
-            spectra[i] = np.interp(newEnergy, oldEnergy, oldSpectra[i])
+            spectra[i] = np.interp(newEnergy, oldEnergy, oldSpectra[i], **interpArgs)
         sam.setSpectra(spectra, energy=newEnergy, spType=spType)
         if not inplace: return sam
 
     @classmethod
     def readFolder(cls, folder):
-        paramFile = utils.fixPath(folder+os.sep+'params.txt')
-        files = glob.glob(folder + os.sep + '*' + '_spectra.txt')
-        if len(files) == 1:
-            spectra = pd.read_csv(files[0], sep=' ')
-        elif len(files) > 1:
+        h = cls.getSavedSampleHash(folder)
+        binFile = folder+os.sep+'binary_repr.pkl'
+        if os.path.exists(binFile):
+            try:
+                sample, savedHash = utils.loadData(binFile)
+                if savedHash == h: # user didn't change anything
+                    return sample
+            except:
+                warnings.warn(f"Can't read binary sample file {binFile}, but it exists. Different python versions can cause this. I use text format")
+                pass
+        sampleFiles = getSampleFiles(folder)
+        def readSpectra(f):
+            newFormat = os.path.splitext(f)[-1] == '.csv'
+            if newFormat:
+                res = pd.read_csv(f, sep=r'\s+', header=None).to_numpy().T
+                res = utils.makeDataFrame(res[0], res[1:])
+            else:
+                res = pd.read_csv(f, sep=r'\s+')
+            return res, newFormat
+        files = sampleFiles['spectra']
+        if len(files) == 1 and os.path.split(files[0])[-1][:8] == 'spectra.':
+            spectra, newFormat = readSpectra(files[0])
+        else:
             spectra = {}
             for f in files:
-                base = os.path.split(f)[1]
-                spType = base[:-len('_spectra.txt')]
-                spectra[spType] = pd.read_csv(f, sep=' ')
-        else:
-            spectraFile = utils.fixPath(folder+os.sep+'spectra.txt')
-            spectra = pd.read_csv(spectraFile, sep=' ')
-        res = cls(pd.read_csv(paramFile, sep=' '), spectra)
+                base = os.path.split(f)[-1]
+                assert '_spectra' in base, 'Incorrect spectra file name '+f
+                spType = base[:-len('_spectra.csv')]
+                spectra[spType], newFormat = readSpectra(f)
+        metaFile = sampleFiles.get('meta', None)
+        if metaFile is not None and os.path.exists(metaFile):
+            meta = utils.loadData(metaFile)
+            if 'labelMaps' in meta:
+                for label in meta['labelMaps']:
+                    mp = meta['labelMaps'][label]
+                    keys = list(mp.keys())
+                    if np.all([re.match(r'\d+', k) for k in keys]):
+                        meta['labelMaps'][label] = {int(k): mp[k] for k in mp}
+        else: meta = None
+        paramFile = sampleFiles['params']
+        sep = r'\t' if newFormat else r'\s+'
+        res = cls(pd.read_csv(paramFile, sep=sep), spectra, meta=meta)
         res.folder = folder
         return res
 
-    def saveToFolder(self, folder, plot=False, colorParam=None):
+    @classmethod
+    def getSavedSampleHash(cls, folder):
+        sampleFiles = getSampleFiles(folder)
+        h = ''
+        for t in sampleFiles:
+            files = sampleFiles[t]
+            if not isinstance(files, list):
+                assert isinstance(files, str)
+                files = [files]
+            for f in files:
+                with open(f) as fo: s = fo.read()
+                h += str(utils.hash(s))
+        return utils.hash(h)
+
+    def saveToFolder(self, folder, oldFormat=False, plot=False, **plotSampleKws):
+        def saveSpectra(spectra, filename):
+            if oldFormat:
+                spectra.to_csv(filename, index=False, sep=' ')
+            else:
+                e = utils.getEnergy(spectra)
+                data = np.hstack((e.reshape(-1,1), spectra.to_numpy().T))
+                data = pd.DataFrame(data)
+                data.to_csv(filename, header=False, sep='\t', index=False)
+
         if os.path.exists(folder): shutil.rmtree(folder)
         if not os.path.exists(folder): os.makedirs(folder)
-        if len(self._spectra) == 1:
-            self.spectra.to_csv(folder+os.sep+'spectra.txt', sep=' ', index=False)
+        with open(folder+os.sep+'readme.txt','w') as f:
+            f.write('''Pyfitit sample consists of\n- parameters table (params.csv) where each row corresponds to one sample object\n- spectrum tables of different spectrum types (spectrumType_spectra.csv files), the first column contains energy/wavelength values, other columns are spectra (number of columns in spectrumType_spectra.csv files equals to the number of rows in params.csv)\n- meta information in JSON format:\n  * nameColumn - name of the parameter to use as index in the sample (names should be short to be pretty displayed on scatter plots!)\n  * labels - list of parameter names to predict\n  * features - list of parameter names to use as sample object features\n  * labelMaps - dict of dicts with label encoding in the format "stringLabelValue":number\n- sample in binary format (binary_repr.pkl), it is used for round-trip save/load floats (text format is not round-trip and modify floats)''')
+        ext = 'txt' if oldFormat else 'csv'
+        if len(self._spectra) == 1 and self.getDefaultSpType() == 'default':
+            saveSpectra(self.spectra, folder+os.sep+f'spectra.{ext}')
         else:
             for spType in self._spectra:
-                self._spectra[spType].to_csv(folder + os.sep + f'{spType}_spectra.txt', sep=' ', index=False)
-        self.params.to_csv(folder + os.sep + 'params.txt', sep=' ', index=False)
+                saveSpectra(self._spectra[spType], folder + os.sep + f'{spType}_spectra.{ext}')
+        sep = ' ' if oldFormat else '\t'
+        self.params.to_csv(folder+os.sep+f'params.{ext}', sep=sep, index=False)
         self.folder = folder
-        if plot:
-            for spType in self._spectra:
-                plotting.plotSample(self._energy[spType], self._spectra[spType].to_numpy(), fileName=folder + os.sep + f'plot_{spType}.png', colorParam=colorParam)
+        utils.saveData(self.meta, folder+os.sep+'meta.json')
+        utils.saveData((self, self.getSavedSampleHash(folder)), folder+os.sep+'binary_repr.pkl')
+        if plot: self.plot(folder, **plotSampleKws)
 
     def copy(self):
-        return Sample(self._params, self._spectra)
+        return Sample(self._params, self._spectra, meta=self.meta)
 
-    def addParam(self, paramGenerator=None, paramName='', project=None, paramData=None):
+    def addParam(self, paramGenerator=None, paramName='', paramData=None):
         """
         Add new parameters to sample.params
-        :param paramGenerator: function(paramDict, molecula) to calculate new params (single or multiple)
+        :param paramGenerator: function(paramDict) to calculate new params (single or multiple)
         :param paramName: name or list of new param names
         :param project: to call moleculeConstructor(sample.params) and pass molecula to paramGenerator
         :param paramData: already calculated params - alternative to paramGenerator
         """
-        assert (paramData is None) or (paramGenerator is None and project is None)
+        assert (paramData is None) or (paramGenerator is None)
         assert paramName != ''
         assert paramName not in self.paramNames, f'Parameter {paramName} already exists'
         if isinstance(paramData, list): paramData = np.array(paramData)
@@ -249,8 +415,7 @@ class Sample:
             newParam = np.zeros((n, len(paramName)))
             for i in range(n):
                 params = {self.paramNames[j]:self.params.loc[i,self.paramNames[j]] for j in range(self.paramNames.size)}
-                m = project.moleculeConstructor(params)
-                t = paramGenerator(params, m)
+                t = paramGenerator(params)
                 assert len(t) == len(paramName)
                 newParam[i] = t
             for p,j in zip(paramName, range(len(paramName))): self.params[p] = newParam[:,j]
@@ -263,7 +428,13 @@ class Sample:
     def delParam(self, paramName):
         assert self.params.shape[1]>1, 'Can\'t delete last parameter'
         if isinstance(paramName, str): paramName = [paramName]
-        for p in paramName: del self.params[p]
+        for p in paramName:
+            assert p in self.paramNames, f'{p} not in paramNames: {self.paramNames}'
+            del self.params[p]
+            if self.nameColumn == p: self.nameColumn = None
+            if p in self.labels: del self.labels[self.labels.index(p)]
+            if p in self.features: del self.features[self.features.index(p)]
+            if p in self.labelMaps: del self.labelMaps[p]
         self.paramNames = self.params.columns.to_numpy()
         self.folder = None
 
@@ -272,6 +443,8 @@ class Sample:
             sample = self
         else:
             sample = self.copy()
+        if isinstance(i, (np.ndarray, pd.Series)) and i.dtype == bool:
+            i = np.where(i)[0]
         sample.params.drop(i, inplace=True)
         sample.params.reset_index(inplace=True, drop=True)
         for spType in sample._spectra:
@@ -279,17 +452,31 @@ class Sample:
             sample._spectra[spType].reset_index(inplace=True, drop=True)
         if not inplace: return sample
 
+    def delRowByName(self, names, inplace=True):
+        if isinstance(names, str): names = [names]
+        i = [self.getIndByName(n) for n in names]
+        res = self.delRow(i, inplace=inplace)
+        if not inplace: return res
+
     def takeRows(self, ind):
         if isinstance(ind, list): ind = np.array(ind)
         if ind.dtype == bool: ind = np.where(ind)[0]
-        toDel = np.setdiff1d(np.arange(len(self.params)), ind)
-        sample = self.copy()
-        if len(toDel) > 0:
-            sample.delRow(toDel)
+        if len(ind.shape) != 1:
+            assert np.prod(ind.shape) == np.max(ind.shape)
+            ind = ind.flatten()
+        spectra = {st:self._spectra[st].loc[ind].reset_index(drop=True, inplace=False) for st in self._spectra}
+        p = self.params.loc[ind].reset_index(drop=True, inplace=False)
+        sample = Sample(params=p, spectra=spectra, meta=self.meta)
         return sample
+
+    def takeRowsByName(self, names):
+        ind = [self.getIndByName(name) for name in names]
+        return self.takeRows(ind)
 
     def unionWith(self, other):
         if other is None: return
+
+        # checks
         assert isinstance(other, self.__class__)
         assert np.all(self.params.shape[1] == other.params.shape[1]), 'Params differ: self = '+str(self.paramNames)+' other = '+str(other.paramNames)
         assert self._spectra.keys() == other._spectra.keys()
@@ -297,16 +484,20 @@ class Sample:
             assert np.all(self._spectra[spType].shape[1] == other._spectra[spType].shape[1]), f'spType={spType} {self._spectra[spType].shape[1]} != {other._spectra[spType].shape[1]}'
             assert np.all(self._energy[spType] == other._energy[spType])
         assert set(self.paramNames) == set(other.paramNames), 'Params differ: self = ' + str(self.paramNames) + ' other = ' + str(other.paramNames)
+        assert self.labelMaps == other.labelMaps, f'{self.labelMaps} != {other.labelMaps}'
+
+        # union
         self.params = pd.concat((self.params, other.params), ignore_index=True)
         for spType in self._spectra:
             self._spectra[spType] = pd.concat((self._spectra[spType], other._spectra[spType]), ignore_index=True)
         self.folder = None
+        self.check()
 
-    def addSpectrumType(self, spectra, spType, energy=None):
+    def addSpectrumType(self, spectra, spType, energy=None, interpArgs=None):
         assert spType not in self.spTypes(), f'Spectrum type {spType} already exists'
         assert self.getDefaultSpType() != 'default', 'Rename default spType by renameSpType before adding new one'
         if isinstance(spectra, list):
-            spectra = utils.makeDataFrameFromSpectraList(spectra, energy)
+            spectra = utils.makeDataFrameFromSpectraList(spectra, energy, interpArgs=interpArgs)
         self.setSpectra(spectra, energy, spType=spType)
 
     def addRow(self, spectrum=None, params=None):
@@ -338,6 +529,8 @@ class Sample:
             if isinstance(params, pd.Series): params = params.to_dict()
             assert isinstance(params, dict)
             assert set(params.keys()) <= set(self.paramNames), 'Unknown param names: ' + str(set(self.paramNames) - set(params.keys()))
+            if self.nameColumn is not None and self.nameColumn in params:
+                assert params[self.nameColumn] not in self.params[self.nameColumn], f'Spectrum with name {params[self.nameColumn]} already exists'
         else: params = {}
         self.params.loc[i, :] = np.nan
         for p in params: self.params.loc[i, p] = params[p]
@@ -345,8 +538,10 @@ class Sample:
 
     def limit(self, energyRange, spType=None, inplace=True):
         if spType is None: spType = self.getDefaultSpType()
+        assert spType in self.spTypes(), f'Spectrum type {spType} not in {self.spTypes()}'
         ind = (energyRange[0] <= self._energy[spType]) & (self._energy[spType] <= energyRange[1])
         energy = self._energy[spType][ind]
+        assert len(energy) > 0, f'There are no energy points in the interval {energyRange}. Energy = {self._energy[spType]}'
         spectra = self._spectra[spType].to_numpy()[:, ind]
         spectra = utils.makeDataFrame(energy, spectra)
         self.folder = None
@@ -358,41 +553,95 @@ class Sample:
             newSpectra[spType] = spectra
             newEnergy = copy.deepcopy(self._energy)
             newEnergy[spType] = energy
-            return Sample(self.params, newSpectra, newEnergy)
+            return Sample(self.params, newSpectra, newEnergy, meta=self.meta)
 
-    def changeEnergy(self, energy, spType=None, inplace=True):
-        if spType is None: spType = self.getDefaultSpType()
-        if len(energy) == len(self._energy[spType]) and np.all(energy == self._energy[spType]): return
-        spectra = np.zeros((len(self._spectra[spType]), len(energy)))
-        selfspectra = self._spectra[spType].to_numpy()
-        for i in range(len(self._spectra[spType])):
-            spectra[i] = np.interp(energy, self._energy[spType], selfspectra[i])
-        if inplace:
-            self.setSpectra(spectra, energy, spType=spType)
+    def inverseLabelMaps(self):
+        r = {}
+        for l, labelMap in self.labelMaps.items():
+            r[l] = {labelMap[k]: k for k in labelMap}
+        return r
+
+    def decode(self, label: str, labelMap=None, values=None):
+        if isinstance(values, pd.Series): values = values.to_numpy()
+        inplace = values is None
+        if labelMap is None:
+            labelMap = self.labelMaps[label]
         else:
-            newSpectra = copy.deepcopy(self._spectra)
-            newSpectra[spType] = spectra
-            newEnergy = copy.deepcopy(self._energy)
-            newEnergy[spType] = energy
-            return Sample(self.params, newSpectra, newEnergy)
+            assert label not in self.labelMaps
+        assert len(labelMap) > 0
+        if inplace: values = self.params[label].to_numpy()
+        else: assert utils.isArray(values)
+        values0 = values
 
-    def encode(self, columnName, labelEncoder=None):
-        """Run LabelEncoder and returns dict: oldValue -> code as it is used in labelMaps. If labelEncoder is None - create one and return with label Maps"""
-        assert columnName in self.paramNames
-        labelEncoder0 = labelEncoder
-        notNan = pd.notnull(self.params[columnName])
-        if labelEncoder is None:
-            labelEncoder = sklearn.preprocessing.LabelEncoder()
-            labelEncoder.fit(self.params.loc[notNan,columnName])
-        self.params.loc[notNan,columnName] = labelEncoder.transform(self.params.loc[notNan,columnName])
-        labelMap = {c:i for i,c in enumerate(labelEncoder.classes_)}
-        if labelEncoder0 is None: return labelMap, labelEncoder
-        else: return labelMap
+        assert utils.is_numeric(values[0]), f'Couldn\'t decode {values}. Don\'t you try to decode already decoded values?'
+        nan_presented = np.any(np.isnan(values))
+        if nan_presented:
+            good_ind = np.where(~np.isnan(values))[0]
+            if isinstance(values, list): values = np.array(values)
+            values = values[good_ind]
+            if len(values) == 0: return values0  # all values are NaNs
+        if isinstance(values[0], (float, np.float64, np.int64)):
+            values = np.array([int(v) for v in values])
 
-    def splitUnknown(self, columnNames=None, returnInd=False):
+        k = list(labelMap.keys())[0]
+        typ = object if isinstance(k, str) else float
+        r = np.zeros(len(values), typ)
+        inverse = {labelMap[k]:k for k in labelMap}
+        # print(values[0], inverse)
+        for i in range(len(values)):
+            r[i] = inverse[values[i]]
+        if nan_presented:
+            r1 = np.zeros(len(values0), typ)
+            r1[:] = np.nan
+            r1[good_ind] = r
+            r = r1
+        if inplace:
+            self.params[label] = r
+            if label in self.labelMaps:
+                del self.labelMaps[label]
+        else: return r
+
+    def decodeAllLabels(self):
+        for l in self.labels:
+            if l in self.labelMaps: self.decode(l)
+
+    def encode(self, label, labelMap=None):
+        """Run LabelEncoder and stores result in params and labelMaps"""
+        assert label in self.paramNames
+        assert label not in self.labelMaps, f'Label {label} is already encoded'
+        res = encode(self.params[label], labelMap=labelMap)
+        if labelMap is None:
+            self.params[label] = res[0]
+            self.labelMaps[label] = res[1]
+        else:
+            self.params[label] = res
+            self.labelMaps[label] = labelMap
+
+    def checkEncodedLabel(self, label):
+        assert isClassification(self.params, label)
+        d: np.ndarray = self.params[label].to_numpy()
+        d = d[~np.isnan(d)]
+        d = d.astype(int)
+        assert set(d) <= set(self.labelMaps[label].values()), f'For label {label} unknown label values detected: {set(d)}. Known: {set(self.labelMaps[label].values())}. If you didn\'t encode data, set encodeLabels=True'
+
+    def calcLabelMaps(self):
+        for label in self.labels:
+            if isClassification(self.params, label):
+                needEncoding = True
+                d = self.params[label].to_numpy()
+                if d.dtype == 'float64':
+                    ud = np.unique(d[~np.isnan(d)])
+                    if np.all(ud == np.arange(ud.size)):
+                        needEncoding = False
+                if needEncoding:
+                    assert label not in self.labelMaps, f'Label {label} is already encoded'
+                    self.encode(label)
+
+    def splitUnknown(self, columnNames=None, returnInd=False) -> ('Sample', 'Sample'):
         """
         Divide sample into two parts: known (all columns are not NaN) and unknown (in each row there is NaN). Analyse only float64 columns
         :param columnNames: column name or list of names to analyse (default - all)
+        :param returnInd: whether to return indexes of known and unknown rows
         :return: known, unknown
         """
         p = self.params
@@ -401,24 +650,52 @@ class Sample:
         else:
             if isinstance(columnNames, str): columnNames = [columnNames]
             columnsToAnalyse = p.loc[:, columnNames]
-        nan = np.any(np.isnan(columnsToAnalyse), axis=1)
+        nan = np.any(pd.isnull(columnsToAnalyse), axis=1)
         if np.all(nan):
-            known, unknown = None, self
+            known, unknown = None, self.copy()
         elif not np.any(nan):
-            known, unknown = self, None
+            known, unknown = self.copy(), None
         else:
             s = self._spectra
-            known = Sample(p.loc[~nan].reset_index(drop=True), {spType: s[spType].loc[~nan].reset_index(drop=True) for spType in s})
-            unknown = Sample(p.loc[nan].reset_index(drop=True), {spType: s[spType].loc[nan].reset_index(drop=True) for spType in s})
-        known.nameColumn = self.nameColumn
-        if unknown is not None: unknown.nameColumn = self.nameColumn
+            known = Sample(p.loc[~nan].reset_index(drop=True), {spType: s[spType].loc[~nan].reset_index(drop=True) for spType in s}, meta=self.meta)
+            unknown = Sample(p.loc[nan].reset_index(drop=True), {spType: s[spType].loc[nan].reset_index(drop=True) for spType in s}, meta=self.meta)
         if returnInd:
             return known, unknown, np.where(~nan)[0], np.where(nan)[0]
         else:
             return known, unknown
 
-    def plot(self, **kw):
-        plotting.plotSample(self.energy, self.spectra, **kw)
+    def plot(self, folder, colorParam=None, plotIndividualParams=None, maxIndivPlotCount=None, **kw):
+        """
+        :param plotIndividualParams: dict params of plotToFile to plot individual spectra
+        """
+        if isinstance(colorParam, str):
+            colorParamData = self.params[colorParam].to_numpy()
+            if colorParam in self.labelMaps:
+                colorParamData = self.decode(colorParam, values=colorParamData)
+                if 'cmap' not in kw:
+                    plotSampleKws = copy.deepcopy(kw)
+                    plotSampleKws['cmap'] = 'gist_rainbow'
+            colorParam = colorParamData
+        for spType in self._spectra:
+            plotSampleKws1 = copy.deepcopy(kw)
+            for n,v in plotSampleKws1.items():
+                if isinstance(v, dict) and set(v.keys()) == set(self.spTypes()):
+                    plotSampleKws1[n] = v[spType]
+            plotting.plotSample(self._energy[spType], self._spectra[spType].to_numpy(), fileName=folder + os.sep + f'plot_{spType}.png', colorParam=colorParam, **plotSampleKws1)
+        if plotIndividualParams is not None:
+            assert isinstance(plotIndividualParams, dict)
+            for spType in self.spTypes():
+                for i in range(self.getLength()):
+                    name = utils.zfill(i,self.getLength()) if self.nameColumn is None else self.params.loc[i,self.nameColumn]
+                    fileName = f'{folder}{os.sep}individ_{spType}{os.sep}{name}.png'
+                    s = self.getSpectrum(i, spType=spType)
+                    if plotIndividualParams.get('plot on sample', False):
+                        if colorParam is not None:
+                            fileName = [fileName, f'{folder}{os.sep}individ_{spType}_sorted{os.sep}{colorParam[i]}_{name}.png']
+                        plotting.plotSample(self._energy[spType], self._spectra[spType].to_numpy(), fileName=fileName, colorParam=colorParam, highlight_inds=[i], **kw)
+                    else:
+                        plotting.plotToFile(s.x,s.y,'', fileName=fileName, **plotIndividualParams)
+                    if maxIndivPlotCount is not None and i>=maxIndivPlotCount: break
 
     def convertEnergyToWeights(self):
         e = self.energy
@@ -427,11 +704,69 @@ class Sample:
         w = np.append(w, e[-1]-e[-2])
         return w/2
 
+    def normalize(self, paramName, meanStd=None, inplace=True):
+        """
+        :param paramName: Name of param (or list of param names)
+        :param meanStd: tuple(mean, std) or dict {paramName: tuple(mean, std)}
+        """
+        sample = self if inplace else self.copy()
+        if isinstance(paramName, str):
+            paramName = [paramName]
+            if meanStd is not None and not isinstance(meanStd, dict): meanStd = {'paramName': meanStd}
+        if meanStd is None:
+            meanStd = calcMeanStd(sample.params.loc[:,paramName])
+        for p in paramName:
+            sample.params[p] = normMeanStd(sample.params[p], *meanStd[p])
+        if not inplace: return sample
+
+    def isOrdinal(self, l):
+        if l not in self.labelMaps: return isOrdinal(self.params, l)
+        lm = self.labelMaps[l]
+        for k in lm:
+            if isinstance(k, str): return False
+        return True
+
 
 readSample = Sample.readFolder
 
 
-def scoreFast(y,predictY):
+def fixDtypes(d:pd.DataFrame):
+    assert isinstance(d, pd.DataFrame)
+    d = d.infer_objects()
+    for c in d.columns:
+        if d.dtypes[c] == 'int64': d[c] = d[c].astype(float)
+    return d
+
+
+def encode(vector, labelMap=None):
+    """Run LabelEncoder and returns dict: oldValue -> code as it is used in labelMaps. If labelEncoder is None - create one and return with label Maps
+        :param labelMap: dict{humanValue->index}
+    """
+    assert len(vector.shape) == 1
+    notNan = pd.notnull(vector)
+    labelMap0 = labelMap
+    if labelMap0 is None:
+        unique = np.unique(vector[notNan])
+        if isinstance(unique[0], (np.int64, float)):  # json doesn't like int64 dict keys
+            assert np.all([c == int(c) for c in unique])
+            labelMap = {int(c): i for i, c in enumerate(unique)}
+        else:
+            labelMap = {c: i for i, c in enumerate(unique)}
+    else:
+        assert isinstance(labelMap, dict)
+        assert set(vector[notNan]) <= set(labelMap.keys()), f'Unknown label values detected: {set(vector[notNan])}. Known: {set(labelMap.keys())}'
+    r = np.zeros(vector.size)
+    r[:] = np.nan
+    for i in np.where(notNan)[0]:
+        r[i] = labelMap[vector[i]]
+    if labelMap0 is None: return r, labelMap
+    else: return r
+
+
+def scoreFast(y, predictY):
+    if len(y.shape) >=2 and np.sum(y.shape != 1) == 1: y = y.flatten()
+    if len(predictY.shape) >=2 and np.sum(predictY.shape != 1) == 1: predictY = predictY.flatten()
+    assert np.all(y.shape == predictY.shape), f'{y.shape} != {predictY.shape}'
     if len(y.shape) == 1:
         u = np.mean((y - predictY)**2)
         v = np.mean((y - np.mean(y))**2)
@@ -447,6 +782,28 @@ def score(x,y,predictor):
     return scoreFast(y,predictY)
 
 
+def calcAllMetrics(y_true, y_pred, classification:bool):
+    assert len(y_pred.shape) == 1 or y_pred.shape[1] == 1
+    if isinstance(y_true, (pd.Series,pd.DataFrame)): y_true = y_true.to_numpy()
+    if isinstance(y_pred, (pd.Series,pd.DataFrame)): y_pred = y_pred.to_numpy()
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+    if classification:
+        if y_pred.dtype == float:
+            assert np.all(y_pred == np.round(y_pred)), str(y_pred)
+            y_pred = y_pred.astype(int)
+        aba = sklearn.metrics.balanced_accuracy_score(y_true, y_pred, adjusted=True)
+        acc = sklearn.metrics.accuracy_score(y_true, y_pred)
+        res = {'adj.bal.acc': aba, 'accuracy': acc}
+    else:
+        r_score = scoreFast(y_true, y_pred)
+        mae = sklearn.metrics.mean_absolute_error(y_true, y_pred)
+        max = np.max(np.abs(y_true - y_pred))
+        rmse = sklearn.metrics.mean_squared_error(y_true, y_pred, squared=False)
+        res = {'R2-score': r_score, 'MAE': mae, 'MAX': max, 'RMSE': rmse}
+    return res
+
+
 def score_cv(model, X, y, cv_count, returnPrediction=True):
     if isinstance(y, pd.Series): y = y.to_numpy().reshape(-1,1)
     if isinstance(X, pd.Series): X = X.to_numpy().reshape(-1,1)
@@ -457,18 +814,29 @@ def score_cv(model, X, y, cv_count, returnPrediction=True):
     else:
         cv = sklearn.model_selection.LeaveOneOut()
     try:
-        if len(warnings.filters) > 0:
-            action = warnings.filters[0][0]
-            warnings.filterwarnings("default")
+        action = utils.disableCatchWarnings()
         with warnings.catch_warnings(record=True) as warn:
             pred = sklearn.model_selection.cross_val_predict(model, X, y, cv=cv)
-        if len(warnings.filters) > 0:
-            warnings.filterwarnings(action)
+        utils.restoreCatchWarnings(action)
     except Warning:
         pass
-    res = sklearn.metrics.accuracy_score(y, pred) if isClassification(y) else sklearn.metrics.r2_score(y, pred)
+    res = calcAllMetrics(y, pred, isClassification(y))
     if returnPrediction: return res, pred
     else: return res
+
+
+def logCumRankError(y_true, y_pred):
+    """
+    Measure to estimate ranking quality of distance-based ML methods. y_pred contains distance values. y_true - correct classes (true - 1, wrong - 0).
+    y_true is sorted using y_pred as keys. Then sum(y_true[i]*ln(1+i), i=0..) is calculated
+    """
+    assert len(y_pred) == len(y_true)
+    ind = np.argsort(y_pred)
+    y_true = y_true[ind]
+    i = np.arange(len(y_pred))
+    # return np.sum(y_true*np.log(i+1))
+    # return np.sum(y_true*np.sqrt(i))
+    return np.sum(y_true*i)
 
 
 def getWeightsForNonUniformSample(x):
@@ -715,6 +1083,19 @@ class addDiffs:
     def score(self, x, y): return score(x,y,self.predict)
 
 
+def calcMeanStd(dataframe):
+    res = {}
+    for name in dataframe.columns:
+        res[name] = (np.mean(dataframe[name]), np.std(dataframe[name]))
+    return res
+
+
+def normMeanStd(x, mean, std):
+    res = x-mean
+    if std != 0: res /= std
+    return res
+
+
 def norm(x, minX, maxX):
     """
     Do not norm columns in x for which minX == maxX
@@ -785,7 +1166,6 @@ class Normalize:
     def fit(self, x, y, **args):
         if isinstance(y,np.ndarray) and (len(y.shape)==1): y = y.reshape(-1,1)
         y_is_df = type(y) is pd.DataFrame
-        if y_is_df: columns = y.columns
         if 'xyRanges' in args: self.xyRanges = args['xyRanges']; del args['xyRanges']
         else: self.xyRanges = {}
         if len(self.xyRanges)>=2:
@@ -808,6 +1188,7 @@ class Normalize:
             args['validation_data'] = validation_data
         if 'yRange' in args: args['yRange'] = [norm(args['yRange'][0], self.minY, self.minY), norm(args['yRange'][1], self.minY, self.minY)]
         self.learner.fit(norm(x, self.minX, self.maxX), norm(y, self.minY, self.maxY), **args)
+        if hasattr(self.learner, 'classes_'): self.classes_ = self.learner.classes_
         return self
 
     def predict(self, x, **predictArgs):
@@ -1051,7 +1432,7 @@ def enlargeDataset(moleculas, values, newCount):
         #print(res[i,:])
     return res, resY
 
-def cross_val_predict(method, X, y, cv=10):
+def cross_val_predict(method, X, y, cv=10, predictFuncName='predict'):
     if isinstance(cv, int):       
         kf = sklearn.model_selection.KFold(n_splits=cv, shuffle=True, random_state=0)
     else:
@@ -1060,14 +1441,26 @@ def cross_val_predict(method, X, y, cv=10):
         X = X.to_numpy()
     if type(y) is pd.DataFrame:
         y = y.to_numpy()
-    predictions = np.zeros(y.shape)
+    if predictFuncName in ['predict_proba', 'decision_function']:
+        assert np.all(y == y.astype(int))
+        n_classes = int(np.max(y)+1)
+        assert len(np.unique(y)) == n_classes, f'{len(np.unique(y))} != {n_classes}'
+        assert n_classes > 1, f'X.shape = {X.shape}'
+        predictions = np.zeros((y.shape[0], n_classes))
+    else:
+        predictions = np.zeros(y.shape)
     for train_index, test_index in kf.split(X):
         X_train, X_test = X[train_index,:], X[test_index,:]
         y_train, y_test = y[train_index,:], y[test_index,:]
         if y_train.shape[1] == 1:
             y_train = y_train.reshape(-1)
         method.fit(X_train, y_train)
-        predictions[test_index,:] = method.predict(X_test).reshape(test_index.size, -1)
+        if predictFuncName == 'predict_proba':
+            predictions[test_index,:] = method.predict_proba(X_test)
+        elif predictFuncName == 'decision_function':
+            predictions[test_index,:] = method.decision_function(X_test)
+        else:
+            predictions[test_index, :] = method.predict(X_test).reshape(test_index.size, -1)
     return predictions
 
 def getOneDimPrediction(estimator, x0, y0, verticesNum = 10, intermediatePointsNum = 10):
@@ -1277,6 +1670,22 @@ def isClassification(data, column=None):
     return np.all(np.round(data[ind]) == data[ind]) and len(np.unique(data[ind]))<100
 
 
+def isOrdinal(data, column=None):
+    """
+    Float or int features are ordinal, but string feature is not.
+    """
+    if column is not None: data = data[column].to_numpy()
+    else:
+        if isinstance(data, list):
+            data = np.array(data)
+    if data.dtype == 'float64': return True
+    assert data.dtype == 'object'
+    ind = pd.notnull(data)
+    for v in data[ind]:
+        if isinstance(v,str): return False
+    assert False, "object feature but no string values?"
+
+
 def plotPredictionError(x, y, params, method, pathToSave):
     '''
     Parameters
@@ -1343,3 +1752,170 @@ def isFitted(estimator):
     if 0 < len( [k for k,v in inspect.getmembers(estimator) if k.endswith('_') and not k.startswith('__')] ): return True
     assert hasattr(estimator, 'trained'), 'Your estimator is very unusual. Use your custom isFitted method'
     return estimator.trained
+
+
+def validateNorm(expSample:Sample, theorySample:Sample, normFunc, spType, plotNormValuesFileName=None):
+    """
+    Returns logCumRankError for ordering theorySample by normFunc to each exp spectrum. Also returns list of commonNames of theory and exp spectra
+    :param normFunc: func(expSpectrum, theorySpectrum, expParams, theoryParams)
+    """
+    assert expSample.nameColumn is not None
+    assert theorySample.nameColumn is not None
+    commonNames = np.intersect1d(theorySample.params[theorySample.nameColumn], expSample.params[expSample.nameColumn])
+    theoryOrder = {}; unk = 0; n = len(commonNames)
+    for name in theorySample.params[theorySample.nameColumn]:
+        if name in commonNames: theoryOrder[name] = np.where(commonNames == name)[0][0]
+        else:
+            theoryOrder[name] = n + unk
+            unk += 2
+    theoryNames = [None]*theorySample.getLength()
+    for name in theorySample.params[theorySample.nameColumn]: theoryNames[theoryOrder[name]] = name
+    qualities = np.zeros(n)
+    all_norm_vals = np.zeros((n, theorySample.getLength()))
+    for i,exp_name in enumerate(commonNames):
+        i_exp = expSample.getIndByName(exp_name)
+        exp_sp = expSample.getSpectrum(i_exp, spType)
+        # we take all theory spectra, not only common
+        norm_vals = np.zeros(theorySample.getLength())
+        for j_theor in range(theorySample.getLength()):
+            theorySpectrum = theorySample.getSpectrum(j_theor, spType)
+            if isinstance(exp_sp, dict):
+                assert set(exp_sp.keys()) == set(theorySpectrum.keys()), f'{set(exp_sp.keys())} != {set(theorySpectrum.keys())}'
+            norm_vals[j_theor] = normFunc(exp_sp, theorySpectrum, expSample.params.loc[i_exp], theorySample.params.loc[j_theor])
+            # if i % 2 == 0:
+            #     norm_vals[j_theor] = 4*(1 - (theorySample.params.loc[j_theor,theorySample.nameColumn] == exp_name))
+            theory_name = theorySample.params.loc[j_theor,theorySample.nameColumn]
+            all_norm_vals[i,theoryOrder[theory_name]] = norm_vals[j_theor]
+        true_classes = np.zeros(theorySample.getLength())
+        true_classes[theorySample.getIndByName(exp_name)] = 1
+        qualities[i] = logCumRankError(true_classes, norm_vals)
+    if plotNormValuesFileName is not None:
+        plotting.plotMatrix(all_norm_vals, ticklabelsX=theoryNames, ticklabelsY=commonNames, fileName=plotNormValuesFileName, xlabel='theory', ylabel='exp')
+    return qualities, commonNames
+
+
+def validateNormDuplicate(expSample:Sample, theorySample:Sample, normFunc, classColumn, spType, plotNormValuesFileName=None):
+    """
+    Returns logCumRankError for ordering theorySample by normFunc to each exp spectrum. Classes of exp and theory spectra can be duplicate
+    :param normFunc: func(expSpectrum, theorySpectrum, expParams, theoryParams)
+    :param classColumn: name of column in sample to use as class value
+    """
+    assert classColumn in expSample.paramNames
+    assert classColumn in theorySample.paramNames
+    theoryNames = theorySample.params[classColumn]
+    n = len(expSample)
+    nt = theorySample.getLength()
+    qualities = np.zeros(n)
+    all_norm_vals = np.zeros((n, nt))
+    for i in range(n):
+        exp_name = expSample.params.loc[i,classColumn]
+        exp_sp = expSample.getSpectrum(i, spType)
+        norm_vals = np.zeros(nt)
+        for j_theor in range(nt):
+            theorySpectrum = theorySample.getSpectrum(j_theor, spType)
+            if isinstance(exp_sp, dict):
+                assert set(exp_sp.keys()) == set(theorySpectrum.keys()), f'{set(exp_sp.keys())} != {set(theorySpectrum.keys())}'
+            norm_vals[j_theor] = normFunc(exp_sp, theorySpectrum, expSample.params.loc[i], theorySample.params.loc[j_theor])
+            all_norm_vals[i,j_theor] = norm_vals[j_theor]
+        true_classes = np.zeros(nt)
+        true_classes[theoryNames == exp_name] = 1
+        qualities[i] = logCumRankError(true_classes, norm_vals)
+    if plotNormValuesFileName is not None:
+        plotting.plotMatrix(all_norm_vals, ticklabelsX=theoryNames, ticklabelsY=expSample.params.loc[:,classColumn], fileName=plotNormValuesFileName, xlabel='theory', ylabel='exp')
+    return qualities
+
+
+class MyBaggingClassifier(sklearn.base.BaseEstimator):
+    def __init__(self, estimator, max_samples=0.5, max_features=0.5, n_estimators=10, random_state=None):
+        self.n_estimators = n_estimators
+        self.estimator = estimator
+        self.estimators = [copy.deepcopy(self.estimator) for i in range(self.n_estimators)]
+        self.max_samples = max_samples
+        self.max_features = max_features
+        self.random_state = random_state if random_state is not None else time.time()
+        self.classes = None
+    # def get_params(self, deep=True):
+    #     e = copy.deepcopy(self.estimator) if deep else self.estimator
+    #     return dict(estimator=e, max_samples=self.max_samples, max_features=self.max_features, n_estimators=self.n_estimators)
+
+    def fit(self, X, y):
+        self.classes = np.unique(y)
+        self.classes_ = self.classes
+        for i in range(self.n_estimators):
+            # y1 = [1]
+            # while len(np.unique(y)) != len(np.unique(y1)):
+            X1, y1 = sklearn.utils.resample(X,y, replace=False, n_samples=round(len(X)*self.max_samples), stratify=y)
+            self.estimators[i].fit(X1, y1)
+        return self
+
+    def predict_proba(self, X):
+        pred = None
+        for i in range(self.n_estimators):
+            p = self.estimators[i].predict_proba(X)
+            if pred is None: pred = p
+            else: pred += p
+        return pred/self.n_estimators
+
+    def decision_function(self, X):
+        return self.predict_proba(X)
+
+    def predict(self, X):
+        prob = self.predict_proba(X)
+        res = np.zeros(len(X), dtype=type(self.classes[0]))
+        for i in range(len(X)):
+            res[i] = self.classes[np.argmax(prob[i])]
+        return res
+
+
+class FixedClassesClassifier(sklearn.base.ClassifierMixin):
+    def __init__(self, estimator, classes):
+        self.estimator = estimator
+        self.classes = classes
+        if np.any(sorted(classes) != classes):
+            warnings.warn(f'Classes are not sorted. Do you sure? Classes: {classes}')
+        self.fit_classes = None
+
+    def fit(self, X, y):
+        self.fit_classes = np.unique(y)
+        assert set(self.fit_classes) <= set(self.classes), f'{self.fit_classes} is not subset of {self.classes}'
+        self.estimator.fit(X,y)
+        assert np.all(self.fit_classes == self.estimator.classes_)
+        return self
+
+    def predict_proba(self, X):
+        try:
+            p = self.estimator.predict_proba(X)
+            decision_function = False
+        except AttributeError:
+            p = self.estimator.decision_function(X)
+            decision_function =True
+        if len(self.fit_classes) == 2 and decision_function:
+            p = np.hstack(((-p).reshape(-1,1), p.reshape(-1,1)))
+        if len(self.fit_classes) != len(self.classes) or np.any(self.fit_classes != self.classes):
+            r = np.zeros((p.shape[0], len(self.classes)))
+            for jf,c in enumerate(self.fit_classes):
+                j = [t for t,el in enumerate(self.classes) if el==c][0]
+                r[:,j] = p[:,jf]
+            return r
+        else: return p
+
+    def predict(self, X):
+        return self.estimator.predict(X)
+
+    def decision_function(self, X):
+        return self.predict_proba(X)
+
+
+def getSampleFiles(folder):
+    paramFile = utils.fixPath(folder + os.sep + 'params')
+    paramFiles = glob.glob(paramFile + '.*')
+    assert len(paramFiles) <= 1, 'Multiple params files detected: ' + str(paramFiles)
+    assert len(paramFiles) > 0, 'Param file not found in the folder ' + folder
+    paramFile = paramFiles[0]
+    files = glob.glob(folder + os.sep + '*spectra.*')
+    files = [f for f in files if os.path.splitext(f)[-1] in ['.txt', '.csv']]
+    assert len(files) > 0, 'No spectrum files were found in the folder ' + folder
+    res = {'params':paramFile, 'spectra':files}
+    meta = folder + os.sep + 'meta.json'
+    if os.path.exists(meta): res = {**res, 'meta':meta}
+    return res

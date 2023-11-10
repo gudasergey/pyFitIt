@@ -27,7 +27,7 @@ def createPartialProject(name = None, expSpectrum = None, intervals = None, fdmn
         project.moleculeConstructor = MethodType(moleculeConstructor, project)
     if expSpectrum is not None:
         if intervals is None:
-            a = expSpectrum.energy[0]; b = expSpectrum.energy[-1]
+            a = expSpectrum.x[0]; b = expSpectrum.x[-1]
             project.intervals = {
               'fit_norm': [a, b],
               'fit_smooth': [a, b],
@@ -35,7 +35,7 @@ def createPartialProject(name = None, expSpectrum = None, intervals = None, fdmn
               'plot': [a, b]
             }
         if fdmnesShift != 0: project.FDMNES_smooth['shift'] = fdmnesShift
-        project.FDMNES_smooth['Efermi'] = expSpectrum.energy[0]
+        project.FDMNES_smooth['Efermi'] = expSpectrum.x[0]
     return project
 
 
@@ -138,8 +138,8 @@ class Project(object):
             else:
                 self._spectrum = utils.adjustSpectrum(s, self.maxSpectrumPoints, self.intervals)
                 Efermi = self.defaultSmoothParams['fdmnes']['Efermi']
-                if Efermi<s.energy[0]-200 or s.energy[0]>s.energy[-1]+200:
-                    self.defaultSmoothParams['fdmnes']['Efermi'] = optimize.param('Efermi', s.energy[0]+10, [s.energy[0]-20, s.energy[-1]+20], 1, 0.25)
+                if Efermi<s.x[0]-200 or s.x[0]>s.x[-1]+200:
+                    self.defaultSmoothParams['fdmnes']['Efermi'] = optimize.param('Efermi', s.x[0]+10, [s.x[0]-20, s.x[-1]+20], 1, 0.25)
     spectrum = property(spectrum_get, spectrum_set)
 
     def maxSpectrumPoints_get(self): return self._maxSpectrumPoints

@@ -1,12 +1,11 @@
 import time
 import numpy as np
 from multiprocessing.dummy import Pool as ThreadPool
-import copy, shutil, os, json, subprocess, threading, itertools, shlex, traceback
+import copy, shutil, os, json, threading, itertools, traceback, glob
 import pandas as pd
 import matplotlib.pyplot as plt
-import sklearn.ensemble
 
-from . import fdmnes, feff, adf, pyGDM, utils, ihs, w2auto, fdmnesTest, ML, plotting, adaptiveSampling, smoothLib, inverseMethod, vasp_rdf_energy
+from . import molecule, fdmnes, feff, adf, pyGDM, utils, ihs, w2auto, fdmnesTest, ML, plotting, adaptiveSampling, smoothLib, inverseMethod, vasp_rdf_energy
 
 
 knownPrograms = ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM', 'vasp_rdf_energy']
@@ -38,6 +37,9 @@ def getRunner(name, runType):
         name = 'feff'
     if runType == 'run-cluster':
         run = getattr(globals()[name], 'runCluster')
+        if name == 'feff':
+            run0 = run
+            run = lambda folder, memory, nProcs: run0(folder, feffVersion=version, memory=memory, nProcs=nProcs)
     else:
         assert runType == 'local'
         run = getattr(globals()[name], 'runLocal')
@@ -113,15 +115,19 @@ def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, 
     for i in range(len(folders)): folders[i] = os.path.join(folder, folders[i])
 
     def calculateXANES(folder):
-        if runType == 'run-cluster':
-            runCluster = getRunner(spectralProgram, runType)
-            runCluster(folder, memory, nProcs)
-        elif runType == 'local':
-            runLocal = getRunner(spectralProgram, runType)
-            runLocal(folder)
-        elif runType == 'user defined':
-            runUserDefined(runCmd, folder)
-        else: assert False, 'Wrong runType'
+        try:
+            if runType == 'run-cluster':
+                runCluster = getRunner(spectralProgram, runType)
+                runCluster(folder, memory, nProcs)
+            elif runType == 'local':
+                runLocal = getRunner(spectralProgram, runType)
+                runLocal(folder)
+            elif runType == 'user defined':
+                runUserDefined(runCmd, folder)
+            else: assert False, 'Wrong runType'
+        except:
+            print('Error for the folder', folder)
+            print(traceback.format_exc())
     if calcSampleInParallel > 1: threadPool = ThreadPool(calcSampleInParallel)
     if continueCalculation:
         recalculateErrorsAttemptCount += 1
@@ -143,20 +149,38 @@ def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, 
         recalculateAttempt += 1
 
 
-def collectResults(spectralProgram='fdmnes', folder='sample', outputFolder='.', printOutput=True):
-    if isinstance(spectralProgram, str):
-        assert isKnown(spectralProgram), 'Unknown spectral program name: '+spectralProgram
+def calcForAllxyzInFolder(xyzfolder, calcFolder=None, outputFolder=None, spectralProgram='fdmnes', runType='local', runCmd='', continueCalculation=False, nProcs=1, memory=10000, calcSampleInParallel=1, recalculateErrorsAttemptCount=1, generateOnly=False, **spectrCalcParams):
+    if calcFolder is None: calcFolder = xyzfolder+'_calc'
+    if outputFolder is None: outputFolder = xyzfolder+'_result'
+    if os.path.exists(calcFolder):
+        if not continueCalculation: shutil.rmtree(calcFolder)
+    os.makedirs(calcFolder, exist_ok=True)
+    for f in glob.glob(xyzfolder+'/*.xyz'):
+        try:
+            m = molecule.Molecule(f)
+            d = os.path.splitext(os.path.split(f)[1])[0]
+            generateInput = getInputGenerator(spectralProgram)
+            generateInput(m, folder=os.path.join(calcFolder,d), **spectrCalcParams)
+            with open(os.path.join(calcFolder, d, "params.txt"), "w") as text_file: text_file.write(f"[[\"name\",\"{d}\"]]")
+            m.export_xyz(os.path.join(calcFolder, d, "molecule.xyz"))
+        except:
+            print('Error for the file', f)
+            print(traceback.format_exc())
+    if generateOnly: return
+    calcSpectra(spectralProgram, runType=runType, runCmd=runCmd, nProcs=nProcs, memory=memory, calcSampleInParallel=calcSampleInParallel, folder=calcFolder, recalculateErrorsAttemptCount=recalculateErrorsAttemptCount, continueCalculation=continueCalculation)
+    collectResults(spectralProgram, folder=calcFolder, outputFolder=outputFolder, printOutput=True)
+
+
+def collectResults(parserKind='fdmnes', folder='sample', outputFolder='.', printOutput=True):
+    if isinstance(parserKind, str):
+        assert isKnown(parserKind), 'Unknown spectral program name: '+parserKind
     os.makedirs(outputFolder, exist_ok=True)
-    df_spectra, df_params, goodFolders, badFolders = parseAllFolders(folder, spectralProgram, printOutput=printOutput)
+    df_spectra, df_params, goodFolders, badFolders = parseAllFolders(folder, parserKind, printOutput=printOutput)
     if df_spectra is None:
         # no good folders
         return df_spectra, df_params, goodFolders, badFolders
-    if isinstance(df_spectra, dict):
-        for spType in df_spectra:
-            df_spectra[spType].to_csv(os.path.join(outputFolder,f'{spType}_spectra.txt'), sep=' ', index=False)
-    else:
-        df_spectra.to_csv(os.path.join(outputFolder, 'spectra.txt'), sep=' ', index=False)
-    df_params.to_csv(os.path.join(outputFolder, 'params.txt'), sep=' ', index=False)
+    sample = ML.Sample(df_params, df_spectra)
+    sample.saveToFolder(outputFolder)
     return df_spectra, df_params, goodFolders, badFolders
 
 
@@ -165,7 +189,7 @@ class InputFilesGenerator:
 
     def __init__(self, ranges, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram='fdmnes', folder='sample', debug=False):
         if isinstance(spectralProgram, str):
-            assert spectralProgram in ['fdmnes', 'feff', 'feff6', 'feff8.5', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM', 'vasp_rdf_energy'], 'Unknown spectral program name: ' + spectralProgram
+            assert spectralProgram in ['fdmnes', 'feff', 'feff6', 'feff8.5', 'feff9', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM', 'vasp_rdf_energy'], 'Unknown spectral program name: ' + spectralProgram
         else:
             assert isinstance(spectralProgram, dict)
             assert set(spectralProgram.keys()) == {'generateInput', 'parseOneFolder', 'createDataframes'}
@@ -370,19 +394,78 @@ def loadExistingXPoints(spectralProgram, folder):
     return np.array(params)
 
 
-def parseAllFolders(parentFolder, spectralProgram, printOutput=True):
+def getCommonEnergyBuilder(spectralProgram):
+    assert isinstance(spectralProgram, str)
+
+    def makeCommonEnergy(allEnergies):
+        if spectralProgram in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
+            energy = np.median(allEnergies, axis=0)
+            energy = np.sort(energy)
+            maxShift = np.max(allEnergies[:, 0]) - np.min(allEnergies[:, 0])
+        elif spectralProgram[:4] == 'feff':
+            if abs(float(allEnergies[0][0])) < 0.00001:
+                energy = allEnergies[0][1:]
+            else:
+                energy = allEnergies[0]
+        elif spectralProgram == 'adf':
+            assert False, 'TODO'
+            energy = allData[goodFolders[0]].loc[:, 'E'].ravel()
+        else:
+            energy = allEnergies[0]
+        return energy
+    return makeCommonEnergy
+
+
+def createDataframes(allData, parentFolder, goodFolders, makeCommonEnergy):
+    """
+
+    :param allData: dictionary of parsed folders
+    :param goodFolders: list of good folders
+    :param makeCommonEnergy: func(allEnergies) -> common energy vector
+    :return: df_spectra, df_params
+    """
+    # get energies array
+    allEnergies = np.array([allData[folder].x for folder in goodFolders])
+    n = len(goodFolders)
+    if n == 1:
+        allEnergies.reshape(1, -1)
+    energies = makeCommonEnergy(allEnergies)
+    assert np.all(energies[1:] >= energies[:-1]), f'Energies are not sorted!\n'+str(energies)
+    paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'params.txt'))
+    df_spectra = np.zeros([n, energies.size])
+    df_params = [None]*n
+    for i in range(n):
+        d = goodFolders[i]
+        _, df_params[i] = getParams(os.path.join(parentFolder, d, 'params.txt'))
+        # assert False, 'TODO: для ADF это неправильно, нужно размазывать и потом интерполировать'
+        df_spectra[i, :] = np.interp(energies, allData[d].x, allData[d].y)
+    df_spectra = pd.DataFrame(data=df_spectra, columns=['e_' + str(e) for e in energies])
+    df_params = pd.DataFrame(data=df_params, columns=paramNames)
+    return df_spectra, df_params
+
+
+def parseAllFolders(parentFolder, parserSetting, printOutput=True):
     """
     Be careful, when add new spectrum parsers! Adaptive sampling runs calculation procedure in parallel with generation and parsing of folders. But generation and parsing are not parallel! The common error: calculation program is writing to a file, that is read by parser. It causes Segmentation fault. What to do?
 
     :param parentFolder: folder containing results
-    :param spectralProgram: one of fdmnes, fdmnesTest, adf, feff, pyGDM
+    :param parserSetting: one of 'fdmnes', 'adf', 'feff6/8.5/9', 'pyGDM'.
+        User can define custom parameters of the parseOneFolder function or even custom folder parser. In this case he should set parserSetting to dict with possible keys:
+            'kind': - str, 'fdmnes', 'adf', 'feff6/8.5/9', 'pyGDM'
+            'parseOneFolderParams' - dict (custom parameters without folder)
+            'parseOneFolder' - function(folder)
+            'makeCommonEnergy' - function(allEnergies)
+            'createDataframes' - function(allData, parentFolder, goodFolders) -> df_spectra or tuple(df_spectra, goodFolders, badFolders)
     :param printOutput: whether parsing debug info should be printed
     :return: spectra dataframe, params dataframe, goodFolders list, badFolder list
     """
+    if isinstance(parserSetting, str): kind = parserSetting
+    else:
+        assert isinstance(parserSetting, dict)
+        kind = parserSetting.get('kind', 'custom')
 
     def read_folders():
         """
-
         :return: dictionary { folder, parseOneFolder("parentFolder/folder") }
         """
         import traceback
@@ -396,24 +479,22 @@ def parseAllFolders(parentFolder, spectralProgram, printOutput=True):
                 allData[d] = None
             else:
                 try:
-                    res = parseOneFolder(full_d)
+                    res = parseOneFolder(full_d, **parseOneFolderParams)
                     allData[d] = res
                     if res is None:
                         output.append('Can\'t read output in folder ' + d)
                 except:
                     output.append(traceback.format_exc())
                     allData[d] = None
-
         return allData
 
     def separate_folders(allData):
         """
-
         :param allData: dictionary of parsed folders
         :return: array of good folder names, array of bad folder names
         """
         badFolders = []
-        if spectralProgram in ['fdmnes', 'fdmnesTest']:
+        if kind in ['fdmnes', 'fdmnesTest']:
             energyCount = np.array([len(xanes.x) for xanes in allData.values() if xanes is not None])
             maxEnergyCount = np.max(energyCount, initial=0)
 
@@ -422,7 +503,7 @@ def parseAllFolders(parentFolder, spectralProgram, printOutput=True):
                 badFolders.append(d)
                 continue
 
-            if spectralProgram in ['fdmnes', 'fdmnesTest'] and len(allData[d].x) != maxEnergyCount:
+            if kind in ['fdmnes', 'fdmnesTest'] and len(allData[d].x) != maxEnergyCount:
                 output.append(f'Error: in folder {d} there are less energies {len(allData[d].x)}')
                 badFolders.append(d)
 
@@ -433,102 +514,64 @@ def parseAllFolders(parentFolder, spectralProgram, printOutput=True):
     def get_full_path_folders(folders):
         return [os.path.join(parentFolder, x) for x in folders]
 
-    def createDataframes(allData, goodFolders):
-        """
-
-        :param allData: dictionary of parsed folders
-        :param goodFolders: list of good folders
-        :return:
-        """
-        # get energies array
-        allEnergies = np.array([allData[folder].x for folder in goodFolders])
-        n = len(goodFolders)
-        if n == 1:
-            allEnergies.reshape(1, -1)
-        # make specific changes to energies
-        if spectralProgram in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
-            energies = np.median(allEnergies, axis=0)
-            energies = np.sort(energies)
-            maxShift = np.max(allEnergies[:, 0]) - np.min(allEnergies[:, 0])
-            output.append('Max energy shift between spectra: {:.2}'.format(maxShift))
-        elif spectralProgram[:4] == 'feff':
-            if abs(float(allData[goodFolders[0]].x[0])) < 0.00001:
-                energies = allData[goodFolders[0]].x[1:]
-            else:
-                energies = allData[goodFolders[0]].x
-        elif spectralProgram == 'adf':
-            energies = allData[goodFolders[0]].loc[:, 'E'].ravel()
-        elif spectralProgram == 'pyGDM':
-            energies = allData[goodFolders[0]].x
-        elif spectralProgram == 'vasp_rdf_energy':
-            energies = allData[goodFolders[0]].x
+    if isinstance(parserSetting, dict):
+        if 'parseOneFolder' in parserSetting: parseOneFolder = parserSetting['parseOneFolder']
         else:
-            assert False
-        assert np.all(energies[1:] >= energies[:-1]), f'Energies are not sorted!\n'+str(energies)
-        paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'params.txt'))
-        df_spectra = np.zeros([n, energies.size])
-        df_params = np.zeros([n, len(paramNames)])
-        for i in range(n):
-            d = goodFolders[i]
-            _, params = getParams(os.path.join(parentFolder, d, 'params.txt'))
-            df_params[i, :] = np.array(params)
-            # make specific spectrum changes
-            if spectralProgram in ['fdmnes', 'fdmnesTest'] and fdmnes.useEpsiiShift:
-                df_spectra[i, :] = np.interp(energies, allData[d].x, allData[d].y)
-            elif spectralProgram == 'adf':
-                assert False, 'Это неправильно, нужно размазывать и потом интерполировать'
-                df_spectra[i, :] = allData[d].loc[:, 'ftot'].ravel()
-            else:
-                df_spectra[i, :] = allData[d].y
-        df_spectra = pd.DataFrame(data=df_spectra, columns=['e_' + str(e) for e in energies])
-        df_params = pd.DataFrame(data=df_params, columns=paramNames)
-        return df_spectra, df_params
-
-    if isinstance(spectralProgram, str):
-        parseOneFolder = getParser(spectralProgram)
+            assert kind != 'custom'
+            parseOneFolder = getParser(kind)
+        parseOneFolderParams = parserSetting.get('parseOneFolderParams', {})
     else:
-        parseOneFolder = spectralProgram['parseOneFolder']
+        parseOneFolder = getParser(kind)
+        parseOneFolderParams = {}
     output = []
     allData = read_folders()
     goodFolders, badFolders = separate_folders(allData)
     if len(goodFolders) == 0:
         output.append('None good folders')
         badFolders = get_full_path_folders(badFolders)
+        if printOutput and len(output)>0: print("\n\n".join(output))
         return None, None, goodFolders, badFolders
-    if not isinstance(spectralProgram, str):
+    if not isinstance(parserSetting, str):
         # custom
-        df_spectra = spectralProgram['createDataframes'](allData, parentFolder, goodFolders)
-        if isinstance(df_spectra, tuple):
-            df_spectra, goodFolders, badFolders = df_spectra
+        if 'createDataframes' in parserSetting:
+            df_spectra = parserSetting['createDataframes'](allData, parentFolder, goodFolders)
+            if isinstance(df_spectra, tuple):
+                df_spectra, goodFolders, badFolders = df_spectra
+        else:
+            if 'makeCommonEnergy' in parserSetting:
+                makeCommonEnergy = parserSetting['makeCommonEnergy']
+            else:
+                if kind == 'custom': makeCommonEnergy = getCommonEnergyBuilder('default')
+                else: makeCommonEnergy = getCommonEnergyBuilder(kind)
+            df_spectra, _ = createDataframes(allData, parentFolder, goodFolders, makeCommonEnergy)
         paramNames, _ = getParams(os.path.join(parentFolder, goodFolders[0], 'params.txt'))
         params = np.zeros([len(goodFolders), len(paramNames)])
         for i, d in enumerate(goodFolders):
             params[i, :] = np.array(getParams(os.path.join(parentFolder, d, 'params.txt'))[1])
         df_params = pd.DataFrame(data=params, columns=paramNames)
-    elif spectralProgram == 'pyGDM':
-        df_abs, df_params = createDataframes({f:d['abs'] for f,d in allData.items() if f in goodFolders}, goodFolders)
-        df_ext, _ = createDataframes({f:d['ext'] for f,d in allData.items() if f in goodFolders}, goodFolders)
+    elif parserSetting == 'pyGDM':
+        df_abs, df_params = createDataframes({f:d['abs'] for f,d in allData.items() if f in goodFolders}, parentFolder, goodFolders, getCommonEnergyBuilder(parserSetting))
+        df_ext, _ = createDataframes({f:d['ext'] for f,d in allData.items() if f in goodFolders}, parentFolder, goodFolders, getCommonEnergyBuilder(parserSetting))
         df_spectra = {'abs': df_abs, 'ext': df_ext}
-    elif spectralProgram == 'vasp_rdf_energy':
+    elif parserSetting == 'vasp_rdf_energy':
         allData1 = {}
         for f in allData:
             if allData[f] is None:
                 allData1[f] = None
             else:
                 allData1[f] = allData[f]['rdf']
-        df_spectra, df_params = createDataframes(allData1, goodFolders)
+        df_spectra, df_params = createDataframes(allData1, parentFolder, goodFolders, getCommonEnergyBuilder(parserSetting))
         vasp_energies = []
         for f in goodFolders:
             vasp_energies.append(allData[f]['energy'])
         if df_params is not None:
             df_params['energy'] = vasp_energies
     else:
-        df_spectra, df_params = createDataframes(allData, goodFolders)
+        df_spectra, df_params = createDataframes(allData, parentFolder, goodFolders, getCommonEnergyBuilder('default'))
     badFolders = get_full_path_folders(badFolders)
     goodFolders = get_full_path_folders(goodFolders)
-    if printOutput:
-        print(*output)
-    # print(*output)
+    if printOutput and len(output) > 0:
+        print("\n\n".join(output))
     return df_spectra, df_params, goodFolders, badFolders
 
 
@@ -544,7 +587,7 @@ def convertToSample(dataset, spectralProgram):
     xs, ys, additionalData = dataset
     good = [i for i in range(len(additionalData)) if additionalData[i] is not None]
     if len(good) == 0: return None, None
-    df_xanes, df_params, good, _ = parseAllFolders(parentFolder=os.path.split(additionalData[good[0]]['folder'])[0], spectralProgram=spectralProgram, printOutput=False)
+    df_xanes, df_params, good, _ = parseAllFolders(parentFolder=os.path.split(additionalData[good[0]]['folder'])[0], parserSetting=spectralProgram, printOutput=False)
     if len(good) == 0: return None, None
     sample = ML.Sample(df_params, df_xanes)
     foldersInds = [int(os.path.split(good[i])[-1]) for i in range(len(good))]

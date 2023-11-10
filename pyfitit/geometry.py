@@ -1,5 +1,6 @@
 import copy, math, scipy
 import numpy as np
+from numba import jit
 
 
 def sign(x): return math.copysign(1, x)
@@ -10,6 +11,11 @@ def normalize(v):
     if n > 0:
         return v/np.linalg.norm(v)
     else: return np.zeros(v.size)
+
+
+def length(x):
+    if hasattr(x, "__len__"): return len(x)
+    else: return 1   # x is scalar
 
 
 def relDist(a, b):
@@ -138,11 +144,10 @@ def get_line_by_2_points(x1, y1, x2, y2):
 def get_line_intersection(a1, b1, c1, a2, b2, c2):
     d = a1*b2 - b1*a2
     assert d != 0, f'{a1}x + {b1}y + {c1} = 0  {a2}x + {b2}y + {c2} = 0'
-    d1 = -c1*b2 - (-c2)*b1
-    d2 = a1*(-c2) - a2*(-c1)
-    x = d1/d; y = d2/d
-    assert np.abs(a1*x+b1*y+c1)<1e-10
-    assert np.abs(a2*x+b2*y+c2)<1e-10
+    z = np.linalg.solve(np.array([[a1,b1], [a2,b2]]), [-c1,-c2])
+    x = z[0]; y = z[1]
+    assert np.abs(a1*x+b1*y+c1)<1e-6, f'{np.abs(a1*x+b1*y+c1)}>1e-6. a1={a1} b1={b1} c1={c1}   a2={a2} b2={b2} c2={c2}'
+    assert np.abs(a2*x+b2*y+c2)<1e-6, f'{np.abs(a2*x+b2*y+c2)}>1e-6. a1={a1} b1={b1} c1={c1}   a2={a2} b2={b2} c2={c2}'
     return x, y
 
 
@@ -179,3 +184,44 @@ def unique_mulitdim(p, rel_err=1e-6):
         good_ind = np.delete(good_ind, min_dist_ind)
         min_dist_ind, min_dist, _ = getMinDist(p[good_ind, :], p[good_ind, :])
     return p[good_ind, :], good_ind
+
+
+@jit(nopython=True)
+def cross(o, a, b):
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+@jit(nopython=True)
+def get_convex_hull(p: np.array) -> np.array:
+    n = p.shape[0]
+    k = 0
+    if n == 1:
+        return p
+    hull = np.zeros((n * 2, 2))
+
+    # sort points lexicographically
+    x1 = np.sort(p[:, 0])
+    dx1 = x1[1:] - x1[:-1]
+    mdx1 = np.min(dx1[dx1 > 0])
+    mnoj = 2 / mdx1
+    ind = np.argsort(p[:, 0] * mnoj + p[:, 1])
+    p = p[ind]
+
+    # build lower hull
+    for ind, point in enumerate(p):
+        while k >= 2 and cross(hull[k - 2], hull[k - 1], point) <= 0:
+            k -= 1
+        hull[k] = point
+        k += 1
+
+    # build upper hull
+    t = k + 1
+    for ind in range(n - 2, -1, -1):
+        while k >= t and cross(hull[k - 2], hull[k - 1], p[ind]) <= 0:
+            k -= 1
+        hull[k] = p[ind]
+        k += 1
+
+    # remove trailing zeros
+    hull = hull[: (k - 1), :]
+    return hull

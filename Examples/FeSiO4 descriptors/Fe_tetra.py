@@ -20,7 +20,7 @@ def moleculeConstructor(project, params):
         m.unionWith(t2)
     elif project.CN == 3:
         m = Molecule(join(projectFolder,'17_croped.xyz'))
-        m.setParts('0', '1-5', '6-10', '11-15', '16-20') # Cr, 4 groups of 1 Si & 4 Oxygens
+        m.setParts('0', '1-5', '6-10', '11-15', '16-20') # Cr, 4 pathGroups of 1 Si & 4 Oxygens
         for i in [2,3,4]:
             # shifting 
             shiftV = m.part[i][1] - m.part[0][0]

@@ -2,7 +2,7 @@ import numpy as np
 from parsy import regex, generate, whitespace, string
 import math, scipy, copy, os, io
 from . import utils, geometry
-if utils.isLibExists("wbm"):
+if os.path.exists(os.path.split(__file__)[0]+os.sep+'wbm.py'):
     from . import wbm
 
 uintParser = regex(r"\d+").map(int)
@@ -97,7 +97,7 @@ def parseXYZContent(content):
         yield whitespace.many()
         atomCoords = [a[0] for a in table]
         atomNames = [a[1] for a in table]
-        return np.array(atomCoords), np.array(atomNames)
+        return np.array(atomCoords), np.array(atomNames, dtype=object)  # object dtype is used to assign names with bigger length
 
     table, atomNames = parseContent.parse(content)
     latticeVectors = None
@@ -119,6 +119,7 @@ def parseXYZContent(content):
 class Molecule:
     def __init__(self, fileName=None):
         self.atom, self.atomNumber, self.atomName, self.az, self.latticeVectors = None, None, None, None, None
+        self.part, self.partData = None, None
         if fileName is not None:
             self.fileName = utils.fixPath(fileName)
             self.construct(*parseXYZFile(self.fileName))
@@ -127,6 +128,13 @@ class Molecule:
         self.atom, self.atomNumber, self.atomName, self.latticeVectors = atom, atomNumber, atomName, latticeVectors
         self.az = self.atomNumber  # alias
         self.setParts('0-' + str(len(self.atom) - 1))
+
+    def show(self):
+        from ase import Atoms
+        from ase.visualize import view
+
+        ase_repr = Atoms(self.atomName, self.atom)
+        view(ase_repr)
 
     @classmethod
     def fromXYZcontent(cls, content):
@@ -138,7 +146,6 @@ class Molecule:
         # partsData should be a 2d-array, each of inner array contains indices of atoms that belong to the corresponding part
         # e.g. partsData[i] has all the indices of atoms from part <i>
         self.partsData = list(map(partsParser.parse, parts))
-
         self.assignParts()
 
     def assignParts(self):
@@ -343,26 +350,36 @@ class Molecule:
                 adf += utils.gauss(angle, adf0, sigma)
         return adf
 
-    def getSortedDists(self, atoms=None):
+    def getAtomInds(self, atoms=None, invert=False):
+        emptyAtomsResult = [] if invert else np.arange(start=0, stop=len(self.az))
+        if atoms is None:
+            return emptyAtomsResult
+        if isinstance(atoms, str): atoms = [atoms]
+        assert isinstance(atoms, (list, np.ndarray))
+        if len(atoms) == 0: return emptyAtomsResult
+        assert isinstance(atoms[0], str)
+        ind = np.zeros(len(self.atom), dtype=bool)
+        for atomName in atoms:
+            atomNumber = atom_proton_numbers[atomName]
+            ind = ind | (self.atomNumber == atomNumber)
+        if invert: ind = ~ind
+        return np.where(ind)[0]
+
+    def getSortedDists(self, atoms=None, invert=False):
         """
         Returns sorted distances to atom[0]
         """
-        if atoms is None:
-            ind = np.arange(start=0, stop=len(self.az))
-        elif isinstance(atoms, str):
-            atomName = atoms
-            atomNumber = atom_proton_numbers[atomName]
-            ind = np.where(self.atomNumber == atomNumber)[0]
-            if ind.size == 0:
-                raise Exception("There are no atoms with name " + atomName)
+        if (not utils.isArray(atoms)) or not utils.is_numeric(atoms[0]):
+            ind = self.getAtomInds(atoms, invert)
         else:
             ind = np.array(atoms)
-            assert len(np.unique(self.az[ind])) == 1, 'All atoms must be of the same type!'
+        if ind.size == 0:
+            raise Exception("There are no atoms. Atoms = " + str(atoms)+', invert = '+str(invert))
         dists = np.linalg.norm(self.atom[ind,:]-self.atom[0], axis=1)
         return np.sort(dists)
 
     def deleteAtomAt(self, index):
-        assert isinstance(index, int), 'Expecting index to be integer'
+        assert isinstance(index, (int,np.int64)), 'Expecting index to be integer, but it\'s type is '+str(type(index))
         assert (index <= self.atom.shape[0]) and (index > 0), 'Trying to delete atom out of indexing bounds'
 
         # remove from coordinates array, atom numbers & names
@@ -381,8 +398,10 @@ class Molecule:
                     partIndices[i] = partIndices[i] - 1
 
     def deleteAtomsAt(self, *args):
+        if len(args) == 1 and isinstance(args[0], (list,np.ndarray)):
+            args = args[0]
         assert len(args) == len(set(args)), 'Duplicate atom indices in input'
-        atomsToDelete = sorted(args) # needed to decrease atom index after every deleted atom
+        atomsToDelete = sorted(args)  # needed to decrease atom index after every deleted atom
         for i in range(len(atomsToDelete)):
             self.deleteAtomAt(atomsToDelete[i] - i)
 

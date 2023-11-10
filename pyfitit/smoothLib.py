@@ -5,16 +5,10 @@ from . import fdmnes, optimize, plotting, curveFitting
 import numpy as np
 import pandas as pd
 from .optimize import param, arg2string, VectorPoint
-import matplotlib.pyplot as plt
 from scipy import interpolate
+from scipy.special import erfc
 from matplotlib.font_manager import FontProperties
 
-
-# ============================================================================================================================
-# ============================================================================================================================
-# типы сглаживаний
-# ============================================================================================================================
-# ============================================================================================================================
 
 def kernelCauchy(x, a, sigma): return sigma/2/math.pi/((x-a)**2+sigma**2/4)
 
@@ -77,7 +71,7 @@ def spline_width(e, Efermi, *g):
     return sigma
 
 
-def simpleSmooth(e, xanes, sigma, kernel='Cauchy', new_e=None, sigma2percent=0.1, gaussWeight=0.2, assumeZeroInGaps=False, expandParams=None):
+def simpleSmooth(e, xanes, sigma, kernel='Cauchy', new_e=None, sigma2percent=0.1, gaussWeight=0.2, assumeZeroInGaps=False, expandParams=None, debugPlotFile=None):
     """
     Smoothing
     :param e: argument (energy for xanes spectrum)
@@ -96,22 +90,42 @@ def simpleSmooth(e, xanes, sigma, kernel='Cauchy', new_e=None, sigma2percent=0.1
     e0, xanes0 = e, xanes
     if expandParams is not None:
         e, xanes = utils.expandByReflection(e, xanes, **expandParams)
-    # plotting.plotToFile(e,xanes,'expand', e0,xanes0,'init', fileName=f'debug.png')
-    if new_e is None: new_e = e0
-    new_xanes = np.zeros(new_e.shape)
-    for i in range(new_e.size):
-        sigma = sigma0[i] if isinstance(sigma0, np.ndarray) else sigma0
+
+    def smoothByConv(e, xanes, new_e):
+        center = (e[0]+e[-1])/2
         if kernel == 'Cauchy':
-            kern = kernelCauchy(e, new_e[i], sigma)
+            kern = kernelCauchy(e, center, sigma0)
         elif kernel == 'Gauss':
-            kern = kernelGauss(e, new_e[i], sigma)
+            kern = kernelGauss(e, center, sigma0)
         elif kernel == 'C+G':
-            kern = kernelCauchy(e, new_e[i], sigma) + gaussWeight*kernelGauss(e, new_e[i], sigma*sigma2percent)
-        else: assert False, 'Unknown kernel name'
-        norm = 1 if assumeZeroInGaps else utils.integral(e, kern)
-        if norm == 0: norm = 1
-        new_xanes[i] = utils.integral(e, xanes*kern)/norm
-    return new_xanes
+            kern = kernelCauchy(e, center, sigma0) + gaussWeight*kernelGauss(e, center, sigma0*sigma2percent)
+        new_xanes2 = np.convolve(xanes, kern, mode='same') / np.sum(kern)
+        return np.interp(new_e, e, new_xanes2)
+
+    def smoothByKernRegr(e, xanes, new_e):
+        new_xanes = np.zeros(new_e.shape)
+        for i in range(new_e.size):
+            sigma = sigma0[i] if utils.isArray(sigma0) else sigma0
+            if kernel == 'Cauchy':
+                kern = kernelCauchy(e, new_e[i], sigma)
+            elif kernel == 'Gauss':
+                kern = kernelGauss(e, new_e[i], sigma)
+            elif kernel == 'C+G':
+                kern = kernelCauchy(e, new_e[i], sigma) + gaussWeight*kernelGauss(e, new_e[i], sigma*sigma2percent)
+            else: assert False, 'Unknown kernel name'
+            norm = 1 if assumeZeroInGaps else utils.integral(e, kern)
+            if norm == 0: norm = 1
+            new_xanes[i] = utils.integral(e, xanes*kern)/norm
+        return new_xanes
+
+    if new_e is None: new_e = e0
+    if utils.isUniform(e) and not utils.isArray(sigma0):
+        res = smoothByConv(e, xanes, new_e)
+    else:
+        res = smoothByKernRegr(e, xanes, new_e)
+    if debugPlotFile is not None:
+        plotting.plotToFile(e,xanes,'expand', e0,xanes0,'init', res.x, res.y, 'smoothed', fileName=debugPlotFile)
+    return res
 
 
 # def smooth_fdmnes(e, xanes, exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
@@ -157,6 +171,7 @@ def smooth_fdmnes(e, xanes, exp_e, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     new_xanes = (0.5*integr + toAdd)/norms
     assert len(exp_e) == len(new_xanes)
     return exp_e, new_xanes
+
 
 def smooth_fdmnes_notconv(e0, xanes0, Gamma_hole, Ecent, Elarg, Gamma_max, Efermi):
     n0 = e0.size
@@ -415,12 +430,14 @@ def funcFitSmoothHelper(smooth_params, spectrum, smoothType, exp, norm=None):
     return smoothInterpNorm(smooth_params, spectrum, smoothType, exp.spectrum, exp.intervals['fit_norm'], norm)
 
 
-def smoothInterpNorm(smoothParams, spectrum, smoothType, expSpectrum, fitNormInterval=None, norm=None, normType='multOnly'):
+def smoothInterpNorm(smoothParams, spectrum, smoothType, expSpectrum, fitNormInterval=None, norm=None, normType='multOnly', doNotExtrapolate=False):
     assert smoothType in ['fdmnes', 'fdmnes_notconv', 'adf', 'simple_Gauss', 'simple_Cauchy', 'simple_Cauchy_then_Gauss', 'simple_C+G', 'linear', 'Muller', 'piecewise', 'multi_piecewise', 'spline', 'optical']
     if norm is None and 'norm' in smoothParams: norm = smoothParams['norm']
     if 'normFixType' in smoothParams: normType = smoothParams['normFixType']
     shift = smoothParams['shift']
     spectrum_energy = spectrum.energy + shift
+    if doNotExtrapolate:
+        expSpectrum = expSpectrum.limit([spectrum_energy[0], spectrum_energy[-1]])
     # t1 = time.time()
     if smoothType in ['fdmnes', 'fdmnes_notconv', 'adf']:
         Gamma_hole, Ecent, Elarg, Gamma_max, Efermi = smoothParams['Gamma_hole'], smoothParams['Ecent'], smoothParams['Elarg'], smoothParams['Gamma_max'], smoothParams['Efermi']
@@ -781,61 +798,32 @@ def deconvolve(e, xanes, smooth_params):
 
 # параметры размазки и новый диапазон энергии беруться из эксперимента. norm - можно задавать, а можно писать None для автоопределения
 # cacheStatus = True if read from cache
-def smoothDataFrame(smoothParams, xanes_df, smoothType, exp_spectrum, fit_norm_interval, norm=None, folder=None, returnCacheStatus=False, energy=None):
-    assert len(exp_spectrum.energy) > 0
+def smoothDataFrame(smoothParams, xanes_df, smoothType, expSpectrum, fitNormInterval, norm=None, folder=None, returnCacheStatus=False, energy=None):
+    assert len(expSpectrum.energy) > 0
     assert norm is None or 'norm' not in smoothParams, f'norm = {norm}, smoothParams["norm"] = {smoothParams["norm"]}'
     smoothParams = {pn:smoothParams[pn] for pn in smoothParams}
     if norm is not None: smoothParams['norm'] = norm
     xanes_df_is_dataframe = isinstance(xanes_df, pd.DataFrame)
-    if folder is not None:
-        folder = utils.fixPath(folder)
-        assert os.path.exists(folder+os.sep+'spectra.txt'), 'File spectra.txt doesn\'t exist in folder '+folder
-        smoothFileName = folder+os.sep+'spectra_smooth.txt'
-        smoothParamsFileName = folder+os.sep+'spectra_smooth_params.txt'
-        smoothParams = copy.deepcopy(smoothParams)
-        smoothParams['useEpsii'] = fdmnes.useEpsiiShift
-        with open(folder+os.sep+'spectra.txt', 'rb') as f:
-            smoothParams['hash'] = hashlib.md5(f.read()).hexdigest()
-        if os.path.isfile(smoothFileName) and os.path.isfile(smoothParamsFileName):
-            with open(smoothParamsFileName, 'r') as f: cachedParams = json.load(f)
-            smoothParamsCached = cachedParams['smoothParams']
-            en = np.array(cachedParams['energy'])
-            if 'exp' in cachedParams: exp_xanes = np.array(cachedParams['exp'])
-            else: exp_xanes = np.array([0])
-            equal = True
-            if len(smoothParams) == len(smoothParamsCached):
-                for p in smoothParams:
-                    if smoothParams[p] != smoothParamsCached[p]: equal = False
-                if not np.array_equal(en, exp_spectrum.energy): equal = False
-                if not np.array_equal(exp_xanes, exp_spectrum.intensity): equal = False
-            else: equal = False
-            if equal:
-                res = pd.read_csv(smoothFileName, sep=' ')
-                if returnCacheStatus: return res, True
-                else: return res
     if energy is None:
         energy = utils.getEnergy(xanes_df)
     if xanes_df_is_dataframe:
         xanes_df = xanes_df.to_numpy()
     # smoothed_xanes = funcFitSmoothHelperMulti(exp.defaultSmoothParams[smoothType], xanes_energy, xanes_df.values, exp, norm)
-    smoothed_xanes = np.zeros([xanes_df.shape[0], exp_spectrum.energy.size])
+    smoothed_xanes = np.zeros([xanes_df.shape[0], expSpectrum.energy.size])
     for k in range(smoothed_xanes.shape[0]):
         xanes = utils.Spectrum(energy, xanes_df[k,:])
-        smoothed_xanes1, _ = smoothInterpNorm(smoothParams, xanes, smoothType, exp_spectrum, fit_norm_interval)
+        smoothed_xanes1, _ = smoothInterpNorm(smoothParams, xanes, smoothType, expSpectrum, fitNormInterval)
         smoothed_xanes[k] = smoothed_xanes1.intensity
     if xanes_df_is_dataframe:
-        res = utils.makeDataFrame(exp_spectrum.energy, smoothed_xanes)
-        if folder is not None:
-            res.to_csv(smoothFileName, sep=' ', index=False)
-            with open(smoothParamsFileName, 'w') as f: json.dump({'smoothParams':smoothParams, 'energy':exp_spectrum.energy.tolist(), 'exp':exp_spectrum.intensity.tolist()}, f)
+        res = utils.makeDataFrame(expSpectrum.energy, smoothed_xanes)
         if returnCacheStatus:
             return res, False
         else:
             return res
-    else: return smoothed_xanes, exp_spectrum.energy
+    else: return smoothed_xanes, expSpectrum.energy
 
 
-def removeNoise(energy, intensity, partCount=10, bw=None, debugPlotFile=None):
+def removeNoise(energy, intensity, partCount=10, bw=None, debugPlotFile=None, expandParams=None):
     """
     Use this function twice:
     1. bw=None: apply statsmodels.nonparametric.kernel_regression.KernelReg for bw estimation and save graph to debugPlotFile.
@@ -843,6 +831,9 @@ def removeNoise(energy, intensity, partCount=10, bw=None, debugPlotFile=None):
     :param partCount: divide spectrum into parts
     :returns: clearIntensity
     """
+    if expandParams is not None:
+        energy0, intensity0 = energy, intensity
+        energy, intensity = utils.expandByReflection(energy, intensity, **expandParams)
     if bw is None:
         res = np.copy(intensity)
         n = len(energy) // partCount
@@ -861,6 +852,235 @@ def removeNoise(energy, intensity, partCount=10, bw=None, debugPlotFile=None):
         _, res = generalSmooth(energy, intensity, bw1, kernel='Gauss')
         if debugPlotFile is not None:
             plotting.plotToFile(energy, bw1, 'bw', fileName=debugPlotFile)
-    return res
+    if expandParams is None: return res
+    else: return np.interp(energy0, energy, res)
 
+
+def calcNoiseLevel(s: utils.Spectrum, noiseSampleIntervals, min_w=None, max_w=None, debugFileName=None):
+    """
+        Smooth experimental spectrum, keeping peak intensity
+
+        :param noiseSampleIntervals: [e1,w1,[a1,b1], e2,w2,[a2,b2], ...] - means for e<=e1 calculate noise params on [a1,b1], for e1<e<=e2 - on [a2,b2], ... w1,w2,... is used in KernelRegression to calculate smooth function
+        """
+    assert len(noiseSampleIntervals) % 3 == 0
+    debug = debugFileName is not None
+    if max_w is None: max_w = 5
+    n = len(s.x)
+    noiseSampleIntervals1 = copy.deepcopy(noiseSampleIntervals)
+    if noiseSampleIntervals1[0] > s.x[0]:
+        noiseSampleIntervals1 = [s.x[0], noiseSampleIntervals1[1], []] + noiseSampleIntervals1
+    if np.isinf(noiseSampleIntervals1[-3]): noiseSampleIntervals1[-3] = s.x[-1]
+
+    def adaptiveSmooth(x, y, w, min_w):
+        if w is None:
+            w = min_w
+            q = 1
+            while q > 0.6 and w <= max_w:
+                smooth = simpleSmooth(x, y, w, kernel='Gauss', expandParams={})
+                err = y-smooth
+                q = np.sum(err[1:]*err[:-1] <= 0)/(len(err)-1)
+                # print('w =', w,'q =',q)
+                if w == max_w: break
+                w *= 1.5
+                if w > max_w: w = max_w
+        else: smooth = simpleSmooth(x, y, w, kernel='Gauss', expandParams={})
+        return smooth, w
+
+    if debug:
+        fig, ax = plotting.createfig()
+        ax.plot(s.x,s.y, label='initial')
+        ax.plot(s.x,s.y,'.',ms=2, label='edge')
+        fig2, ax2 = plotting.createfig()
+    noiseSigma = np.zeros(n)-1
+    edge0 = -np.inf
+    for i in range(len(noiseSampleIntervals)//3):
+        edge1 = noiseSampleIntervals[3*i]
+        assert edge0 < edge1, f'{edge0} >= {edge1}'
+        if edge1 < s.x[0]: continue
+        a,b = noiseSampleIntervals[3*i+2]
+        w = noiseSampleIntervals[3*i+1]
+        assert a<b, f'{a} >= {b}'
+        assert edge0 <= a, f'{edge0} > {a}'
+        assert b <= edge1, f'{b} > {edge1}'
+        if b < s.x[0]: continue
+        if a > s.x[-1]: continue
+        ind_calc = (a<=s.x) & (s.x<=b)
+        ind_full = (edge0 < s.x) & (s.x <= edge1)
+        if min_w is None:
+            min_w1 = max(np.median(np.diff(s.x[ind_calc]))/2, 0.1)
+            if debug: print(f'for interval [{a},{b}] min_w={min_w1}')
+        smooth, w = adaptiveSmooth(s.x[ind_calc], s.y[ind_calc], w=w, min_w=min_w1)
+        std = np.std(s.y[ind_calc]-smooth)
+        if debug:
+            smooth_full = simpleSmooth(s.x[ind_full], s.y[ind_full], w, kernel='Gauss', expandParams={})
+            ax.plot(s.x[ind_full], smooth_full, label='smooth')
+            ax2.plot(s.x[ind_full], s.y[ind_full]-smooth_full)
+        if debug:
+            print(f'for e<{edge1} sigma = {std} w = {w}')
+            ax.axvspan(a,b, alpha=0.5)
+            ax2.axvspan(a, b, alpha=0.5)
+        noiseSigma[ind_full] = std
+        edge0 = edge1
+    if noiseSigma[-1] < 0:
+        i = np.where(noiseSigma>0)[0][-1]
+        assert i>0
+        noiseSigma[i:] = noiseSigma[i-1]
+    if debug:
+        ax.legend()
+        plotting.savefig(debugFileName, fig)
+        ax2.plot(s.x,noiseSigma)
+        ax2.plot(s.x,-noiseSigma)
+        name,ext = os.path.splitext(debugFileName)
+        plotting.savefig(f'{name}_diff{ext}', fig2)
+    assert np.all(noiseSigma >= 0), f'There are missed energy edge points in noiseSampleIntervals = {noiseSampleIntervals}'
+    return noiseSigma
+
+
+is_array = utils.isArray
+
+
+def confsmooth(y, noise_level, confidence=0.999, overlap_fraction=0.5, deg=2):
+    """
+    Smooth experimental spectrum, keeping peak intensity
+
+    :param y: function values
+    :param noise_level: scalar or vector of the same size as y, containing standard deviations of the noise
+    :param confidence: errors with probability < 1-confidence are treated as signal and are not smoothed
+    :param overlap_fraction: how many percent of points of interval to use for overlap
+    :param deg: degree of polynomial
+    :returns: smoothed y
+    """
+    n = len(y)
+    if not is_array(noise_level): noise_level = np.ones(n)*noise_level
+
+    def approx_error(y):
+        x_i = np.arange(len(y))  # we do not take x into account!
+        p = np.polyfit(x_i, y, deg)
+        pred = np.polyval(p, x_i)
+        return pred, y-pred
+
+    def is_noise_possible_ext(error, sigma):
+        ind = sigma>0
+        error = error[ind]
+        if len(error) == 0:
+            if np.any(error) > 1e-6: return False
+            else: return True
+        if np.all(error == 0): return True
+        sigma = sigma[ind]
+        noise_prob = erfc(np.abs(error)/sigma/np.sqrt(2))
+        if np.any(noise_prob < 1-confidence): return False
+        for j in range(2,len(error)//2):
+            error1 = np.convolve(error,np.ones(j)/j, 'valid')
+            sigma1 = sigma[j//2:j//2+len(error1)]/np.sqrt(j)
+            noise_prob = erfc(np.abs(error1)/sigma1/np.sqrt(2))
+            if np.any(noise_prob < 1-confidence): return False
+        return True
+
+    def is_noise_possible(i0, size):
+        error = approx_error(y[i0:i0 + size])[1]
+        return is_noise_possible_ext(error, noise_level[i0:i0+size])
+
+    def detect_segment_size(i0, old_size):
+        sz = old_size
+        is_ns_possible = is_noise_possible(i0, sz)
+        if is_ns_possible:
+            while is_ns_possible:
+                sz = sz + 1
+                if i0+sz > len(y): return sz-1
+                is_ns_possible = is_noise_possible(i0, sz)
+            return sz-1
+        else:
+            while not is_ns_possible:
+                sz = sz - 1
+                assert sz >= 2, f'This error occurs usually, when your noise level {noise_level[i0]} is too small. If you have calculated it with calcNoiseLevel, check min_w and the grid step'
+                is_ns_possible = is_noise_possible(i0, sz)
+            return sz
+
+    i0 = 0
+    old_size = deg+1
+    result = np.zeros(n)
+    osz = 0
+    while True:
+        new_size = detect_segment_size(i0, old_size)
+        # print(f'i0 = {i0} new_size = {new_size} old_size = {old_size} osz = {osz}')
+        pred, error = approx_error(y[i0:i0 + new_size])
+        if i0 == 0:
+            result[:new_size] = pred
+            osz = int(np.round(new_size*overlap_fraction))
+            if osz == 0: osz = 1
+        else:
+            # overlap with old
+            corrected_osz = min(osz, new_size)
+            if corrected_osz >= 3:
+                alpha = np.linspace(0,1,corrected_osz)
+            else:
+                alpha = np.ones(corrected_osz)/2
+            result[i0:i0+corrected_osz] = (1-alpha)*result[i0:i0+corrected_osz] + alpha*pred[:corrected_osz]
+            # middle
+            result[i0+corrected_osz:i0+new_size] = pred[corrected_osz:]
+            #overlap with new
+            osz = int(np.round(new_size*overlap_fraction))
+            if osz == 0: osz = 1
+        if i0+new_size >= len(y): break
+        i0 = i0 + new_size - osz
+        old_size = new_size
+
+    return result
+
+
+def smoothExp(s: utils.Spectrum, noiseSampleIntervals, noiseConfidenceLevel=0.999, overlapFraction=0.5, deg=2, debugFileName=None, min_w=None, max_w=None):
+    """
+    Smooth experimental spectrum, keeping peak intensity
+
+    :param noiseSampleIntervals: [e1,w1,[a1,b1], e2,w2,[a2,b2], ...] - means for e<=e1 calculate noise params on [a1,b1], for e1<e<=e2 - on [a2,b2], ... w1,w2,... is used in KernelRegression to calculate smooth function
+    :param noiseConfidenceLevel: - for "3 sigma rule". Errors with probability < 1-noiseConfidenceLevel are treated as signal
+    :param overlapFraction: how many percent of points of the smallest interval to use for overlap
+
+    Алгоритм сглаживает пики. В интернете есть несколько работ пытающихся решить эту проблему. На самом деле правильный алгоритм такой: задаем спокойные интервал(ы) функции для оценки дисперсии шума (апроксимируем функцию generalSmooth).
+    Теперь при построении аппроксимации нужно поставить жесткое ограничение: для каждой точки погрешности должно выполняться правило 3-х сигм, для каждого среднего пары последовательных погрешностей тоже (сигма в sqrt(2) раз для среднего пары меньше), для каждого среднего тройки последовательных погрешностей тоже (сигма в sqrt(3) раз меньше) и т.д.
+    Тут хорошо бы использовать обычную МНК polynomial.polynomial.Polynomial.fit (а еще лучше оптимизировать экспоненциальный лосс, чтобы минимизировать максимальую потерю). Берем полином наименьшей степени, для которого выполняется ограничение. Придется применять кусочками и сшивать.
+    Внимание: неопределенность. Можно менять кол-во точек сегмента для аппроксимации, а можно степень полинома! Легче полином - линейный, но варьируем число точек.
+
+    :param bw: function(w) -> list of points to interpolate bandwidth. Example: w -> [[4950,0.1], [4990,0.5], [5010,w]]
+    """
+    noise_level = calcNoiseLevel(s, noiseSampleIntervals=noiseSampleIntervals, min_w=min_w, max_w=max_w, debugFileName=debugFileName)
+    result = confsmooth(s.y, noise_level, confidence=noiseConfidenceLevel, overlap_fraction=overlapFraction, deg=deg)
+    return utils.Spectrum(s.x, result)
+
+
+def smoothExp_old(s, checkInterval=None, bw=None, maxw=4, dw=1, expandParams=None):
+    """
+    Iteratively applies removeNoise function to the spectrum with increased bandwidth from 1 up to.
+
+    :param bw: function(w) -> list of points to interpolate bandwidth. Example: w -> [[4950,0.1], [4990,0.5], [5010,w]]
+    """
+    if bw is None: bw = lambda ww: ww
+    if checkInterval is None: checkInterval = [s.x[0], s.x[-1]]
+    s = copy.deepcopy(s)
+    w = 1
+    sm = simpleSmooth(s.energy, s.intensity, sigma=4, kernel='Gauss', expandParams=expandParams)
+    ind = (checkInterval[0] <= s.energy) & (s.energy <= checkInterval[1])
+    while utils.variation(s.energy[ind], sm[ind])*1.4 < utils.variation(s.energy[ind], s.intensity[ind]):
+        print(utils.variation(s.energy[ind], s.intensity[ind]), 'etalon:', utils.variation(s.energy[ind], sm[ind]), 'w =', w)
+        inten = removeNoise(s.energy, s.intensity, bw=bw(w), expandParams=expandParams)
+        s = utils.Spectrum(s.energy, inten)
+        w += dw
+        if w > maxw:
+            print('max w reached')
+            break
+    return s
+
+
+def smoothFindpeaks(s):
+    from findpeaks import findpeaks
+    # method = peakdetect topology
+    # denoise=None, 'lee','lee_enhanced','kuan', 'fastnl','bilateral','frost','median','mean'
+    # lookahead = 1,2
+    # fp = findpeaks(method='peakdetect', lookahead=10, interpolate=None)
+    fp = findpeaks(method='topology', limit=0.05, interpolate=None)
+    fp.fit(s.y)
+    fp.plot()
+    fp.plot_persistence()
+    print(fp)
+    exit(0)
 

@@ -1,8 +1,6 @@
-import scipy.spatial.distance
-
 from . import utils
 utils.fixDisplayError()
-import os, warnings, json, matplotlib, sklearn, seaborn, cycler, logging
+import os, warnings, json, matplotlib, sklearn, seaborn, cycler, logging, scipy.spatial.distance, copy
 from . import optimize, ML
 import numpy as np
 import pandas as pd
@@ -11,7 +9,12 @@ import matplotlib.contour, matplotlib.colors
 from matplotlib.font_manager import FontProperties
 
 
+def nobackend():
+    return matplotlib.get_backend() == 'nbAgg' and not utils.isJupyterNotebook()
+
+
 def createfig(interactive=False, figsize=None, figdpi=None, **kwargs):
+    # if utils.isFlask(): return None, None
     if not interactive: plt.ioff()
     else:
         if utils.isJupyterNotebook(): plt.ion()
@@ -26,22 +29,29 @@ def createfig(interactive=False, figsize=None, figdpi=None, **kwargs):
 
 
 def savefig(fileName, fig, figdpi=None):
-    if figdpi is None:
-        figdpi = 300
-    folder = os.path.split(fileName)[0]
-    if folder!= '' and not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
-    fig.savefig(fileName, dpi=figdpi)
+    # if utils.isFlask(): return
+    if figdpi is None: figdpi = 300
+    if not isinstance(fileName, list): fileName = [fileName]
+    for fn in fileName:
+        fn = utils.fixPath(fn)
+        folder = os.path.split(fn)[0]
+        if folder != '' and not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
+        fig.savefig(fn, dpi=figdpi)
 
 
 def closefig(fig, interactive=False):
-    if matplotlib.get_backend() == 'nbAgg': return
+    # if utils.isFlask(): return
+    if nobackend(): return
     #if not utils.isJupyterNotebook(): plt.close(fig)  - notebooks also have limit - 20 figures
     if fig.number in plt.get_fignums():
-        if utils.isJupyterNotebook() and interactive: plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
-        plt.close(fig)
-    else:
-        print('Warning: can\'t close not existent figure')
-    if utils.isJupyterNotebook() and interactive: plt.ion()
+        if utils.isJupyterNotebook() and interactive:
+            plt.show(block=False)  # Even if plt.isinteractive() == True jupyter notebook doesn't show graph if in past plt.ioff/ion was called
+        else:
+            plt.close(fig)
+    # else:
+    #     print('Warning: can\'t close not existent figure')
+    if utils.isJupyterNotebook() and interactive:
+        plt.ion()
 
 
 # append = {'label':..., 'data':..., 'twinx':True} or  [{'label':..., 'data':...}, {'label':..., 'data':...}, ...]
@@ -198,12 +208,13 @@ def wrap(s, n):
 
 
 def setFigureSettings(ax, title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None, yscale=None, tight_layout=True, grid=False, legend=True):
+    # if utils.isFlask(): return
     if title != '':
         title = wrap(title, 100)
         ax.set_title(title)
     if xlim is not None:
         ax.set_xlim(xlim[0], xlim[1])
-        updateYLim(ax)
+        if ylim is None: updateYLim(ax)
     if ylim is not None: ax.set_ylim(ylim[0], ylim[1])
     if xlabel != '': ax.set_xlabel(xlabel)
     if ylabel != '': ax.set_ylabel(ylabel)
@@ -218,51 +229,73 @@ def setFigureSettings(ax, title='', xlabel='', ylabel='', xlim=None, ylim=None, 
     if legend: ax.legend()
     l.setLevel(level)
     if grid: ax.grid()
-    if tight_layout: ax.figure.tight_layout()
+    if tight_layout:
+        with warnings.catch_warnings(record=True) as warn:
+            ax.figure.tight_layout()
 
 
-def plotToFile(*p, axisMatrix=None, axisMatrixKw=None, fileName=None, save_csv=True, showInNotebook=False, **kw):
-    """
-    Simple plot multiple graphs to file
-    :param p: sequence of triads x1,y1,label1,x2,y2,label2,.... You can use dict with plot params instead of label (for example 'fmt' - line format)
-    :param axisMatrix: list(list(*p))
-    :param fileName:
-    :param save_csv: True/False
-    :param kw: title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None (function(ax)), yscale=None, tight_layout=True, grid=False
-    """
-    assert len(p)%3 == 0, f'Number of parameters {len(p)} is not multiple of 3'
+def plotToFile_createfig(*p, axisMatrix=None, axisMatrixKw=None, showInNotebook=False, createfigParams=None, **kw):
+    assert len(p) % 3 == 0, f'Number of parameters {len(p)} is not multiple of 3'
     assert len(p) == 0 or axisMatrix is None
     assert len(p) > 0 or axisMatrix is not None
     if axisMatrix is not None: assert isinstance(axisMatrix, list) and isinstance(axisMatrix[0], list) and isinstance(axisMatrix[0][0], tuple)
+    if createfigParams is None: createfigParams = {}
+    if 'interactive' not in createfigParams: createfigParams['interactive'] = showInNotebook
     if axisMatrix is None:
-        fig, ax = createfig(interactive=showInNotebook)
+        fig, ax = createfig(**createfigParams)
         ax = [[ax]]
         axisMatrixKw = [[kw]]
         axisMatrix = [[p]]
     else:
-        fig, ax = createfig(interactive=showInNotebook, nrows=len(axisMatrix), ncols=len(axisMatrix[0]), squeeze=False)
-    toSave = []
+        assert 'nrows' not in createfigParams
+        assert 'ncols' not in createfigParams
+        assert 'squeeze' not in createfigParams
+        fig, ax = createfig(**createfigParams, nrows=len(axisMatrix), ncols=len(axisMatrix[0]), squeeze=False)
+    if axisMatrixKw is None:
+        axisMatrixKw = [[{}]*len(axisMatrix[0])]*len(axisMatrix)
+    return fig, ax, axisMatrixKw, axisMatrix
 
-    def plot(ax, p, kw):
-        n = len(p)//3
-        for i in range(n):
-            if isinstance(p[i*3+2], str):
-                label = p[i*3+2]
-                ax.plot(p[i*3], p[i*3+1], label=label)
-            else:
-                params = p[i*3+2]
-                assert isinstance(params, dict)
-                ax.plot(p[i*3], p[i*3+1], **params)
-                label = params['label'] if 'label' in params else str(i)
-            toSave.append({'label':label, 'x':p[i*3], 'y':p[i*3+1]})
-        setFigureSettings(ax, **kw)
+
+def plotToFile_plotOne(ax, p, toSave):
+    n = len(p)//3
+    for i in range(n):
+        if isinstance(p[i*3+2], str):
+            label = p[i*3+2]
+            assert len(p[i*3]) == len(p[i*3+1]), f'Different x and y sizes: {len(p[i*3])} != {len(p[i*3+1])} for {label}'
+            # if not utils.isFlask():
+            ax.plot(p[i*3], p[i*3+1], label=label)
+        else:
+            params = copy.deepcopy(p[i*3+2])
+            assert isinstance(params, dict), str(params)
+            label = params['label'] if 'label' in params else str(i)
+            assert len(p[i * 3]) == len(p[i * 3 + 1]), 'Different x and y sizes for ' + label
+            if 'fmt' in params:
+              fmt = params['fmt']
+              del params['fmt']
+            else: fmt = None
+            # if not utils.isFlask():
+            if fmt is None: ax.plot(p[i*3], p[i*3+1], **params)
+            else: ax.plot(p[i*3], p[i*3+1], fmt, **params)
+        toSave.append({'label':label, 'x':p[i*3], 'y':p[i*3+1]})
+
+
+def plotToFile_plotAll(ax, axisMatrix, axisMatrixKw):
+    toSave = []
     for i in range(len(axisMatrix)):
         for j in range(len(axisMatrix[0])):
-            plot(ax[i][j], axisMatrix[i][j], axisMatrixKw[i][j])
+            plotToFile_plotOne(ax[i][j], axisMatrix[i][j], toSave)
+            kw = {} if axisMatrixKw is None else axisMatrixKw[i][j]
+            setFigureSettings(ax[i][j], **kw)
+    return toSave
+
+
+def plotToFile_save(fig, toSave, fileName, save_csv, showInNotebook, savefigParams, **kw):
     if fileName is None: fileName = 'graph.png'
+    fileName = utils.fixPath(fileName)
     folder = os.path.split(os.path.expanduser(fileName))[0]
     if folder != '' and not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
-    savefig(fileName, fig)
+    if savefigParams is None: savefigParams = {}
+    savefig(fileName, fig, **savefigParams)
     closefig(fig, interactive=showInNotebook)
 
     if save_csv:
@@ -271,12 +304,31 @@ def plotToFile(*p, axisMatrix=None, axisMatrixKw=None, fileName=None, save_csv=T
             obj = obj.reshape(1,-1)
             np.savetxt(file, obj, delimiter=',')
         with open(os.path.splitext(fileName)[0]+'.txt', 'w') as f:
+            if 'title' in kw:
+                f.write('title: '+kw['title']+'\n')
             for item in toSave:
                 label = item['label']
                 f.write(label+' x: ')
                 save(f,item['x'])
                 f.write(label+' y: ')
                 save(f, item['y'])
+
+
+def plotToFile(*p, axisMatrix=None, axisMatrixKw=None, fileName=None, save_csv=True, showInNotebook=False, plotWrapper=None, createfigParams=None, savefigParams=None, **kw):
+    """
+    Simple plot multiple graphs to file
+    :param p: sequence of triads x1,y1,label1,x2,y2,label2,.... You can use dict with plot params instead of label (for example 'fmt' - line format)
+    :param axisMatrix: list(list(*p))
+    :param fileName:
+    :param save_csv: True/False
+    :param kw: title='', xlabel='', ylabel='', xlim=None, ylim=None, plotMoreFunction=None (function(ax)), yscale=None, tight_layout=True, grid=False
+    """
+    if plotWrapper is not None:
+        plotWrapper(*p, axisMatrix=axisMatrix, axisMatrixKw=axisMatrixKw, fileName=fileName, save_csv=save_csv, showInNotebook=showInNotebook, **kw)
+    else:
+        fig, ax, axisMatrixKw, axisMatrix = plotToFile_createfig(*p, axisMatrix=axisMatrix, axisMatrixKw=axisMatrixKw, showInNotebook=showInNotebook, createfigParams=createfigParams, **kw)
+        toSave = plotToFile_plotAll(ax, axisMatrix, axisMatrixKw)
+        plotToFile_save(fig, toSave, fileName, save_csv, showInNotebook, savefigParams, **kw)
 
 
 def readPlottingFile(fileName):
@@ -289,7 +341,8 @@ def readPlottingFile(fileName):
         while name in d:
             name = f'{name}_{i}'
             i+=1
-        d[name] = np.array([float(w) for w in line.split(':')[1].split(',')])
+        if name0 == 'title': d[name] = line[line.index(':')+2:]
+        else: d[name] = np.array([float(w) for w in line.split(':')[1].split(',')])
     return d
 
 
@@ -339,7 +392,7 @@ def truncate_colormap(cmapName, minval=0.0, maxval=1.0, n=100):
     return new_cmap
 
 
-def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=None, alpha=None, colorBarFormat='%.2g', colorBarLabel=None, cmap='gist_rainbow', **kw):
+def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=None, alpha=None, colorBarFormat='%.2g', colorBarLabel=None, cmap=None, plotNaN=True, highlight_inds=None, **kw):
     """Plot all spectra on the same graph colored by some parameter. Order of plotting is controled by sortByColors parameter
 
     :param energy: energy values
@@ -349,33 +402,51 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
     :param fileName: File to save graph. If none - figure is returned
     :param alpha: alpha
     :param cmap: color map name, examples: 'seaborn husl' 'gist_rainbow' 'jet' 'nipy_spectral'
+    :param plotNaN: if colorParam is not None and NaN values exist they are plotted by black color on the top of all graphs
+    :param highlight_inds: indexes of spectra to highlight
+    :param kw: figure params (see function setFigureSettings)
     """
     assert len(energy) == spectra.shape[1]
-    colorMap = parseColorMap(cmap)
-    if alpha is None: alpha = getDefaultSpectraAlpha(len(spectra))
+    if highlight_inds is None: highlight_inds = []
+    spectra_inds = np.arange(len(spectra))
     if isinstance(spectra, pd.DataFrame): spectra = spectra.to_numpy()
     nanExists = False
     if colorParam is not None:
-        indNan = np.isnan(colorParam)
+        if isinstance(colorParam, list): colorParam = np.array(colorParam)
+        # if colorParam.dtype == float:
+        indNan = colorParam != colorParam
         nanExists = np.any(indNan)
-        if nanExists:
-            color_param0 = colorParam
-            spectra0 = spectra
-            colorParam = colorParam[~indNan]
-            spectra = spectra[~indNan]
+        spectra0 = spectra
+        spectra_inds0 = spectra_inds
+        colorParam = colorParam[~indNan]
+        spectra = spectra[~indNan]
+        spectra_inds = spectra_inds[~indNan]
+        if nanExists and not plotNaN: nanExists = False
+        if len(colorParam) == 0: nanExists = True
+        # else:
+        #     nanExists = False
     if sortByColors:
         assert colorParam is not None
         ind = np.argsort(colorParam)
     else:
         ind = np.random.permutation(spectra.shape[0])
     spectra = spectra[ind]
+    spectra_inds = spectra_inds[ind]
 
     fig, ax = createfig(interactive=True)
-    if colorParam is not None:
+    if colorParam is not None and len(colorParam)>0:
         assert len(colorParam) == spectra.shape[0]
-        c_min, c_max = np.min(colorParam), np.max(colorParam)
-        transform = lambda r: (r - c_min) / (c_max - c_min)
-        colors = transform(colorParam)
+        if colorParam.dtype != float:
+            colors, labelMap = ML.encode(colorParam)
+            colors = colors / (len(labelMap)-1)
+        else:
+            c_min, c_max = np.min(colorParam), np.max(colorParam)
+            transform = lambda r: (r - c_min) / (c_max - c_min)
+            colors = transform(colorParam)
+        if cmap is None:
+            if len(np.unique(colors)) > 2: cmap = 'plasma'
+            else: cmap = 'plasma_r'
+        colorMap = parseColorMap(cmap)
         colors = colorMap(colors)
         colors = colors[ind]
         ax.set_prop_cycle(cycler.cycler('color', colors))
@@ -383,17 +454,31 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
             ticks = np.unique(colorParam)
         else:
             ticks = np.linspace(np.min(colorParam), np.max(colorParam), 10)
-        ticksPos = transform(ticks)
+        if colorParam.dtype != float:
+            ticksPos = np.arange(len(labelMap))
+            invLabelMap = {labelMap[name]:name for name in labelMap}
+            ticks = [invLabelMap[tp] for tp in ticksPos]
+            ticksPos = ticksPos / (len(labelMap) - 1)
+        else:
+            ticksPos = transform(ticks)
         addColorBar(mappable=plt.cm.ScalarMappable(norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap=colorMap), fig=fig, ax=ax, labelMaps={}, label='', ticksPos=ticksPos, ticks=ticks, format=colorBarFormat, colorBarLabel=colorBarLabel)
     else:
         colors = ['k']*spectra.shape[0]
         ax.set_prop_cycle(cycler.cycler('color', colors))
 
+    if alpha is None: alpha = getDefaultSpectraAlpha(len(spectra))
     for i in range(spectra.shape[0]):
-        ax.plot(energy, spectra[i], lw=0.5, alpha=alpha)
+        lw = 3 if spectra_inds[i] in highlight_inds else 0.5
+        ax.plot(energy, spectra[i], lw=lw, alpha=alpha)
     if nanExists:
         for i in np.where(indNan)[0]:
-            ax.plot(energy, spectra0[i], color='k', lw=0.5, alpha=alpha)
+            lw = 3 if spectra_inds0[i] in highlight_inds else 0.5
+            ax.plot(energy, spectra0[i], color='k', lw=lw, alpha=alpha)
+    else:
+        # plot only highlight
+        for i in set(highlight_inds) & set(np.where(indNan)[0]):
+            ax.plot(energy, spectra0[i], color='k', lw=3, alpha=alpha)
+
     setFigureSettings(ax, **kw)
     if fileName is not None:
         savefig(fileName, fig)
@@ -418,6 +503,7 @@ def updateYLim(ax):
         y = line.get_ydata()
         lim = getPlotLim(y[(xlim[0] <= x) & (x <= xlim[1])])
         if lim is not None: ybounds.append(lim)
+    if len(ybounds) == 0: return
     ybounds = np.array(ybounds)
     ylim = [np.min(ybounds[:, 0]), np.max(ybounds[:, 1])]
     ax.set_ylim(ylim)
@@ -430,6 +516,9 @@ def addColorBar(mappable, fig, ax, labelMaps, label, ticksPos, ticks, format='%.
     # old code (not work properly too)
     # cbar = fig.colorbar(mappable, ax=ax, extend='max', orientation='vertical', ticks=ticksPos, format='%.1g')
     if label in labelMaps:
+        if len(ticksPos) != len(labelMaps[label]):
+            print(ticksPos)
+            print(labelMaps[label])
         cbarTicks = [None]*len(labelMaps[label])
         for name in labelMaps[label]:
             cbarTicks[labelMaps[label][name]] = name
@@ -456,7 +545,7 @@ def parseColorMap(cmap):
     return colorMap
 
 
-def getScatterDefaultParams(x, y, dpi):
+def getScatterDefaultParams(x, y, dpi, common=True):
     if not isinstance(x, np.ndarray): x = np.array(x)
     if not isinstance(y, np.ndarray): y = np.array(y)
     scale = 1 #dpi / 300  # 1 - for 300dpi
@@ -464,26 +553,38 @@ def getScatterDefaultParams(x, y, dpi):
     markersize = 22
     minSize = 6
     maxSize = 30
-    z = np.hstack((x.reshape(-1,1), y.reshape(-1,1)))
-    z = z/np.std(z,axis=0)
-    d = scipy.spatial.distance.cdist(z,z)
-    mind = np.array([np.min(d[i][d[i]>0]) for i in range(len(z))])
     maxIntersectPercent = 0.5
-    r = np.quantile(mind, q=maxIntersectPercent)
-
-    max = np.max(d)
-    if max > 0:
-        # markersize=1 means 500 markers in diagonal
-        diagonalCount = max/r
-        markersize = np.max([500/diagonalCount,minSize])
-        markersize = np.min([markersize, maxSize])
-        if markersize == minSize:
-            overlapMarkerCount = minSize / (500/diagonalCount)
-            alpha = 1/overlapMarkerCount
-    return markersize*scale, alpha
+    z = np.hstack((x.reshape(-1,1), y.reshape(-1,1)))
+    diam = np.max(z, axis=0) - np.min(z, axis=0)
+    if np.any(diam) == 0:
+        if common: return markersize*scale, alpha
+        else: return markersize*scale+np.zeros(len(x)), alpha+np.zeros(len(x))
+    z = (z-np.min(z, axis=0))/diam
+    d = scipy.spatial.distance.cdist(z,z)
+    mind = np.array([np.min(d[i][d[i] > 0]) for i in range(len(z))])
+    if common:
+        r = np.quantile(mind, q=maxIntersectPercent)
+        max = np.max(d)
+        if max > 0:
+            # markersize=1 means 500 markers in diagonal, dx=0.0028
+            diagonalCount = max/r
+            markersize = np.max([500/diagonalCount,minSize])
+            markersize = np.min([markersize, maxSize])
+            if markersize == minSize:
+                overlapMarkerCount = minSize / (500/diagonalCount)
+                alpha = 1/overlapMarkerCount
+        return markersize*scale, alpha
+    else:
+        markersize = mind/2 / 0.002
+        markersize = np.maximum(markersize, minSize)
+        markersize = np.minimum(markersize, maxSize)
+        alpha = np.ones(len(x))
+        alpha[markersize == minSize] = 0.5
+        return markersize*scale, alpha
 
 
 def getDefaultSpectraAlpha(count):
+    if count == 0: return 1
     return min(1/count*100,1)
 
 
@@ -511,7 +612,7 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     if isinstance(color, pd.Series): color = color.to_numpy()
     if isinstance(color, np.ndarray):
         assert color.dtype in ['float64', 'int32'], color.dtype
-    assert len(x) == len(y)
+    assert len(x) == len(y), f'{len(x)} != {len(y)}'
     if color is not None: assert len(color) == len(x)
     fig,ax = createfig()
     defaultMarkersize, defaulAlpha = getScatterDefaultParams(x, y, fig.dpi)
@@ -520,6 +621,10 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     if edgecolor is None: edgecolor = '#555'
     colorMap = parseColorMap(colorMap)
     if color is not None:
+        assert len(color) == len(x), f'{len(color)} != {len(x)}'
+        if isinstance(color, np.ndarray):
+            assert len(color.shape) == 1 or color.shape[1] == 1, str(color.shape)
+            if len(color.shape) != 1: color = color.flatten()
         c = color
         c_min = np.min(c)
         c_max = np.max(c)
@@ -550,18 +655,36 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     csv_data.to_csv(os.path.splitext(fileName)[0] + '.csv', index=False)
 
 
-def plotMatrix(mat, cmap=None, ticklabels=None, annot=False, fmt='.2g', fileName=None, **kw):
-    fig, ax = createfig()
-    if ticklabels is not None:
-        assert mat.shape[0] == len(ticklabels) and mat.shape[1] == len(ticklabels)
-        df = pd.DataFrame(data=mat[::-1,:], columns=ticklabels, index=ticklabels[::-1])
-        ax = seaborn.heatmap(df, annot=annot, fmt=fmt, cmap=cmap, ax=ax)
+def plotMatrix(mat, cmap=None, ticklabelsX=None, ticklabelsY=None, annot=False, fmt='.2g', fileName=None, wrapXTickLabelLength=10, vmin=None, vmax=None, **kw):
+    ticklabelsX = copy.deepcopy(ticklabelsX)
+    ticklabelsY = copy.deepcopy(ticklabelsY)
+    if not isinstance(ticklabelsX, list): ticklabelsX = list(ticklabelsX)
+    if 'figsize' in kw:
+        figsize = kw['figsize']
+        del kw['figsize']
+    else: figsize = None
+    if 'interactive' in kw:
+        interactive = kw['interactive']
+        del kw['interactive']
+    else: interactive = None
+    fig, ax = createfig(figsize=figsize, interactive=interactive)
+    df = None
+    if ticklabelsX is not None:
+        assert mat.shape[0] == len(ticklabelsY) and mat.shape[1] == len(ticklabelsX), f'{mat.shape} != ({len(ticklabelsY)}, {len(ticklabelsX)})'
+        for i,l in enumerate(ticklabelsX):
+            ticklabelsX[i] = utils.wrap(str(l), wrapXTickLabelLength)
+        df = pd.DataFrame(data=mat[::-1,:], columns=ticklabelsX, index=ticklabelsY[::-1])
+        ax = seaborn.heatmap(df, annot=annot, fmt=fmt, cmap=cmap, vmin=vmin, vmax=vmax, ax=ax)
     else:
-        ax = seaborn.heatmap(mat, annot=annot, fmt=fmt, cmap=cmap)
+        ax = seaborn.heatmap(mat, annot=annot, fmt=fmt, cmap=cmap, vmin=vmin, vmax=vmax)
+        df = pd.DataFrame(data=mat[::-1,:])
+    # ax.locator_params(tight=False)
     setFigureSettings(ax, **kw)
     if fileName is not None:
         savefig(fileName, fig)
-        closefig(fig)
+        closefig(fig, interactive=interactive)
+        fileNameXls = os.path.splitext(fileName)[0] + '.xlsx'
+        df.to_excel(fileNameXls, index=False)
     else: return fig, ax
 
 
@@ -588,13 +711,18 @@ def plotConfusionMatrixHelper(conf_mat, accuracy, labelName, uniqueLabelValues, 
     closefig(fig)
 
 
-def plotConfusionMatrix(trueLabels, predictedLabels, labelName, labelMap=None, cmap=None, fileName='', **kw):
+def plotConfusionMatrix(trueLabels, predictedLabels, labelName, labelMap=None, cmap=None, fileName='', relativeConfMatrix=True, **kw):
     """
     :param labelMap: dict{userFriendlyLabel:index}
     """
     n = len(trueLabels)
     assert n == len(predictedLabels)
-    conf_mat = sklearn.metrics.confusion_matrix(trueLabels, predictedLabels)/n
+    conf_mat = sklearn.metrics.confusion_matrix(trueLabels, predictedLabels)
+    if relativeConfMatrix:
+        conf_mat = conf_mat/n
+        fmt ='.2g'
+    else:
+        fmt = ''
     if labelMap is not None:
         lm = {labelMap[l]:l for l in labelMap}
         trueLabels = np.array([lm[int(l)] for l in trueLabels])
@@ -602,21 +730,24 @@ def plotConfusionMatrix(trueLabels, predictedLabels, labelName, labelMap=None, c
     # print(conf_mat)
     if fileName == '': fileN = f'conf_matr_{labelName}.png'
     else: fileN = fileName
-    acc = np.sum(trueLabels == predictedLabels) / len(trueLabels)
+    acc = sklearn.metrics.balanced_accuracy_score(trueLabels, predictedLabels, adjusted=True)
     if 'title' not in kw:
-        kw['title'] = 'Confusion matrix for label ' + labelName + f'. Accuracy = {acc:.2f}'
+        kw['title'] = 'Confusion matrix for label ' + labelName + f'. Adjusted balanced accuracy = {acc:.2f}'
     if 'xlabel' not in kw:
         kw['xlabel'] = 'predicted ' + labelName
     if 'ylabel' not in kw:
         kw['ylabel'] = 'true ' + labelName
-    plotMatrix(conf_mat, cmap=cmap, ticklabels=np.unique(trueLabels), annot=True, fmt='.2g', fileName=fileN, **kw)
+    labelVals = sorted(list(set(np.unique(trueLabels).tolist() + np.unique(predictedLabels).tolist())))
+    plotMatrix(conf_mat, cmap=cmap, ticklabelsX=labelVals, ticklabelsY=labelVals, annot=True, fmt=fmt, fileName=fileN, **kw)
     # plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+    conf_mat = conf_mat.astype(float)
     for j in range(len(np.unique(trueLabels))):
         sum = np.sum(conf_mat[:,j])
         if sum != 0: conf_mat[:,j] /= sum
     fileN = os.path.splitext(fileN)[0] + '_normed' + os.path.splitext(fileN)[1]
-    plotMatrix(conf_mat, cmap=cmap, ticklabels=np.unique(trueLabels), annot=True, fmt='.2g', fileName=fileN, **kw)
-    # plotConfusionMatrixHelper(conf_mat, acc, labelName, np.unique(trueLabels), fileN)
+    kw['title'] = 'Confusion matrix for label ' + labelName + f' normed by np.sum(conf_mat, axis=0)'
+    plotMatrix(conf_mat, cmap=cmap, ticklabelsX=labelVals, ticklabelsY=labelVals, annot=True, fmt='.2g', fileName=fileN, **kw)
+    # plotConfusionMatrixHelper(conf_mat, acc, labelName, labelVals, fileN)
 
 
 def plotHeatMap(func, xlim, ylim, N1=50, N2=50, cmap='plasma', fileName='heatmap.png', **kw):

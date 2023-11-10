@@ -1,5 +1,5 @@
 import numpy as np
-import os, subprocess, tempfile, json, shutil, re
+import os, tempfile, json, shutil, re
 from pyfitit import utils
 
 

@@ -402,7 +402,7 @@ def minimize(fun, x0, bounds, constraints=(), fun_args=None, paramNames=None, me
     return fmin, xmin
 
 
-def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult='globalMinimumSearchResult', fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFunc=None, printOnline=True, method='trust-constr'):
+def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_args=None, paramNames=None, folderToSaveResult=None, fixParams=None, contourMapCalcMethod='fast', plotContourMaps='all', extraPlotFunc=None, printOnline=True, method='trust-constr'):
     """
     Try several optimizations from random start point. Retuns sorted list of results and plot contours around minimum.
     
@@ -471,13 +471,19 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
     rng = np.random.default_rng(0)
 
     # start point source
-    edgePoints = np.array(list(itertools.product(*([[0., 1.]] * m))))
-    edgePoints[1], edgePoints[-1] = edgePoints[-1], edgePoints[1]
-    perm = rng.permutation(len(edgePoints) - 2)
-    edgePoints[2:] = edgePoints[2 + perm, :]
-    eps = 0.01
-    edgePoints[edgePoints == 0] += eps
-    edgePoints[edgePoints == 1] -= eps
+    if m < 18:
+        edgePoints = np.array(list(itertools.product(*([[0., 1.]] * m))))
+        edgePoints[1], edgePoints[-1] = edgePoints[-1], edgePoints[1]
+        perm = rng.permutation(len(edgePoints) - 2)
+        edgePoints[2:] = edgePoints[2 + perm, :]
+        eps = 0.01
+        edgePoints[edgePoints == 0] += eps
+        edgePoints[edgePoints == 1] -= eps
+    else:
+        edgePoints = [np.zeros(m), np.ones(m)]
+        for i in range(trysCount):
+            edgePoints.append(rng.integers(low=0, high=2, size=(m,)))
+        edgePoints = np.array(edgePoints)
     currentPointInd = [0]
 
     def getNextPoint():
@@ -530,13 +536,16 @@ def findGlobalMinimum(targetFunction, trysCount, bounds, constraints=None, fun_a
 
         def plot2d(param1, param2):
             plotMap2d([param1, param2], targetFunctionPartial, best_x_partial, bounds=partialBounds, constraints=partial_constrains, fun_args=(), paramNames=notFixedParamNames, optimizeMethod='Powell', calMapMethod=contourMapCalcMethod, folder=folderToSaveResult, postfix='_2d_target_func', extraPlotFunc=extraPlotFunc)
-
+        if plotContourMaps is None: plotContourMaps = []
         if plotContourMaps == 'all':
             for i in range(len(notFixedParamNames)):
                 plot1d(i)
             for i1 in range(len(notFixedParamNames)):
                 for i2 in range(i1+1,len(notFixedParamNames)):
                     plot2d(i1,i2)
+        elif plotContourMaps == 'all 1':
+            for i in range(len(notFixedParamNames)):
+                plot1d(i)
         else:
             assert isinstance(plotContourMaps, list)
             for params in plotContourMaps:

@@ -23,8 +23,16 @@ class ParamProperties(dict):
             elif pp['type'] == 'int': res[pn] = int(np.mean(pp['domain']))
             elif pp['type'] == 'range': res[pn] = pp['domain']
             elif pp['type'] == 'bool': res[pn] = True
-            elif pp['type'] == 'list': res[pn] = pp['domain'][len(pp['domain'])//2]
+            elif pp['type'] == 'list':
+                if 'default' in pp: res[pn] = pp['default']
+                else: res[pn] = pp['domain'][len(pp['domain'])//2]
             else: assert False, 'Unknown param type'
+        return res
+
+    def getDefault(self):
+        res = self.getMiddle()
+        for pn, pp in self.items():
+            if 'default' in pp: res[pn] = pp['default']
         return res
 
     def getRandom(self, fittedParams=None, rng=None):
@@ -105,7 +113,7 @@ class FuncModel:
         self.function = MethodType(function, self) if function is not None else None
         assert isinstance(paramProperties, ParamProperties)
         self.paramProperties = copy.deepcopy(paramProperties)
-        self.cache = utils.CacheInMemory()
+        self.cache = utils.Cache()
         self.data = {}  # for saving to file and plotting
         self.params = None  # current params values to evaluate function
         self.userPlotFunc = MethodType(userPlotFunc, self) if userPlotFunc is not None else None
@@ -203,6 +211,12 @@ class FuncModel:
                 if 'label' not in kwargs: kwargs['label'] = name
             axisInd = dataItem['axisInd']
             ax = self.ax[axisInd]
+            if 'xlim' in kwargs:
+                ax.set_xlim(kwargs['xlim'])
+                del kwargs['xlim']
+            if 'ylim' in kwargs:
+                ax.set_ylim(kwargs['ylim'])
+                del kwargs['ylim']
             if dataItem['type'] == 'plot':
                 ax.plot(dataItem['x'], dataItem['y'], **kwargs)
                 plotCounts[ax] += 1
@@ -426,7 +440,7 @@ class FuncModel:
 
         :param project:
         :param sample:
-        :param distToExperiment: func(theorySp, expSp, params) -> distance to experiment
+        :param distToExperiment: func(data, params) -> distance to experiment
         :param smooth:
         :param additionalFunc: function(FuncModel, params) to call in the end of FuncModel function. If returns not None, FuncModel returned value replaced by additionalFunc value
         :param kwargs: arguments for FuncModel constructor (except function)
@@ -451,24 +465,21 @@ class FuncModel:
                 smoothed, norm = smoothLib.smoothInterpNorm(smoothParams=params, spectrum=sp, smoothType='fdmnes', expSpectrum=expSpectrum, fitNormInterval=energyRange)
                 slf.data['not smoothed'] = FuncModel.createDataItem('plot', x=sp.energy + shift, y=sp.intensity / norm, plot=params['not smoothed'])
             else: smoothed = utils.Spectrum(expSpectrum.energy, np.interp(expSpectrum.energy, sp.energy, sp.intensity))
-            slf.data['theory'] = FuncModel.createDataItem('plot', x=smoothed.energy, y=smoothed.intensity, order=1)
+            slf.data['theory'] = FuncModel.createDataItem('plot', x=smoothed.energy, y=smoothed.intensity, order=1, xlim=energyRange)
 
             geomParamsDict = {pn:params[pn] for pn in sample.paramNames}
             if hasattr(project, 'moleculeConstructor') and project.moleculeConstructor is not None:
                 slf.data['molecule'] = FuncModel.createDataItem('lazy', generator=lambda: FuncModel.createDataItem('text', str=project.moleculeConstructor(geomParamsDict).export_xyz_string(), filePostfix='[label].xyz', plot=False))
 
-            def xlim(ax):
-                ax.set_xlim(energyRange)
-                plotting.updateYLim(ax)
-            slf.data['xlim'] = FuncModel.createDataItem('custom', plotter=xlim, save=False, order=1000)
+            if additionalFunc is not None:
+                val = additionalFunc(slf, params)
+                if val is not None:
+                    assert distToExperiment is None, f"Can't choose from two values: additionalFunc result and distToExperiment. You should set distToExperiment=None or do not return result by additionalFunc"
+                    return val
             if distToExperiment is None:
                 error = utils.rFactorSp(smoothed, expSpectrum, p=1, sub1=True, interval=energyRange)
             else:
-                error = distToExperiment(smoothed, expSpectrum, params)
-            slf.data['error'] = FuncModel.createDataItem('text', str='err = %.3g' % error, order=1001)
-            if additionalFunc is not None:
-                val = additionalFunc(slf, params)
-                if val is not None: return val
+                error = distToExperiment(slf.data, params)
             return error
 
         paramProperties = ParamProperties()
@@ -505,21 +516,17 @@ class FuncModel:
         return exafsModel
 
     @staticmethod
-    def makeMixture(funcModelList, expDataItemNames='exp', distToExperiment=None, mixDataItemNames=None, errorDataItemNames=None, plotIndividual=False, commonParamNames=None):
+    def makeMixture(funcModelList, mixDataRules, calcValueRule, commonParamNames=None, additionalFunc=None):
         """
         Makes mixture of uniform func models. Parameters of models are prepended with model names. Concentration parameters C1,C2,... are appended.
 
         :param funcModelList:
-        :param expDataItemNames: exp data item name. Str or list corresponding to mixDataItemNames
-        :param distToExperiment: func(theorySp, expSp, params) -> distance to experiment or list of such funcs corresponding to mixDataItemNames
-        :param mixDataItemNames: str or list of dataItem names to make mixtures
-        :param errorDataItemNames: str or list of dataItem names containing function values (rFactor or relative error)
-        :param plotIndividual: plot individual components or not
+        :param mixDataRules: dict{dataItemName -> rule}, possible rules: 'mix' (calculate mixture), 'take first' (useful for exp), 'del', 'plot' (plot individual)
+        :param calcValueRule: function(data, params) -> optimized value
         :param commonParamNames: list of common params of all the models in mixture
+        :param additionalFunc: function(FuncModel, params) to call in the end of FuncModel function. If returns not None, FuncModel returned value replaced by additionalFunc value
         :returns: new mixture func model
         """
-        assert mixDataItemNames is not None
-        if distToExperiment is None: distToExperiment = lambda theorySp, expSp, params: utils.rFactorSp(theorySp, expSp)
         if commonParamNames is None: commonParamNames = []
         funcModelList = [m.copy() for m in funcModelList]
         componentNames = np.array([m.name for m in funcModelList], dtype=object)
@@ -530,11 +537,6 @@ class FuncModel:
                     componentNames[ind] = componentNames[ind] + f'_{k+1}'
         assert len(set(componentNames)) == len(funcModelList), f'Duplicate func model names: '+str(componentNames)
         concNames = ['Conc_'+componentName for componentName in componentNames[:-1]]
-        if isinstance(mixDataItemNames, str): mixDataItemNames = [mixDataItemNames]
-        if isinstance(expDataItemNames, str): expDataItemNames = [expDataItemNames]*len(mixDataItemNames)
-        if not isinstance(distToExperiment, list): distToExperiment = [distToExperiment]*len(mixDataItemNames)
-        if errorDataItemNames is not None and isinstance(errorDataItemNames, str):
-            errorDataItemNames = [errorDataItemNames]*len(mixDataItemNames)
 
         def getAllConcentrations(fullParams):
             res = [fullParams[concName] for concName in concNames]
@@ -559,50 +561,53 @@ class FuncModel:
             concentrations = getAllConcentrations(params)
             for i,m in enumerate(funcModelList):
                 m.evaluate(paramsByComponent[componentNames[i]])
-            slf.data = {}
-            x = {name:None for name in mixDataItemNames}
-            y = {name:None for name in mixDataItemNames}
-            for i,m in enumerate(funcModelList):
-                # mix spectra
-                for name in mixDataItemNames:
-                    di = m.data[name]
-                    if x[name] is None:
-                        assert i == 0, str(i)
-                        x[name] = di['x']
-                        y[name] = concentrations[i]*di['y']
-                    else:
-                        assert np.all(x[name] == di['x'])
-                        y[name] += concentrations[i]*di['y']
-                for name, di in m.data.items():
-                    if name not in expDataItemNames:
-                        slf.data[componentNames[i]+'_'+name] = di
-            for name in mixDataItemNames:
-                di = copy.deepcopy(funcModelList[0].data[name])
-                di['x'], di['y'] = x[name], y[name]
-                slf.data[name] = di
-            if not plotIndividual:
+            dataItemNames = set(funcModelList[0].data.keys())
+            for m in funcModelList:
+                assert set(m.data.keys()) == dataItemNames, f'Different data item names in mixture components are not allowed:\n{set(m.data.keys())} != {dataItemNames}'
+            assert set(mixDataRules.keys()) <= dataItemNames, f'Unknown mix data item names: '+str(set(mixDataRules.keys())-dataItemNames) + '\nAll names: '+str(dataItemNames)
+
+            def addIndividual(dataItemName, plot):
                 for i, m in enumerate(funcModelList):
-                    for name in mixDataItemNames:
-                        slf.data[componentNames[i] + '_' + name]['plot'] = False
-            dat = funcModelList[0].data
-            exps = {name: utils.Spectrum(dat[name]['x'], dat[name]['y']) for name in expDataItemNames}
-            for name in expDataItemNames: slf.data[name] = dat[name]
-            for i in range(1, len(funcModelList)):
-                for name in expDataItemNames:
-                    di = funcModelList[i].data[name]
-                    assert np.all(di['x']==exps[name].energy) and np.all(di['y']==exps[name].intensity), 'Different exp detected!'
-            errors = []
-            for j,name in enumerate(expDataItemNames):
-                theory = utils.Spectrum(slf.data[mixDataItemNames[j]]['x'], slf.data[mixDataItemNames[j]]['y'])
-                errors.append(distToExperiment[j](theory, exps[name], params))
-            if errorDataItemNames is not None:
-                for j,name in enumerate(errorDataItemNames):
-                    di = slf.data[componentNames[0] + '_' + name]
-                    di['str'] = "%.3g" % errors[j]
-                    slf.data[name] = di
-                    for i, m in enumerate(funcModelList):
-                        del slf.data[componentNames[i] + '_' + name]
-            return np.sum(errors)
+                    di = copy.deepcopy(m.data[dataItemName])
+                    if plot:
+                        if di['type'] == 'text': di['str'] = componentNames[i] + ' ' + di['str']
+                    else:  di['plot'] = False
+                    slf.data[componentNames[i] + '_' + dataItemName] = di
+
+            slf.data = {}
+            for dataItemName in dataItemNames:
+                if dataItemName in mixDataRules:
+                    rule = mixDataRules[dataItemName]
+                    if rule == 'mix':
+                        x = None
+                        for i, m in enumerate(funcModelList):
+                            di = m.data[dataItemName]
+                            if x is None:
+                                assert i == 0, str(i)
+                                x = di['x']
+                                y = concentrations[i] * di['y']
+                            else:
+                                assert np.all(x == di['x']), dataItemName + ': ' + str(x) + ' !=\n' + str(di['x'])
+                                y += concentrations[i] * di['y']
+                        di = copy.deepcopy(funcModelList[0].data[dataItemName])
+                        di['x'], di['y'] = x, y
+                        slf.data[dataItemName] = di
+                    elif rule == 'take first':
+                        slf.data[dataItemName] = copy.deepcopy(funcModelList[0].data[dataItemName])
+                    elif rule == 'del':
+                        pass
+                    elif rule == 'plot':
+                        addIndividual(dataItemName, plot=True)
+                    else:
+                        assert False, f'Unknown rule {rule}'
+                else:
+                    # do not mix
+                    addIndividual(dataItemName, plot=False)
+
+            if additionalFunc is not None:
+                val = additionalFunc(slf, params)
+                if val is not None: return val
+            return calcValueRule(slf.data, params)
 
         # make mixture param properties
         paramProperties = ParamProperties()
@@ -655,7 +660,8 @@ class FuncModel:
         assert len(self.paramProperties.constrains) == 0, "TODO"
         assert optType in ['min', 'max']
         if fittedParams is None: fittedParams = self.paramProperties.getFloatParamNames()
-        assert self.params is not None, f"Initialize params of model {self.name}"
+        if self.params is None:
+            self.params = self.paramProperties.getDefault()
         var = copy.deepcopy(self.params)
 
         def targetFunction(argsList):

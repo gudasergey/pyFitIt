@@ -2,6 +2,7 @@ import numpy as np
 import time, threading, scipy, traceback, copy, os, json
 from .ML import RBF, isFitted, crossValidation
 from . import utils, ihs, geometry, plotting
+from .executors import LazyThreadPoolExecutor
 from numpy.random import default_rng
 
 
@@ -87,7 +88,9 @@ class DatasetGenerator:
 class CalculationOrchestrator:
     """ Decides how to calculate dataset: parallel/serialized, whether failed points should be recalculated, etc.
     """
-    def __init__(self, program, lock, calcSampleInParallel=1, existingDatasetGetter=None, debug=False):
+    def __init__(self, program, lock=None, calcSampleInParallel=1, existingDatasetGetter=None, debug=False):
+        if calcSampleInParallel>1: assert lock is not None
+        else: lock = threading.Lock()
         self.calcSampleInParallel = calcSampleInParallel
         if callable(program):
             class Prog(CalculationProgram):
@@ -155,7 +158,6 @@ class CalculationOrchestrator:
             raise Exception('No good points in the initial sample. Check sampling settings')
 
     def calculateLazy(self, points):
-        from pyfitit.executors import LazyThreadPoolExecutor
         # from concurrent.futures import ThreadPoolExecutor as LazyThreadPoolExecutor
         pool = LazyThreadPoolExecutor(self.calcSampleInParallel)
         results = pool.map(self.calculate, points)
@@ -233,95 +235,6 @@ class CalculationProgram:
 """
 
 
-class Rosenbrock_2D(CalculationProgram):
-
-    def calculate(self, xx):
-        d = len(xx)
-        sum = 0
-        for ii in range(d - 1):
-            xi = xx[ii]
-            xnext = xx[ii+1]
-            new = 100 * (xnext - xi ** 2) ** 2 + (xi - 1) ** 2
-            if xx[1] > 1.5:
-                new = new + 700 * xx[1] * xx[0]
-            sum = sum + new
-
-        return sum
-
-        # x = xx[0]
-        # y = xx[1]
-        # a = 1. - x
-        # b = y - x * x
-        # res = a * a + b * b * 100
-        # if xx[1] > 1.5:
-        #     res = res + 700 * xx[1] * xx[0]
-        # return res
-
-
-class SHCamel_2D(CalculationProgram):
-
-    def calculate(self, xx):
-        x1 = xx[0]
-        x2 = xx[1]
-
-        term1 = (4 - 2.1 * x1 ** 2 + (x1 ** 4) / 3) * x1 ** 2
-        term2 = x1 * x2
-        term3 = (-4 + 4 * x2 ** 2) * x2 ** 2
-
-        y = term1 + term2 + term3
-        return y
-
-
-class DiscontinuousFunc(CalculationProgram):
-
-    def __init__(self):
-        self.xs = np.linspace(0, 5, 20)
-
-    def calculate(self, x):
-        xs = self.xs
-        x1, x2 = x
-        # sin = np.sin(xs + (x2-0.5)*2)
-        # sinsq = sin ** 20
-        # if x1 > 2.3:
-        #     return [sinsq * (xs / (x1 + x2)), None]
-        # else:
-        #     return [sinsq * (xs / x1), None]
-        return [xs/(0.02+np.abs(x1-2.4)**2+np.abs(x2-1.5)**2), None]
-
-
-class IHSSampler(Sampler):
-
-    def __init__(self, paramRanges, pointCount):
-        self.pointCount = pointCount
-        self.paramRanges = paramRanges
-        self.leftBorder, self.rightBorder = self.getParamBorders()
-        self.points = self.initialPoints()
-
-    def getParamBorders(self):
-        leftBorder = np.array([x[0] for x in self.paramRanges])
-        rightBorder = np.array([x[1] for x in self.paramRanges])
-        return leftBorder, rightBorder
-
-    def initialPoints(self):
-        seed = 0
-        N = len(self.paramRanges)
-        sampleCount = self.pointCount
-        points = (ihs.ihs(N, sampleCount, seed=seed) - 0.5) / sampleCount  # row - is one point
-        for j in range(N):
-            points[:, j] = self.leftBorder[j] + points[:, j] * (self.rightBorder[j] - self.leftBorder[j])
-
-        return points
-
-    def isGoodEnough(self, dataset):
-        xs, ys = dataset
-        isGood = xs is not None and xs.shape[0] == self.pointCount
-        return isGood
-
-    def getNewPoint(self, dataset):
-        xs, ys = dataset
-        return self.points[0] if xs is None else self.points[xs.shape[0]]
-
-
 class Ring:
     def __init__(self, size, defaultValue):
         self.data = np.zeros(size) + defaultValue
@@ -358,23 +271,6 @@ def normalizeGradients(points, yPredictionModel, paramRanges, yDist, eps):
     if len(max_grad[max_grad <= eps]) > 0:
         max_grad[max_grad <= eps] = np.min(max_grad[max_grad > eps])*0.1
     return points*max_grad, max_grad.reshape(-1)
-
-
-def cross_val_predict(estimator, xs, ys, CVcount):
-    import sklearn
-
-    if xs.shape[0] > 20:
-        kf = sklearn.model_selection.KFold(n_splits=CVcount, shuffle=True, random_state=0)
-    else:
-        kf = sklearn.model_selection.LeaveOneOut()
-    prediction_spectra = np.zeros(ys.shape)
-    for train_index, test_index in kf.split(xs):
-        X_train, X_test = xs[train_index], xs[test_index]
-        y_train, y_test = ys[train_index, :], ys[test_index, :]
-        estimator.fit(X_train, y_train)
-        prediction_spectra[test_index] = estimator.predict(X_test)
-
-    return prediction_spectra
 
 
 def voronoyTimeParams(dim):
@@ -577,10 +473,6 @@ class ErrorPredictingSampler(Sampler):
             self.appendInitialByScalePoints()
         else:
             self.scaleGrad = 1/(self.paramRanges[:,1] - self.paramRanges[:,0])
-        # time spent calculating the last cross_val_predict
-        self.lastCvCalcTime = 0
-        # time at which the last cross_val_predict was performed
-        self.timeOfLastCv = 0
         # collection of time spans spent to generate every new point (for saving to profile info file)
         self.pointGeneratingTimes = []
         self.profilingInfoFile = profilingInfoFile
@@ -613,6 +505,7 @@ class ErrorPredictingSampler(Sampler):
     def initialPointsIHS(self, seed):
         N = len(self.paramRanges)
         sampleCount = self.initialIHSDatasetSize
+        if sampleCount == 0: return np.zeros((0,N))
         points = (ihs.ihs(N, sampleCount, seed=seed) - 0.5) / sampleCount  # row - is one point
         for j in range(N):
             points[:, j] = self.leftBorder[j] + points[:, j] * (self.rightBorder[j] - self.leftBorder[j])
@@ -690,13 +583,13 @@ class ErrorPredictingSampler(Sampler):
         y_len = None
         for y in ys:
             if not isValidY(y): continue
-            if y_len is None: y_len = utils.length(y)
-            assert y_len == utils.length(y), f'Func values in different points have different dimensions: {y_len} != {utils.length(y)}'
+            if y_len is None: y_len = geometry.length(y)
+            assert y_len == geometry.length(y), f'Func values in different points have different dimensions: {y_len} != {geometry.length(y)}'
         if index > len(self.ys)-1:
             assert not self.isDublicate(xs[index]), f'index={index} len(xs)={len(xs)} xs =\n' + str(xs)
             assert len(self.ys) == len(ys) - 1
             assert index == len(ys) - 1
-            yDim = utils.length(ys[index]) if isValidY(ys[index]) else 0
+            yDim = geometry.length(ys[index]) if isValidY(ys[index]) else 0
             if yDim == 0: yDim = self.ys.shape[1]
             if self.ys.shape[1] == 0 and yDim > 0:
                 self.ys = np.zeros((self.ys.shape[0], yDim))
@@ -706,7 +599,7 @@ class ErrorPredictingSampler(Sampler):
         self.xs = np.copy(xs)
         if isValidY(ys[index]):
             if self.ys.shape[1] == 0:
-                self.ys = np.zeros((self.ys.shape[0], utils.length(ys[index])))
+                self.ys = np.zeros((self.ys.shape[0], geometry.length(ys[index])))
             self.ys[index] = ys[index]
             self.notValidYsInd = self.notValidYsInd[self.notValidYsInd != index]
         else:
@@ -808,7 +701,8 @@ class ErrorPredictingSampler(Sampler):
                         dists = self.xDist(center, candidates)
                         ind = np.argsort(dists)
                         candidates = candidates[ind, :]
-                    assert len(candidates.shape) == 2 or len(candidates) == 0, str(candidates)
+                    if len(candidates) == 0: candidates = candidates.reshape((0,0))
+                    assert len(candidates.shape) == 2, str(candidates)
                     return candidates
 
                 if neighbCount == self.xs.shape[0]:
@@ -1178,7 +1072,8 @@ def writeSettings(settingsFileName, seed, paramRanges):
 
 def minlpe(function, paramRanges, folder, maxError=0.01, maxSampleSize=None, samplingMethod='auto', samplerTimeConstraint='default', batchSize=1, threadingLock=None, seed=None, estimator=None, initialIHSDatasetSize=None, optimizeLp=2, xDist=None, yDist=None, normalizeGradientsGlobally=True, debug=False):
     """
-    Run adaptive sampling
+    Start adaptive sampling
+
     :param function: function to sample. Argument and value are numpy arrays. Can return additional data: return value, additionalData
     :param paramRanges: list of pairs [leftBorder, rightBorder]
     :param folder: folder to store settings and result. If the folder is not empty, adaptive sampling would continue calculation. Delete the folder to start new sampling.
@@ -1236,4 +1131,4 @@ def minlpe(function, paramRanges, folder, maxError=0.01, maxSampleSize=None, sam
     orchestrator = CalculationOrchestrator(function, threadingLock, calcSampleInParallel=batchSize, existingDatasetGetter=existingDatasetGetter, debug=debug)
     generator = DatasetGenerator(sampler, orchestrator)
     xs, ys, additionalData = generator.generate()
-    return xs, ys, additionalData
+    return xs, np.array(ys), additionalData

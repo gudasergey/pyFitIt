@@ -79,9 +79,16 @@ def chooseClassCount(classifier, sample, CVcount):
 
 # when estimator is already fitted
 def directCrossValidationFast(geometryParamsTest, xanesTest, estimator):
-    paramNames = geometryParamsTest.columns.values
-    X_test = xanesTest.values
-    y_test = geometryParamsTest.values
+    if isinstance(geometryParamsTest, pd.DataFrame):
+        paramNames = geometryParamsTest.columns.values
+        y_test = geometryParamsTest.values
+    else:
+        paramNames = np.arange(geometryParamsTest.shape[1])
+        y_test = geometryParamsTest
+    if isinstance(xanesTest, pd.DataFrame):
+        X_test = xanesTest.values
+    else:
+        X_test = xanesTest
     prediction = estimator.predict(X_test)
     res = {}
     for i in range(len(paramNames)):
@@ -92,23 +99,26 @@ def directCrossValidationFast(geometryParamsTest, xanesTest, estimator):
     return res
 
 
-def directCrossValidation(geometryParamsTrain, geometryParamsTest, xanesTrain, xanesTest, estimator, xyRanges={}):
-    if len(xyRanges)>0: estimator.fit(xanesTrain, geometryParamsTrain, xyRanges=xyRanges)
-    else: estimator.fit(xanesTrain, geometryParamsTrain)
+def directCrossValidation(geometryParamsTrain, geometryParamsTest, xanesTrain, xanesTest, estimator):
+    estimator.fit(xanesTrain, geometryParamsTrain)
     return directCrossValidationFast(geometryParamsTest, xanesTest, estimator)
 
 
-def KFoldCrossValidation(regressor, sample, CVcount):
+def KFoldCrossValidation(regressor, spectra, params, CVcount):
+    assert spectra.shape[0] == params.shape[0], f'{spectra.shape[0]} != {params.shape[0]}, {spectra.shape} {params.shape}'
     kf = KFold(n_splits=CVcount, shuffle=True, random_state=0)
-    X = sample.spectra;  y = sample.params
-    minX = np.min(X, axis=0);  maxX = np.max(X, axis=0)
-    minY = np.min(y, axis=0);  maxY = np.max(y, axis=0)
-    xyRanges = {'minX':minX, 'maxX':maxX, 'minY':minY, 'maxY':maxY}
+    X = spectra;  y = params
     res = None
     for train_index, test_index in kf.split(X):
-        X_train, X_test = X.loc[train_index], X.loc[test_index]
-        y_train, y_test = y.loc[train_index], y.loc[test_index]
-        part = directCrossValidation(y_train, y_test, X_train, X_test, regressor, xyRanges=xyRanges)
+        if isinstance(X, pd.DataFrame):
+            X_train, X_test = X.loc[train_index], X.loc[test_index]
+        else:
+            X_train, X_test = X[train_index], X[test_index]
+        if isinstance(y, pd.DataFrame):
+            y_train, y_test = y.loc[train_index], y.loc[test_index]
+        else:
+            y_train, y_test = y[train_index], y[test_index]
+        part = directCrossValidation(y_train, y_test, X_train, X_test, regressor)
         if res is None: res = part
         else:
             for pName in res:
@@ -156,20 +166,27 @@ def getMethod(name, params0={}):
     return regressor
 
 
-def prepareSample(sample0, diffFrom, project, norm):
+def prepareSample(sample0, diffFrom, proj, samplePreprocessor, smoothType):
     sample = copy.deepcopy(sample0)
-    sample.spectra = smoothLib.smoothDataFrame(project.FDMNES_smooth, sample.spectra, 'fdmnes', project.spectrum, project.intervals['fit_smooth'], norm=norm, folder=sample.folder)
-    gc.collect()
+    assert set(sample.paramNames) == set(proj.geometryParamRanges.keys()), 'Param names in geometryParamRanges of project:\n'+str(list(proj.geometryParamRanges.keys()))+'\ndoes not equal to dataset param names:\n'+str(sample.paramNames)
+    for pn in sample.paramNames:
+        assert utils.inside(sample.params[pn], proj.geometryParamRanges[pn]), 'Project param ranges don\'t correspond to sample'
+    if isinstance(samplePreprocessor, dict):
+        convolutionParams = samplePreprocessor
+        sample.spectra = smoothLib.smoothDataFrame(convolutionParams, sample.spectra, smoothType, proj.spectrum, proj.intervals['fit_norm'], folder=sample.folder)
+    else:
+        if samplePreprocessor is not None:
+            sample = samplePreprocessor(sample)
+        assert len(sample.energy) == sample.spectra.shape[1]
+        assert np.all(sample.energy == proj.spectrum.x), str(sample.energy)+'\n'+str(proj.spectrum.x)+'\n'+str(len(sample.energy))+' '+str(len(proj.spectrum.x))
     if diffFrom is not None:
-        sample.spectra = (sample.spectra - diffFrom['spectrumBase'].intensity) * diffFrom['purity']
-        gc.collect()
+        sample.setSpectra(spectra=(sample.spectra.to_numpy() - diffFrom['spectrumBase'].y) * diffFrom['purity'], energy=sample.energy)
     return sample
-
 
 def prepareDiffFrom(project, diffFrom, norm):
     diffFrom = copy.deepcopy(diffFrom)
-    diffFrom['projectBase'].spectrum.intensity = np.interp(project.spectrum.energy, diffFrom['projectBase'].spectrum.energy, diffFrom['projectBase'].spectrum.intensity)
-    diffFrom['projectBase'].spectrum.energy = project.spectrum.energy
+    diffFrom['projectBase'].spectrum.y = np.interp(project.spectrum.x, diffFrom['projectBase'].spectrum.x, diffFrom['projectBase'].spectrum.y)
+    diffFrom['projectBase'].spectrum.x = project.spectrum.x
     diffFrom['spectrumBase'], _ = smoothLib.funcFitSmoothHelper(project.defaultSmoothParams['fdmnes'], diffFrom['spectrumBase'], 'fdmnes', diffFrom['projectBase'], norm)
     return diffFrom
 
@@ -177,66 +194,68 @@ def prepareDiffFrom(project, diffFrom, norm):
 class Estimator:
 
     # diffFrom = {'projectBase':..., 'spectrumBase':..., 'purity':...}
-    def __init__(self, name, exp, convolutionParams, normalize=True, CVcount=10, diffFrom=None, classifierParams={}, regressorParams={}, probabilityIntervals='auto'):
+    def __init__(self, name, proj, samplePreprocessor, normalize=True, CVcount=10, diffFrom=None, smoothType='fdmnes', classifierParams={}, regressorParams={}, probabilityIntervals='auto'):
         if name not in allowedMethods:
             raise Exception('Unknown method name. You can use: '+str(allowedMethods)+'. Recommendation: RBF')
-        self.exp = copy.deepcopy(exp)
-        interval = self.exp.intervals['fit_geometry']
-        ind = (self.exp.spectrum.energy >= interval[0]) & (self.exp.spectrum.energy <= interval[1])
-        self.exp.spectrum.energy = self.exp.spectrum.energy[ind]
-        self.exp.spectrum.intensity = self.exp.spectrum.intensity[ind]
-        self.convolutionParams = copy.deepcopy(convolutionParams)
-        if 'norm' in self.convolutionParams:
-            self.norm = self.convolutionParams['norm']
-            del self.convolutionParams['norm']
-        else: self.norm = None
-        for pName in self.convolutionParams:
-            self.exp.defaultSmoothParams['fdmnes'][pName] = self.convolutionParams[pName]
+        self.proj = copy.deepcopy(proj)
+        self.smoothType = smoothType
+        interval = self.proj.intervals['fit_geometry']
+        ind = (self.proj.spectrum.x >= interval[0]) & (self.proj.spectrum.x <= interval[1])
+        self.proj.spectrum = utils.Spectrum(self.proj.spectrum.x[ind], self.proj.spectrum.y[ind])
+        if isinstance(samplePreprocessor, dict):
+            convolutionParams = samplePreprocessor
+            self.convolutionParams = {k: convolutionParams[k] for k in convolutionParams}
+            if 'norm' in self.convolutionParams:
+                self.norm = self.convolutionParams['norm']
+                del self.convolutionParams['norm']
+            else:
+                self.norm = None
+            for pName in self.convolutionParams:
+                self.proj.defaultSmoothParams[smoothType][pName] = self.convolutionParams[pName]
+        self.samplePreprocessor = samplePreprocessor
         self.regressor = getMethod(name, regressorParams)
         self.classifier0 = ExtraTreesClassifier(**classifierParams)
         self.normalize = normalize
         if normalize:
             self.regressor = ML.Normalize(self.regressor, xOnly=False)
         self.CVcount = CVcount
+        self.cv_output = ''
         self.probabilityIntervals = probabilityIntervals
         assert CVcount >= 2
         self.diffFrom = copy.deepcopy(diffFrom)
         if diffFrom is not None:
-            self.diffFrom = prepareDiffFrom(self.exp, diffFrom, self.norm)
-            self.expDiff = copy.deepcopy(self.exp)
-            self.expDiff.spectrum = utils.Spectrum(self.expDiff.spectrum.energy, self.exp.spectrum.intensity - self.diffFrom['projectBase'].spectrum.intensity)
+            self.diffFrom = prepareDiffFrom(self.proj, diffFrom, self.norm)
+            self.expDiff = copy.deepcopy(self.proj)
+            self.expDiff.spectrum = utils.Spectrum(self.expDiff.spectrum.x, self.proj.spectrum.y - self.diffFrom['projectBase'].spectrum.y)
 
     def prepareSpectrumForPrediction(self, xanes, smooth):
         if smooth:
-            smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(self.exp.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', self.exp, self.norm)
-            xanesAbsorb = smoothed_xanes.intensity
+            smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(self.proj.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', self.proj, self.norm)
+            xanesAbsorb = smoothed_xanes.y
         else:  # xanes - is experimental data
             if self.diffFrom is None:
                 xanes = copy.deepcopy(xanes)
-                interval = self.exp.intervals['fit_geometry']
-                ind = (xanes.energy >= interval[0]) & (xanes.energy <= interval[1])
-                xanes.energy = xanes.energy[ind]
-                xanes.intensity = xanes.intensity[ind]
-                xanesAbsorb = xanes.intensity
-                xanesAbsorb = np.interp(self.exp.spectrum.energy, xanes.energy, xanesAbsorb)
+                xanes = xanes.limit(self.proj.intervals['fit_geometry'])
+                xanesAbsorb = np.interp(self.proj.spectrum.x, xanes.x, xanes.y)
         if self.diffFrom is not None:
-            if smooth: xanesAbsorb = (xanesAbsorb - self.diffFrom['spectrumBase'].intensity)*self.diffFrom['purity']
+            if smooth: xanesAbsorb = (xanesAbsorb - self.diffFrom['spectrumBase'].y)*self.diffFrom['purity']
             else:
-                xanesAbsorb = np.interp(self.exp.spectrum.energy, xanes.energy, xanes.intensity)
-                xanesAbsorb = xanesAbsorb - self.diffFrom['projectBase'].spectrum.intensity
+                xanesAbsorb = np.interp(self.proj.spectrum.x, xanes.x, xanes.y)
+                xanesAbsorb = xanesAbsorb - self.diffFrom['projectBase'].spectrum.y
         if len(xanesAbsorb.shape) == 1: xanesAbsorb = xanesAbsorb.reshape(-1,1).T
         return xanesAbsorb
 
     def fit(self, sample):
-        sample = prepareSample(sample, self.diffFrom, self.exp, self.norm)
+        sample = prepareSample(sample, self.diffFrom, self.proj, self.samplePreprocessor, self.smoothType)
         self.xanes_energy = sample.energy
         self.sample = sample
-        cvRes = KFoldCrossValidation(self.regressor, sample, self.CVcount)
-        print(self.CVcount,' cross validation of regression:')
+        cvRes = KFoldCrossValidation(self.regressor, sample.spectra, sample.params, self.CVcount)
+        output = f'{self.CVcount} cross validation of regression:\n'
         for i in range(len(sample.paramNames)):
             pName = sample.paramNames[i]
-            print(pName, 'relToConstPredError = %5.3g RMSE = %5.3g' % (cvRes[pName]['relToConstPredError'], cvRes[pName]['RMSE']))
-
+            output += f'{pName} relToConstPredError = {cvRes[pName]["relToConstPredError"]:5.3f} RMSE = {cvRes[pName]["RMSE"]}\n'
+        print(output)
+        self.cv_output = output
         self.regressor.fit(sample.spectra, sample.params)
 
         # probability approach
@@ -264,11 +283,15 @@ class Estimator:
         folderToSaveResult = utils.fixPath(folderToSaveResult)
         xanesAbsorb = self.prepareSpectrumForPrediction(spectrum, smooth)
         predRegr = self.regressor.predict(xanesAbsorb).reshape((self.paramNames.size,))
+        output = ''
         for j in range(self.paramNames.size):
             paramName = self.paramNames[j]
             predProba = self.classifiers[j].predict_proba(xanesAbsorb)[0]
-            print(paramName,'=',predRegr[j])
+            output += f'{paramName} = {predRegr[j]}\n'
             plotting.plotDirectMethodResult(predRegr[j], predProba, paramName, self.paramRanges[j], folder=folderToSaveResult)
+        print(output)
+        with open(f'{folderToSaveResult}/result_summary.txt', 'w') as f:
+            f.write(self.cv_output+'\n'+output)
         for j in range(self.paramNames.size):
             pn = self.paramNames[j]
             pv = predRegr[j]; a,b = self.paramRanges[j]
@@ -277,103 +300,65 @@ class Estimator:
             if pv>b: predRegr[j] = b
         predByParamNames = {self.paramNames[j]:predRegr[j] for j in range(self.paramNames.size)}
         molecula = None
-        if self.exp.moleculeConstructor is not None:
-            molecula = self.exp.moleculeConstructor(predByParamNames)
+        if self.proj.moleculeConstructor is not None:
+            molecula = self.proj.moleculeConstructor(predByParamNames)
             if molecula is None:
                 warnings.warn("Can't construct molecula for predicter parameter set")
             else:
                 molecula.export_xyz(folderToSaveResult+'/molecule.xyz')
-                fdmnes.generateInput(molecula, **self.exp.FDMNES_calc, folder=folderToSaveResult+'/fdmnes')
+                fdmnes.generateInput(molecula, **self.proj.FDMNES_calc, folder=folderToSaveResult + '/fdmnes')
         if calcXanes is not None:
             if 'inverseEstimator' in calcXanes:
                 inverseEstimator = calcXanes['inverseEstimator']
-                xanesPred = inverseEstimator.predict(predRegr.reshape(1, -1)).reshape(self.exp.spectrum.energy.size)
-                xanesPred = utils.Spectrum(self.exp.spectrum.energy, xanesPred.reshape(xanesPred.size))
+                xanesPred = inverseEstimator.predict(predRegr.reshape(1, -1)).reshape(-1)
+                xanesPred = utils.Spectrum(inverseEstimator.proj.spectrum.x, xanesPred)
                 if self.diffFrom is None:
-                    plotting.plotToFolder(folderToSaveResult, self.exp, None, xanesPred, fileName='xanesApproximation')
+                    plotting.plotToFile(spectrum.x, spectrum.y, 'exp', xanesPred.x, xanesPred.y, 'predicted approx', fileName=f'{folderToSaveResult}/predictedApprox.png',  xlim=self.proj.intervals['plot'])
                 else:
-                    plotting.plotToFolder(folderToSaveResult, self.expDiff, None, xanesPred, fileName='xanesDiffApproximation')
+                    plotting.plotToFolder(folderToSaveResult, self.expDiff, None, xanesPred, fileName='xanesDiffApproximation', xlim=self.proj.intervals['plot'])
             if ('local' in calcXanes) and (molecula is not None):
                 if calcXanes['local']: fdmnes.runLocal(folderToSaveResult+'/fdmnes')
                 else: fdmnes.runCluster(folderToSaveResult+'/fdmnes', calcXanes['memory'], calcXanes['nProcs'])
                 xanes = fdmnes.parseOneFolder(folderToSaveResult + '/fdmnes')
-                smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(self.exp.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', self.exp, self.norm)
-                with open(folderToSaveResult+'/args_smooth.txt', 'w') as f: json.dump(self.exp.defaultSmoothParams['fdmnes'], f)
+                smoothed_xanes, _ = smoothLib.funcFitSmoothHelper(self.proj.defaultSmoothParams['fdmnes'], xanes, 'fdmnes', self.proj, self.norm)
+                with open(folderToSaveResult+'/args_smooth.txt', 'w') as f: json.dump(self.proj.defaultSmoothParams['fdmnes'], f)
                 if self.diffFrom is None:
-                    plotting.plotToFolder(folderToSaveResult, self.exp, None, smoothed_xanes, fileName='xanes')
+                    plotting.plotToFolder(folderToSaveResult, self.proj, None, smoothed_xanes, fileName='xanes')
                 else:
-                    plotting.plotToFolder(folderToSaveResult, self.exp, None, smoothed_xanes, fileName='xanes', append=[{'data':self.diffFrom['spectrumBase'].intensity, 'label':'spectrumBase'}, {'data':self.diffFrom['projectBase'].spectrum.intensity, 'label':'expBase'}])
-                    smoothed_xanes.intensity = (smoothed_xanes.intensity - self.diffFrom['spectrumBase'].intensity)*self.diffFrom['purity']
-                    # print(smoothed_xanes.intensity)
+                    plotting.plotToFolder(folderToSaveResult, self.proj, None, smoothed_xanes, fileName='xanes', append=[{'data':self.diffFrom['spectrumBase'].y, 'label': 'spectrumBase'}, {'data':self.diffFrom['projectBase'].spectrum.y, 'label': 'expBase'}])
+                    smoothed_xanes.y = (smoothed_xanes.y - self.diffFrom['spectrumBase'].y)*self.diffFrom['purity']
+                    # print(smoothed_xanes.y)
                     plotting.plotToFolder(folderToSaveResult, self.expDiff, None, smoothed_xanes, fileName='xanesDiff')
 
-    def predictRDF(self, spectrum, folderToSaveResult, atoms=None, smooth=True, check=False, extraMolecules={}):
+    def predictRDF(self, spectrum, folderToSaveResult, atoms=None, smooth=True, extraMolecules={}):
         # atoms can be list of indices or atom name (string)
         folderToSaveResult = utils.fixPath(folderToSaveResult)
         if not os.path.exists(folderToSaveResult): os.makedirs(folderToSaveResult)
         if not hasattr(self, 'sample'):
             raise Exception('You should train estimator first')
+        xanesAbsorb = self.prepareSpectrumForPrediction(spectrum, smooth)
+        spectrum = utils.Spectrum(self.xanes_energy, xanesAbsorb.flatten())
         sample = copy.deepcopy(self.sample)
-        if check:
-            spectrum = utils.Spectrum(sample.energy, sample.spectra.values[0])
-            trueParams = sample.params.loc[0]
-            trueParams = {sample.paramNames[j]: trueParams[j] for j in range(sample.params.shape[1])}
-            sample.spectra.drop(0, axis=0, inplace=True)
-            sample.spectra.reset_index(drop=True, inplace=True)
-            sample.params.drop(0, axis=0, inplace=True)
-            sample.params.reset_index(drop=True, inplace=True)
         regressor = copy.deepcopy(self.regressor)
         for i in range(sample.params.shape[0]):
             geom = sample.params.loc[i]
             geom = {sample.paramNames[j]: geom[j] for j in range(sample.params.shape[1])}
-            m = self.exp.moleculeConstructor(geom)
+            m = self.proj.moleculeConstructor(geom)
             dists = m.getSortedDists(atoms)
             if i == 0: newParams = np.zeros((sample.params.shape[0], dists.size))
             newParams[i,:] = dists
-        newNames = ['dist_to_' + str(i) for i in range(newParams.shape[1])]
-        sample.params = pd.DataFrame(data=newParams, columns=newNames)
-        sample.paramNames = newNames
+        if extraMolecules is not None:
+            cvRes = KFoldCrossValidation(regressor, sample.spectra, newParams, 4)
+            RMSE = np.array([cvRes[pName]['RMSE'] for pName in range(newParams.shape[1])])
+            RMSE[RMSE <= 1e-3] = 1e-3
+            arg = np.linspace(np.max([0, newParams.min() - 3 * RMSE[0]]), newParams.max() + 3 * RMSE[-1], 100)
 
-        cvRes = KFoldCrossValidation(regressor, sample, 4)
-        RMSE = np.array([cvRes[pName]['RMSE'] for pName in sample.paramNames])
-        RMSE[RMSE <= 1e-3] = 1e-3
-        relToConstPredError = np.array([cvRes[pName]['relToConstPredError'] for pName in sample.paramNames])
-
-        regressor.fit(sample.spectra, sample.params)
-        if check:
-            xanesAbsorb = spectrum.intensity.reshape(1, -1)
-        else:
-            xanesAbsorb = self.prepareSpectrumForPrediction(spectrum, smooth)
-        predictedDists = regressor.predict(xanesAbsorb).reshape(-1)
-        arg = np.linspace(np.max([0,predictedDists[0]-3*RMSE[0]]), predictedDists[-1]+3*RMSE[-1], 100)
-        arg = np.append(arg, predictedDists)
-        arg = np.sort(arg)
-        predictedRdf = np.zeros(arg.size)
-        for i in range(predictedDists.size):
-            print("r_{} = {:.3g} ± {:.4g}".format(i,predictedDists[i], RMSE[i]))
-            predictedRdf += utils.gauss(arg, predictedDists[i], RMSE[i])/arg**2
-        fig, ax = plotting.createfig(interactive=True)
-        funcName = 'rdf'; funcParams = {'sigma':np.min(RMSE), 'atoms':atoms}
-        for mname in extraMolecules:
-            ax.plot(arg, getattr(extraMolecules[mname], funcName)(arg, **funcParams), lw=2, label=mname)
-        ax.plot(arg, predictedRdf, lw=2, color='r', label='predicted ' + funcName)
-        ax.plot(predictedDists, np.zeros(predictedDists.size), 'rP', ms=15, label='predicted dists')
-        if check:
-            m = self.exp.moleculeConstructor(trueParams)
-            dists = m.getSortedDists(atoms)
-            trueRdf = getattr(m, funcName)(arg, **funcParams)
-            ax.plot(arg, trueRdf, lw=2, color='k', label='true ' + funcName)
-            ax.plot(dists, np.zeros(dists.size), 'kP', ms=15, label='predicted dists')
-        ax.legend()
-        plotting.savefig(folderToSaveResult + os.sep + funcName + '.png', fig)
-        plotting.closefig(fig, interactive=True)
-
-        plotData = pd.DataFrame()
-        # plotData['r'] = arg
-        plotData['predicted_dists'] = predictedDists
-        plotData['RMSE'] = RMSE
-        plotData['relToConstPredError'] = relToConstPredError
-        plotData.to_csv(folderToSaveResult + os.sep + funcName + '.csv', sep=' ', index=False)
+            def plotMoreFunction(ax):
+                funcParams = {'sigma': np.min(RMSE), 'atoms': atoms}
+                for mname in extraMolecules:
+                    ax.plot(arg, extraMolecules[mname].rdf(arg, **funcParams), lw=2, label=mname)
+        else: plotMoreFunction=None
+        predictRDF(spectrum, sample.spectra, newParams, regressor, folderToSaveResult, plotMoreFunction=plotMoreFunction)
 
     def predictMoleculeFunction(self, spectrum, folderToSaveResult, smooth=True, check=False, extraMolecules={}, funcName='rdf', valMin=0, valMax=1, valCount=20, funcParams={}, **otherParams):
         # default parameters
@@ -400,19 +385,19 @@ class Estimator:
         for i in range(sample.params.shape[0]):
             geom = sample.params.loc[i]
             geom = {sample.paramNames[j]: geom[j] for j in range(sample.params.shape[1])}
-            m = self.exp.moleculeConstructor(geom)
+            m = self.proj.moleculeConstructor(geom)
             newParams[i] = getattr(m, funcName)(arg, **funcParams)
         newNames = [argName + '_' + str(arg[i]) for i in range(valCount)]
         sample.params = pd.DataFrame(data=newParams, columns=newNames)
         sample.paramNames = newNames
 
-        cvRes = KFoldCrossValidation(regressor, sample, 4)
+        cvRes = KFoldCrossValidation(regressor, sample.spectra, sample.params, 4)
         RMSE = np.array([cvRes[pName]['RMSE'] for pName in sample.paramNames])
         relToConstPredError = np.array([cvRes[pName]['relToConstPredError'] for pName in sample.paramNames])
 
         regressor.fit(sample.spectra, sample.params)
         if check:
-            xanesAbsorb = spectrum.intensity.reshape(1, -1)
+            xanesAbsorb = spectrum.y.reshape(1, -1)
         else:
             xanesAbsorb = self.prepareSpectrumForPrediction(spectrum, smooth)
         predictedRdf = regressor.predict(xanesAbsorb).reshape(-1)
@@ -422,7 +407,7 @@ class Estimator:
             ax.plot(arg, getattr(extraMolecules[mname], funcName)(arg, **funcParams), lw=2, label=mname)
         ax.plot(arg, predictedRdf, lw=2, color='r', label='predicted ' + funcName)
         if check:
-            m = self.exp.moleculeConstructor(trueParams)
+            m = self.proj.moleculeConstructor(trueParams)
             trueRdf = getattr(m, funcName)(arg, **funcParams)
             ax.plot(arg, trueRdf, lw=2, color='k', label='true ' + funcName)
         ax.legend()
@@ -445,6 +430,37 @@ class Estimator:
     # if smooth=True then prediction is made for (smooth(spectrum)-smooth(spectrumBase))*purity
     def predictAngleDF(self, spectrum, folderToSaveResult, atoms, smooth=True, angleCount=20, sigma=0.2, check=False, extraMolecules={}):
         self.predictMoleculeFunction(spectrum, folderToSaveResult, smooth=smooth, check=check, extraMolecules=extraMolecules, funcName='adf', valMin=0, valMax=180, valCount=angleCount, funcParams={'sigma':sigma, 'atoms':atoms})
+
+
+def predictRDF(spectrum, spectra, dists, regressor=None, fileName='rdf.png', plotMoreFunction=None):
+    if isinstance(dists, pd.DataFrame): dists = dists.to_numpy()
+    assert np.all(dists>0.1)
+    if isinstance(spectra, pd.DataFrame):
+        energy = utils.getEnergy(spectra)
+        spectrum = spectrum.changeEnergy(energy)
+    else:
+        assert len(spectrum.x) == spectra.shape[1]
+    if regressor is None:
+        # RBF predict wrong dists order
+        regressor = getMethod('Extra Trees')
+    cvRes = KFoldCrossValidation(regressor, spectra, dists, 4)
+    RMSE = np.array([cvRes[pName]['RMSE'] for pName in range(dists.shape[1])])
+    RMSE[RMSE <= 1e-3] = 1e-3
+    relToConstPredError = np.array([cvRes[pName]['relToConstPredError'] for pName in range(dists.shape[1])])
+    print('relToConstPredError =', relToConstPredError)
+
+    regressor.fit(spectra, dists)
+    predictedDists = regressor.predict(spectrum.y.reshape(1,-1)).reshape(-1)
+    if np.any(predictedDists[1:]>predictedDists[:-1]):
+        print('Warning: predicted dists are not ordered!')
+    arg = np.linspace(np.max([0, predictedDists.min() - 3 * RMSE.max()]), predictedDists.max() + 3 * RMSE.max(), 100)
+    arg = np.append(arg, predictedDists)
+    arg = np.sort(arg)
+    predictedRdf = np.zeros(arg.size)
+    for i in range(predictedDists.size):
+        print("r_{} = {:.3g} ± {:.4g}".format(i, predictedDists[i], RMSE[i]))
+        predictedRdf += utils.gauss(arg, predictedDists[i], RMSE[i]) / arg ** 2
+    plotting.plotToFile(arg, predictedRdf, {'lw':2, 'color':'r', 'label':'predicted RDF'}, predictedDists, np.zeros(predictedDists.size), {'fmt':'rP', 'ms':15, 'label':'predicted dists'}, fileName=fileName, plotMoreFunction=plotMoreFunction, showInNotebook=True)
 
 
 # geometryParam can be a name or dict: {'type':'RDF' or 'AngleDF', 'value':.., 'params':{'sigma':.., 'atomName':..}}
@@ -474,8 +490,8 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
                 m = project.moleculeConstructor(geom)
                 newParam[i] = getattr(m, funcName)(np.array([value]), **complexGeometryParam['params'])
             sample.params[geometryParam] = newParam
-    sampleTrain = prepareSample(sampleTrain, diffFrom, project, norm=None)
-    sampleTest = prepareSample(sampleTest, diffFrom, project, norm=None)
+    sampleTrain = prepareSample(sampleTrain, diffFrom, project, None, 'fdmnes')
+    sampleTest = prepareSample(sampleTest, diffFrom, project, None, 'fdmnes')
     if (energyPoint < sampleTrain.energy[0]) or (energyPoint > sampleTrain.energy[-1]):
         raise Exception('energyPoint doesn\'t belong to experiment energy interval ['+str(sampleTrain.energy[0])+'; '+str(sampleTrain.energy[-1])+']')
     energyColumn = sampleTrain.spectra.columns[np.argmin(np.abs(sampleTrain.energy-energyPoint))]
@@ -490,7 +506,7 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
         method = getMethod(methodName)
         if normalize: method = ML.Normalize(method, xOnly=False)
         if CVcount >= 2:
-            cvRes = KFoldCrossValidation(method, sampleTrain, CVcount)
+            cvRes = KFoldCrossValidation(method, sampleTrain.spectra, sampleTrain.params, CVcount)
             print('\n',methodName,'cross validation of regression:')
             for i in range(len(sampleTrain.paramNames)):
                 pName = sampleTrain.paramNames[i]
@@ -510,7 +526,6 @@ def compareDifferentMethods(sampleTrain, sampleTest, energyPoint, geometryParam,
     ax.set_ylabel(geometryParam)
     ax.legend()
     plotting.savefig(folderToSaveResult+os.sep+'compareDifferentMethodsDirect.png', fig)
-    # if matplotlib.get_backend() != 'nbAgg': plt.close(fig)  # - sometimes figure is not shown
 
     fig2, ax2 = plotting.createfig()
     for methodName in allowedMethods:
