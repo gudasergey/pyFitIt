@@ -1,6 +1,6 @@
 import numpy as np
 import os, tempfile, json, shutil, copy, re
-from . import utils, geometry, curveFitting
+from . import utils
 
 
 def getPotentials(molecule, absorber, separatePotentials, feffVersion):
@@ -249,6 +249,7 @@ def parseOneFolder(folder, multipleAbsorber=False, xanesProcessingParams=None):
                     a,b = xanesProcessingParams['normalizeCrossFadeInterval']
                     a += edge_e
                     b += edge_e
+                    from . import curveFitting
                     s.y = curveFitting.crossfade(s.x, s.y, s.y-norm.y+1, a, b)
             elif xanesProcessingParams['return'] == 'mu0':
                 s = utils.readSpectrum(xanesFile, guess=True, energyColumn=0, intensityColumn=4, xName='energy', yName='intensity')

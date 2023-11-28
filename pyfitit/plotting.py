@@ -1,7 +1,6 @@
 from . import utils
 utils.fixDisplayError()
 import os, warnings, json, matplotlib, sklearn, seaborn, cycler, logging, scipy.spatial.distance, copy
-from . import optimize, ML
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -69,6 +68,7 @@ def plotToFolder(folder, exp, xanes0, smoothed_xanes, append=None, fileName='', 
     if shift is None:
         if os.path.isfile(folder+'/args_smooth.txt'):
             with open(folder+'/args_smooth.txt', 'r') as f: smooth_params = json.load(f)
+            from . import optimize
             if type(smooth_params) is list: shift = optimize.value(smooth_params,'shift')
             else: shift = smooth_params['shift']
         else:
@@ -346,7 +346,9 @@ def readPlottingFile(fileName):
     return d
 
 
-def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryParams, xanes, N=20, estimator=ML.Normalize(ML.makeQuadric(ML.RidgeCV(alphas=[0.01,0.1,1,10,100])), xOnly=False) ):
+def xanesEvolution(centerPoint, axisName, axisRange, outputFileName, geometryParams, xanes, N=20, estimator=None):
+    from . import ML
+    if estimator is None: estimator = ML.Normalize(ML.makeQuadric(ML.RidgeCV(alphas=[0.01,0.1,1,10,100])), xOnly=False)
     paramNames = geometryParams.columns
     centerPoint = np.array([centerPoint[p] for p in paramNames])
     axisInd = np.where(paramNames==axisName)[0][0]
@@ -406,7 +408,10 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
     :param highlight_inds: indexes of spectra to highlight
     :param kw: figure params (see function setFigureSettings)
     """
-    assert len(energy) == spectra.shape[1]
+    from . import ML
+    if isinstance(spectra, pd.DataFrame): spectra = spectra.to_numpy()
+    if energy is None: assert isinstance(spectra,list) and isinstance(spectra[0], utils.Spectrum)
+    else: assert len(energy) == spectra.shape[1]
     if highlight_inds is None: highlight_inds = []
     spectra_inds = np.arange(len(spectra))
     if isinstance(spectra, pd.DataFrame): spectra = spectra.to_numpy()
@@ -419,7 +424,7 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
         spectra0 = spectra
         spectra_inds0 = spectra_inds
         colorParam = colorParam[~indNan]
-        spectra = spectra[~indNan]
+        spectra = [spectra[i] for i in np.where(~indNan)[0]]
         spectra_inds = spectra_inds[~indNan]
         if nanExists and not plotNaN: nanExists = False
         if len(colorParam) == 0: nanExists = True
@@ -429,13 +434,13 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
         assert colorParam is not None
         ind = np.argsort(colorParam)
     else:
-        ind = np.random.permutation(spectra.shape[0])
-    spectra = spectra[ind]
+        ind = np.random.permutation(len(spectra))
+    spectra = [spectra[i] for i in ind]
     spectra_inds = spectra_inds[ind]
 
     fig, ax = createfig(interactive=True)
     if colorParam is not None and len(colorParam)>0:
-        assert len(colorParam) == spectra.shape[0]
+        assert len(colorParam) == len(spectra)
         if colorParam.dtype != float:
             colors, labelMap = ML.encode(colorParam)
             colors = colors / (len(labelMap)-1)
@@ -463,21 +468,27 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
             ticksPos = transform(ticks)
         addColorBar(mappable=plt.cm.ScalarMappable(norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap=colorMap), fig=fig, ax=ax, labelMaps={}, label='', ticksPos=ticksPos, ticks=ticks, format=colorBarFormat, colorBarLabel=colorBarLabel)
     else:
-        colors = ['k']*spectra.shape[0]
+        colors = ['k']*len(spectra)
         ax.set_prop_cycle(cycler.cycler('color', colors))
 
     if alpha is None: alpha = getDefaultSpectraAlpha(len(spectra))
-    for i in range(spectra.shape[0]):
+    for i in range(len(spectra)):
         lw = 3 if spectra_inds[i] in highlight_inds else 0.5
-        ax.plot(energy, spectra[i], lw=lw, alpha=alpha)
+        if energy is None: e,s = spectra[i].x, spectra[i].y
+        else: e,s = energy, spectra[i]
+        ax.plot(e, s, lw=lw, alpha=alpha)
     if nanExists:
         for i in np.where(indNan)[0]:
             lw = 3 if spectra_inds0[i] in highlight_inds else 0.5
-            ax.plot(energy, spectra0[i], color='k', lw=lw, alpha=alpha)
+            if energy is None: e, s = spectra0[i].x, spectra0[i].y
+            else: e, s = energy, spectra0[i]
+            ax.plot(e, s, color='k', lw=lw, alpha=alpha)
     else:
         # plot only highlight
         for i in set(highlight_inds) & set(np.where(indNan)[0]):
-            ax.plot(energy, spectra0[i], color='k', lw=3, alpha=alpha)
+            if energy is None: e, s = spectra0[i].x, spectra0[i].y
+            else: e, s = energy, spectra0[i]
+            ax.plot(e, s, color='k', lw=3, alpha=alpha)
 
     setFigureSettings(ax, **kw)
     if fileName is not None:
@@ -607,6 +618,7 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     :param plotMoreFunction: function(ax)
     :return:
     """
+    from . import ML
     if isinstance(x, pd.Series): x = x.to_numpy()
     if isinstance(y, pd.Series): y = y.to_numpy()
     if isinstance(color, pd.Series): color = color.to_numpy()

@@ -3,7 +3,6 @@ import numpy as np
 from lmfit.models import ExpressionModel, PolynomialModel
 from . import utils, molecule, larch, geometry, plotting, xraydb
 from .larch import xafs
-from .larch.math.utils import index_nearest
 import matplotlib.pyplot as plt
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import PolynomialFeatures
@@ -333,6 +332,8 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
     ind_fit = ind_full & ~ind_peak
     ind_fit_left = (baseFitInterval[0] <= x) & (x < peakInterval[0])
     ind_fit_right = (peakInterval[1] < x) & (x <= baseFitInterval[1])
+    assert np.sum(ind_fit_left)>=1, f'Too few points in the left part of the baseFitInterval {baseFitInterval}. peakInterval = {peakInterval}'
+    assert np.sum(ind_fit_right)>=1, f'Too few points in the right part of the baseFitInterval {baseFitInterval}. peakInterval = {peakInterval}'
     x_peak = x[ind_peak]; y_peak = y[ind_peak]
     x_fit = x[ind_fit]; y_fit = y[ind_fit]
     x_full = x[ind_full]
@@ -722,6 +723,14 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
     # Step 4: peak interval refinement
     def refineIntervals(preedgeInterval0, iter):
         preedgeInterval = copy.deepcopy(preedgeInterval0)
+        def finalCorrection(preedgeInterval):
+            preedgeInterval = copy.deepcopy(preedgeInterval)
+            ind = (initialPeakInterval[0] <= x_full) & (x_full < preedgeInterval[0])
+            if np.sum(ind) <= 1: preedgeInterval[0] = x_full[initialPeakInterval[0] <= x_full][2]
+            ind = (preedgeInterval[1] < x_full) & (x_full <= initialPeakInterval[1])
+            if np.sum(ind) <= 1: preedgeInterval[1] = x_full[x_full <= initialPeakInterval[1]][-3]
+            return preedgeInterval
+
         def findPeaks(level):
             xz, ind, monot = findZeros(x_full, errCorner - level)
             if xz is None: return preedgeInterval
@@ -737,7 +746,7 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
                 peaks.append({'height':height, 'width':width, 'area':area, 'pos':(xz[i+1]+xz[i])/2, 'region':[x_full[im1], x_full[im2]]})
             return peaks
         peaks = findPeaks(MerrCorner*refinePeakLevel)
-        if len(peaks) == 0: return preedgeInterval
+        if len(peaks) == 0: return finalCorrection(preedgeInterval)
         i_best = np.argmax([p['area'] for p in peaks])
         preedgePeaksInd = [i_best]
         largestPeakWidth = peaks[i_best]['width']
@@ -764,6 +773,7 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
                 if len(newPreedgePeaksInd) == len(preedgePeaksInd): break
                 preedgePeaksInd = newPreedgePeaksInd
             return preedgePeaksInd
+
         preedgePeaksInd = addMany(preedgePeaksInd)
         preedgeInterval = [peaks[preedgePeaksInd[0]]['region'][0], peaks[preedgePeaksInd[-1]]['region'][1]]
         if debug: print('preedgeInterval after large peaks analysis:', preedgeInterval)
@@ -777,16 +787,15 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         if debug: print('old level =', MerrCorner*refinePeakLevel, ' new level =', newLevel)
         if newLevel < MerrCorner*refinePeakLevel:
             peaks = findPeaks(max(MerrCorner*refinePeakLevel2, noiseLevel*3))
-            if len(peaks) == 0: return preedgeInterval
+            if len(peaks) == 0: return finalCorrection(preedgeInterval)
             intersectPreedge = lambda peak: np.any(preedgeInterval[0] <= peak['region']) and np.any(peak['region']<=preedgeInterval[1])
             preedgePeaksInd = [i for i in range(len(peaks)) if intersectPreedge(peaks[i])]
-            if len(preedgePeaksInd) == 0: return preedgeInterval
+            if len(preedgePeaksInd) == 0: return finalCorrection(preedgeInterval)
             preedgePeaksInd = list(range(preedgePeaksInd[0], preedgePeaksInd[-1]+1))
             preedgePeaksInd = addMany(preedgePeaksInd)
             preedgeInterval = [peaks[preedgePeaksInd[0]]['region'][0], peaks[preedgePeaksInd[-1]]['region'][1]]
             if debug: print('preedgeInterval after all peaks analysis:', preedgeInterval)
-        if np.sum(x_full<preedgeInterval[0]) <= 1: preedgeInterval[0] = x_full[2]
-        if np.sum(x_full>preedgeInterval[1]) <= 1: preedgeInterval[1] = x_full[-3]
+        preedgeInterval = finalCorrection(preedgeInterval)
 
         if plotFileName is not None:
             getIntervalPlot = lambda d, name: ([d[0], d[0], d[1], d[1]], [y_full[-1], 0, 0, y_full[-1]], name)

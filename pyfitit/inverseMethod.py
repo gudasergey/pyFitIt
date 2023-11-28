@@ -9,7 +9,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.model_selection import KFold
 from shutil import copyfile
-from . import plotting, ML, optimize, smoothLib, fdmnes, curveFitting, funcModel
+from . import plotting, ML, optimize, smoothLib, fdmnes, curveFitting
 from .funcModel import FuncModel
 
 
@@ -62,7 +62,7 @@ def prepareSample(sample0, diffFrom, proj, samplePreprocessor, smoothType):
         assert utils.inside(sample.params[pn], proj.geometryParamRanges[pn]), 'Project param ranges don\'t correspond to sample'
     if isinstance(samplePreprocessor, dict):
         convolutionParams = samplePreprocessor
-        sample.spectra = smoothLib.smoothDataFrame(convolutionParams, sample.spectra, smoothType, proj.spectrum, proj.intervals['fit_norm'], folder=sample.folder)
+        sample.spectra = smoothLib.smoothDataFrame(convolutionParams, sample.spectra, smoothType, proj.spectrum, proj.intervals['fit_norm'])
     else:
         if samplePreprocessor is not None:
             sample = samplePreprocessor(sample)
@@ -145,13 +145,13 @@ class Estimator:
             self.geometryParamRanges[pName] = [np.min(sample.params[pName]), np.max(sample.params[pName])]
         sample_cv = sample.limit(energyRange=self.proj.intervals['fit_geometry'], inplace=False)
         res, individualSpectrErrors, predictions = ML.crossValidation(self.regressor, sample_cv.params, sample_cv.spectra, CVcount=self.CVcount, YColumnWeights=sample_cv.convertEnergyToWeights())
-        m = self.expSpectrum.changeEnergy(sample_cv.energy).y
-        true_rFactor = np.array([utils.rFactor(sample_cv.getEnergy(), sample_cv.spectra.loc[i].to_numpy(), m) for i in range(len(sample_cv))])
-        predicted_rFactor = np.array([utils.rFactor(sample_cv.getEnergy(), predictions[i], m) for i in range(len(sample_cv))])
-        rFactorError = np.mean(np.abs(predicted_rFactor-true_rFactor))
+        # m = self.expSpectrum.changeEnergy(sample_cv.energy).y
+        # true_rFactor = np.array([utils.rFactor(sample_cv.getEnergy(), sample_cv.spectra.loc[i].to_numpy(), m) for i in range(len(sample_cv))])
+        # predicted_rFactor = np.array([utils.rFactor(sample_cv.getEnergy(), predictions[i], m) for i in range(len(sample_cv))])
+        # rFactorError = np.mean(np.abs(predicted_rFactor-true_rFactor))
         output = 'Inverse method relative to constant prediction error = %5.3g\n' % res
-        output += f'Mean rFactor error = {rFactorError}. rFactor - is an optimized function in findGlobalL2NormMinimum\n'
-        output += f'Median rFactor = {np.median(true_rFactor)}. Can be taken as unit for sensitivity comparison\n'
+        # output += f'Mean rFactor error = {rFactorError}. rFactor - is an optimized function in findGlobalL2NormMinimum\n'
+        # output += f'Median rFactor = {np.median(true_rFactor)}. Can be taken as unit for sensitivity comparison\n'
         print(output)
         if self.smoothType == 'optical' and self.norm is not None:
             assert 'SeparateNorm' in self.regressor.name, self.regressor.name
@@ -347,8 +347,15 @@ def findGlobalL2NormMinimumMixture(trysCount, estimatorList, folderToSaveResult,
 
     def distToExperiment(mixtureSpectrum, allArgs):
         assert len(mixtureSpectrum) == len(e0)
-        rFactor = utils.rFactor(e0_geom, mixtureSpectrum[ind_geom], expXanes_geom)
-        return rFactor
+        arg = (e0_geom-e0_geom[0]) / (e0_geom[-1]-e0_geom[0])
+        y1 = mixtureSpectrum[ind_geom]
+        dy1 = y1.max()-y1.min()
+        y2 = expXanes_geom
+        dy2 = y2.max()-y2.min()
+        dy = max(dy1, dy2)
+        if dy>0: y1, y2 = y1/dy, y2/dy
+        # rFactor = utils.rFactor(e0_geom, mixtureSpectrum[ind_geom], expXanes_geom)
+        return utils.integral(arg, np.abs(y1-y2))
 
     def paramNames():
         if gaussComponents and fitGaussComponentParams:

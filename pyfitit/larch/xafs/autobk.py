@@ -8,9 +8,9 @@ from lmfit import Parameter, Parameters, minimize, fit_report
 
 import uncertainties
 
-from pyfitit.larch import (Group, Make_CallArgs, parse_group_args, isgroup)
+from ...larch import (Group, Make_CallArgs, parse_group_args, isgroup)
 
-from pyfitit.larch.math import index_of, index_nearest, realimag, remove_dups
+from ...larch.math import index_of, index_nearest, realimag, remove_dups
 
 from .xafsutils import ETOK, set_xafsGroup
 from .xafsft import ftwindow, xftf_fast

@@ -6,16 +6,15 @@ import copy
 
 import numpy as np
 from scipy.special import erfc
-import pyfitit
 from time import time
-from pyfitit.xraydb import (xray_edge, xray_line, xray_lines,
+from ...xraydb import (xray_edge, xray_line, xray_lines,
                     f1_chantler, f2_chantler, guess_edge,
                     atomic_number, atomic_symbol)
 from lmfit import Parameter, Parameters, minimize
 
-from pyfitit.larch import Group, isgroup, parse_group_args, Make_CallArgs
+from ...larch import Group, isgroup, parse_group_args, Make_CallArgs
 
-from pyfitit.larch.math import index_of, index_nearest, remove_dups, remove_nans2
+from ...larch.math import index_of, index_nearest, remove_dups, remove_nans2
 
 from .xafsutils import set_xafsGroup
 from .pre_edge import find_e0, preedge, pre_edge
@@ -34,6 +33,11 @@ def find_xray_line(z, edge):
                 intensity = value.intensity
                 line      = key
     return xray_line(z, line[:-1])
+
+
+def linearReg(x,y):
+    p = np.polyfit(x, y, deg=1)
+    return [p[1],p[0]]
 
 
 def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre2=-50,
@@ -164,7 +168,7 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
     # determine initial value for s
     ind = (norm1+e0 <= energy) & (energy <= min(norm2+e0, norm1+e0+200))
     if order >= 1:
-        b2, a2 = pyfitit.curveFitting.linearReg(energy[ind], mu[ind])
+        b2, a2 = linearReg(energy[ind], mu[ind])
         assert np.all(np.isfinite([b2,a2]))
         s_initial = (a2 * energy[p2] + b2) - mu[p2]
     else:
@@ -215,8 +219,6 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
         ind_post = (norm1+e0<=energy) & (energy<=norm2+e0)
         y = match_f2_helper(p)*weight
         y[~(ind_pre | ind_post)] = 0
-        # y = pyfitit.smoothLib.simpleSmooth(energy, y, 50, kernel='Gauss')
-        # return ( pyfitit.utils.integral(energy[ind_pre], np.abs(y[ind_pre])**20)/(pre2-pre1) )**(1/20)
         return np.max(np.abs(y[ind_pre]))
 
     method = 'Powell'  # leastsq Powell
@@ -282,12 +284,12 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
 
 def manual_normalizing(e, y, pre, post, f2_init):
     i2 = (post[0] <= e) & (e <= post[1])
-    b2, a2 = pyfitit.curveFitting.linearReg(e[i2], y[i2])
+    b2, a2 = linearReg(e[i2], y[i2])
     y = y - (a2 * e + b2)
     i1 = index_nearest(e, pre[1])
     a1 = y[i1]
     if a1 != 0: y = (y - a1) / np.abs(a1)
-    b2, a2 = pyfitit.curveFitting.linearReg(e[i2], f2_init[i2])
+    b2, a2 = linearReg(e[i2], f2_init[i2])
     f2 = f2_init - (a2 * e + b2)
     i1 = (pre[0] <= e) & (e <= pre[1])
     a1 = np.min(f2[i1])

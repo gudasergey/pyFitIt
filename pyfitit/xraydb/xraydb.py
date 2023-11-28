@@ -612,7 +612,7 @@ class XrayDB():
 
         """
         version_qy = self.tables['Version'].select().order_by('date')
-        version_id = version_qy.execute().fetchall()[-1].id
+        version_id = version_qy.execute().fetchall()[-1].mpi_id
 
         ctab = self.tables['corelevel_widths']
         if version_id < 4 or use_keski:

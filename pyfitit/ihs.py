@@ -6,7 +6,8 @@ import time
 
 def ihs (dim_num, n, d=5, seed=None):
     assert n > 0, str(n)
-    assert dim_num > 1, str(dim_num)
+    assert dim_num > 0, str(dim_num)
+    if dim_num == 1: return np.linspace(0.5,n-0.5,n).reshape(n,dim_num)+0.5
     if seed is None: seed = int(time.time()*1e7)
     if seed == 0: seed = 74836149
     res = ihs_helper (dim_num, n, d, seed)

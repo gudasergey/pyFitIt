@@ -358,7 +358,7 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
             type in [pca, rel_pca, scaled_pca] - usePrebuiltData=True/False, count, fileName (for prebuilt data)
             type=tsne - features(list) or spType with energyInterval, usePrebuiltData=True/False, count, fileName (for prebuilt data)
             type=pls - features(list) or spType with energyInterval, usePrebuiltData=True/False, count, fileName (for prebuilt data)
-            type=best_linear - features(list) or spType with energyInterval, usePrebuiltData=True/False, fileName (for prebuilt data), cv_parts, best_alpha (set it to None first), infoFile - file used to choose best_alpha (test score should be as much as possible, but approx. equal to train score!!!), baggingParams - if you need to use bagging, for example: dict(max_samples=0.1, max_features=1.0, n_estimators=10)
+            type=best_linear - features(list) or None (then spType with energyInterval used), usePrebuiltData=True/False, fileName (for prebuilt data), cv_parts, best_alpha (set it to None first), infoFile - file used to choose best_alpha (test score should be as much as possible, but approx. equal to train score!!!), baggingParams - if you need to use bagging, for example: dict(max_samples=0.1, max_features=1.0, n_estimators=10)
             type=polynom - deg
             type=moment - deg in [0,1,2,3,...]
             type=value - energies(list) - values of spectra in this energy points
@@ -1142,6 +1142,10 @@ def descriptorQuality(sample:ML.Sample, label_names=None, all_features=None, fea
     if all_features is None: all_features = sample.features
     assert set(label_names) < set(sample.params.columns)
     assert set(all_features) < set(sample.params.columns)
+    for fn in all_features:
+        assert np.all(pd.notna(sample.params[fn])), f'Feature {fn} contains NaN values'
+    for fn in label_names:
+        assert np.all(pd.notna(sample.params[fn])), f'Label {fn} contains NaN values'
     mix = makeMixtureParams is not None
     if mix:
         assert labelMaps is None, 'We decode all features to make mixture. Set labelMaps=None'
@@ -1371,7 +1375,7 @@ def plotDescriptors2d(data, descriptorNames, labelNames, labelMaps=None, folder_
         assert np.all(pd.notnull(labelData))
         c_min = np.min(labelData); c_max = np.max(labelData)
         if c_min == c_max:
-            c_min = 0
+            c_min, c_max = 0, 1
             const = True
         else: const = False
         transform = lambda r: (r-c_min) / (c_max - c_min)
@@ -1412,7 +1416,9 @@ def plotDescriptors2d(data, descriptorNames, labelNames, labelMaps=None, folder_
 
         # known
         c = labelData
+        assert np.all(np.isfinite(c)), str(list(c))
         c = transform(c)
+        assert np.all(np.isfinite(c)), str(list(c))
         if edgecolor is None:
             edgecolor = ['#000' if np.mean(colorMap(ci)[:3])>0.5 else '#FFF' for ci in c]
         sc = ax.scatter(x, y, s=markersize**2, c=c, cmap=colorMap, vmin=0, vmax=1, alpha=alpha, linewidth=linewidth, edgecolor=edgecolor)
@@ -1453,7 +1459,9 @@ def plotDescriptors2d(data, descriptorNames, labelNames, labelMaps=None, folder_
         if np.any(textsize > 0):
             c = transform(labelData)
             if textcolor is None:
-                textcolor1 = ['#000' if np.mean(colorMap(ci)[:3]) > 0.5 else '#FFF' for ci in c]
+                if plot_only == '':
+                    textcolor1 = ['#000' if np.mean(colorMap(ci)[:3]) > 0.5 else '#FFF' for ci in c]
+                else:textcolor1 = ['#000']*len(c)
             else:
                 textcolor1 = textcolor
                 if not isinstance(textcolor1, list): textcolor1 = [textcolor1]*data.shape[0]

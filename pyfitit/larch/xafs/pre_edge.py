@@ -5,10 +5,10 @@
 import numpy as np
 
 from lmfit import Parameters, Minimizer
-from pyfitit.xraydb import guess_edge
-from pyfitit.larch import Group, Make_CallArgs, parse_group_args
+from ...xraydb import guess_edge
+from ...larch import Group, Make_CallArgs, parse_group_args
 
-from pyfitit.larch.math import index_of, index_nearest, remove_dups, remove_nans2
+from ...larch.math import index_of, index_nearest, remove_dups, remove_nans2
 from .xafsutils import set_xafsGroup
 
 MODNAME = '_xafs'

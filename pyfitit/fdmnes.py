@@ -161,9 +161,11 @@ def parseInput(d):
     lines = stripFdmnesFile(lastFile)
     lines_down = list(map(lambda a: a.lower(), lines))
 
-    i = lines_down.index('filout') if 'filout' in lines_down else None
-    if i is None:
-        i = lines_down.index('fileout') if 'fileout' in lines_down else None
+    i = None
+    for fileout_name in ['filout', 'fileout', 'file_out']:
+        if fileout_name in lines_down:
+            i = lines_down.index(fileout_name)
+            break
     if i is None: filout = 'fdmnes_out'
     else: filout = lines[i + 1]
 

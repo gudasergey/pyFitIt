@@ -17,9 +17,9 @@ from numpy import (pi, arange, zeros, ones, sin, cos,
 from scipy.fftpack import fft, ifft
 from scipy.special import i0 as bessel_i0
 
-from pyfitit.larch import (Group, Make_CallArgs, parse_group_args)
+from ...larch import (Group, Make_CallArgs, parse_group_args)
 
-from pyfitit.larch.math import complex_phase
+from ...larch.math import complex_phase
 from .xafsutils import set_xafsGroup, FT_WINDOWS_SHORT
 
 MODNAME = '_xafs'

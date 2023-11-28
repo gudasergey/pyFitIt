@@ -1,6 +1,6 @@
 from . import utils
 utils.fixDisplayError()
-import math, copy, os, json, hashlib, gc, scipy, statsmodels.nonparametric.kernel_regression
+import math, copy, os, json, gc, scipy, statsmodels.nonparametric.kernel_regression
 from . import fdmnes, optimize, plotting, curveFitting
 import numpy as np
 import pandas as pd

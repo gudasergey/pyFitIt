@@ -3,7 +3,6 @@ from IPython.core.display import display, Javascript
 from ipywidgets import widgets, HTML
 from . import utils, smoothLib, inverseMethod, optimize, ML, plotting, funcModel, curveFitting
 from .funcModel import FuncModel, ParamProperties
-from scipy.interpolate import Rbf
 import warnings, traceback, json
 import numpy as np
 from matplotlib.font_manager import FontProperties

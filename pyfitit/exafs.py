@@ -1,6 +1,6 @@
 import copy, scipy
 import numpy as np
-from . import utils, plotting
+from . import utils
 
 class Exafs:
     def __init__(self, k, chi):
@@ -156,6 +156,7 @@ def waveletTransform(k, chi, interval=None, sigma=1, eta=5, kmin=2.4, kmax=10.5,
         return (1 / np.sqrt(a)) * np.trapz(((chi1(k2) * np.conj(fz(a1[..., None] / a, eta, sigma)).T).T), k2, axis=0)
 
     def plot(kw, rw, w, fileName):
+        from . import plotting
         X_exp, Y_exp = np.meshgrid(kw, rw)
         fig, ax = plotting.createfig()
         C = ax.contourf(X_exp, Y_exp, w.T)

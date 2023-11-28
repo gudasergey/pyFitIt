@@ -2,7 +2,7 @@ from . import utils
 utils.fixDisplayError()
 import numpy as np
 import copy, os, json, io, matplotlib
-from . import plotting, ML, smoothLib, inverseMethod, optimize
+from . import plotting, ML, smoothLib, optimize
 from types import MethodType
 
 
@@ -453,6 +453,7 @@ class FuncModel:
             methodName = params['method']
 
             def getFittedEstimator():
+                from . import inverseMethod
                 method = inverseMethod.getMethod(methodName)
                 estimator = ML.Normalize(method, xOnly=False)
                 estimator.fit(sample.params.to_numpy(), sample.spectra.to_numpy())
@@ -494,6 +495,7 @@ class FuncModel:
                 norm = project.FDMNES_smooth['norm']
                 paramProperties['norm'] = {'type':'float', 'domain':[norm*0.5, norm*2], 'default':norm}
         paramProperties['energyRange'] = {'type':'range', 'domain':[expSpectrum.energy[0], expSpectrum.energy[-1]]}
+        from . import inverseMethod
         paramProperties['method'] = {'type': 'list', 'domain': inverseMethod.allowedMethods, 'default':'RBF'}
         paramProperties['not smoothed'] = {'type': 'bool', 'default': True}
         funcModel = FuncModel(function=xanesPredictorFunc, paramProperties=paramProperties, **kwargs)

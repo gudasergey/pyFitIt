@@ -6,6 +6,7 @@ import scipy, scipy.optimize
 from io import StringIO
 from . import utils
 
+
 def generateInput(molecule, struct_name, folder = ''):
     if folder == '':
         if not os.path.exists("./tmp"): os.makedirs("./tmp")

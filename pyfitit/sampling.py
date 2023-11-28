@@ -5,7 +5,7 @@ import copy, shutil, os, json, threading, itertools, traceback, glob
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from . import molecule, fdmnes, feff, adf, pyGDM, utils, ihs, w2auto, fdmnesTest, ML, plotting, adaptiveSampling, smoothLib, inverseMethod, vasp_rdf_energy
+from . import molecule, fdmnes, feff, adf, pyGDM, utils, ihs, w2auto, fdmnesTest, ML, plotting, adaptiveSampling, smoothLib, inverseMethod, vasp_rdf_energy, mpi
 
 
 knownPrograms = ['fdmnes', 'feff', 'adf', 'w2auto', 'fdmnesTest', 'pyGDM', 'vasp_rdf_energy']
@@ -55,6 +55,8 @@ def getRunner(name, runType):
 # spectrCalcParams = {RMAX:..., }
 # lineEdges = {'start':{...}, 'end':{...}} - for method='line'
 def generateInputFiles(ranges, moleculeConstructor, sampleCount, spectrCalcParams, spectralProgram='fdmnes', method='IHS', folder='sample', lineEdges=None, seed=0, debug=False):
+    mpi_id, mpi_count = mpi.getMPIinfo()
+    if mpi_id != 0: return
     if os.path.exists(folder): shutil.rmtree(folder)
     os.makedirs(folder, exist_ok=True)
     paramNames = [k for k in ranges]
@@ -110,9 +112,17 @@ def runUserDefined(cmd, folder='.'):
 # runType = 'local', 'run-cluster', 'user defined'
 def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, memory=5000, calcSampleInParallel=1, folder='sample', recalculateErrorsAttemptCount=0, continueCalculation=False):
     assert isKnown(spectralProgram), 'Unknown spectral program name: '+spectralProgram
+    mpi_id, mpi_count = mpi.getMPIinfo()
+    mpi.barrier(folder, 'before_calc_spectra')
     folders = os.listdir(folder)
     folders.sort()
     for i in range(len(folders)): folders[i] = os.path.join(folder, folders[i])
+    folders = [f for f in folders if os.path.isdir(f)]
+    mpi_folder_assigment = {f:i%mpi_count for i,f in enumerate(folders)}
+
+    def filterFolders(fs):
+        return [f for f in fs if mpi_id == mpi_folder_assigment[f]]
+    folders = filterFolders(folders)
 
     def calculateXANES(folder):
         try:
@@ -138,14 +148,16 @@ def calcSpectra(spectralProgram='fdmnes', runType='local', runCmd='', nProcs=1, 
             for i in range(len(folders)): calculateXANES(folders[i])
     if spectralProgram == 'pyGDM':
         return
-    _, _, _, badFolders = parseAllFolders(folder, spectralProgram, printOutput=not continueCalculation)
+    _, _, _, badFolders = parseAllFolders(folder, spectralProgram, printOutput=not continueCalculation and mpi_count==1)
+    badFolders = filterFolders(badFolders)
     recalculateAttempt = 1
     while (recalculateAttempt <= recalculateErrorsAttemptCount) and (len(badFolders) > 0):
         if calcSampleInParallel > 1:
             threadPool.map(calculateXANES, badFolders)
         else:
             for i in range(len(badFolders)): calculateXANES(badFolders[i])
-        _, _, _, badFolders = parseAllFolders(folder, spectralProgram)
+        _, _, _, badFolders = parseAllFolders(folder, spectralProgram, printOutput=mpi_count==1)
+        badFolders = filterFolders(badFolders)
         recalculateAttempt += 1
 
 
@@ -174,6 +186,9 @@ def calcForAllxyzInFolder(xyzfolder, calcFolder=None, outputFolder=None, spectra
 def collectResults(parserKind='fdmnes', folder='sample', outputFolder='.', printOutput=True):
     if isinstance(parserKind, str):
         assert isKnown(parserKind), 'Unknown spectral program name: '+parserKind
+    mpi_id, mpi_count = mpi.getMPIinfo()
+    mpi.barrier(folder, 'before_collect_results')
+    if mpi_id != 0: return
     os.makedirs(outputFolder, exist_ok=True)
     df_spectra, df_params, goodFolders, badFolders = parseAllFolders(folder, parserKind, printOutput=printOutput)
     if df_spectra is None:

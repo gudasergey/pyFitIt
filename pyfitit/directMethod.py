@@ -173,7 +173,7 @@ def prepareSample(sample0, diffFrom, proj, samplePreprocessor, smoothType):
         assert utils.inside(sample.params[pn], proj.geometryParamRanges[pn]), 'Project param ranges don\'t correspond to sample'
     if isinstance(samplePreprocessor, dict):
         convolutionParams = samplePreprocessor
-        sample.spectra = smoothLib.smoothDataFrame(convolutionParams, sample.spectra, smoothType, proj.spectrum, proj.intervals['fit_norm'], folder=sample.folder)
+        sample.spectra = smoothLib.smoothDataFrame(convolutionParams, sample.spectra, smoothType, proj.spectrum, proj.intervals['fit_norm'])
     else:
         if samplePreprocessor is not None:
             sample = samplePreprocessor(sample)

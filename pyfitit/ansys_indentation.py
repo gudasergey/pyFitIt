@@ -1,6 +1,6 @@
 import numpy as np
 import os, sys, subprocess, tempfile, json, shutil, traceback
-from pyfitit import utils
+from . import utils
 
 
 def generateInput(params, folder='', **other):

@@ -1,9 +1,8 @@
-import scipy, math, random, string, os, importlib, pathlib, matplotlib, ipykernel, urllib, json, copy, glob, numbers, itertools, pickle, time, re, warnings, sys, types, subprocess, shlex, jupytext, nbformat, scipy.stats, scipy.spatial, io, platform, shutil, hashlib, builtins
+import scipy, math, random, string, os, importlib, pathlib, matplotlib, json, copy, glob, numbers, itertools, pickle, time, re, warnings, sys, types, subprocess, shlex, jupytext, nbformat, scipy.stats, scipy.spatial, io, platform, shutil, hashlib, ipynbname
 from IPython.display import display, Javascript, HTML
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
-from notebook import notebookapp
 
 
 def isLibExists(name):
@@ -603,26 +602,9 @@ def this_notebook():
     """Returns the absolute path of the Notebook or None if it cannot be determined
     NOTE: works only when the security is token-based or there is also no password
     """
-    connection_file = os.path.basename(ipykernel.get_connection_file())
-    kernel_id = connection_file.split('-', 1)[1].split('.')[0]
-    for srv in notebookapp.list_running_servers():
-        try:
-            if srv['token']=='' and not srv['password']:  # No token and no password, ahem...
-                req = urllib.request.urlopen(srv['url']+'api/sessions')
-            else:
-                req = urllib.request.urlopen(srv['url']+'api/sessions?token='+srv['token'])
-            sessions = json.load(req)
-            for sess in sessions:
-                if sess['kernel']['id'] == kernel_id:
-                    np = sess['notebook']['path']
-                    if np[0] == '/': np = np[1:]
-                    return os.path.join(srv['notebook_dir'], np)
-        # except Exception as exc:
-        #     print(traceback.format_exc())
-        except:
-            pass  # There may be stale entries in the runtime directory
-    return None
-
+    if isJupyterNotebook():
+        return ipynbname.path()
+    else: return None
 
 def makePiramids(e, a, h):
     w = np.ones(e.size)

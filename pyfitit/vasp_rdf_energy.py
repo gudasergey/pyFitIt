@@ -1,6 +1,6 @@
 import numpy as np
 import os, tempfile, json, shutil, re
-from pyfitit import utils
+from . import utils
 
 
 def cartesian2spherical(points):

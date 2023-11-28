@@ -5,7 +5,6 @@ import pandas as pd
 import math, copy, os, time, warnings, glob, sklearn, inspect, json, re, shutil
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from pyfitit.enhancedGpr import EnhancedGaussianProcessRegressor
 from . import geometry, utils, plotting
 from sklearn.linear_model import RidgeCV
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -20,17 +19,23 @@ if utils.isLibExists("tensorflow"):
 
 
 class Sample:
-    def __init__(self, params, spectra, energy=None, spType='default', meta=None, encodeLabels=False, interpArgs=None):
+    def __init__(self, params, spectra, energy=None, spType='default', meta=None, encodeLabels=False, makeCommonEnergy=True, interpArgs=None):
         """
         Main data container for ML tasks
         :param params: DataFrame of geometry parameters
         :param spectra: list or Dataframe of spectra (column names: 'e_7443 e_7444.5 ...). For the case of several types of spectra - can be dict 'spectraType':list/spectraDataFrame. Spectra in list can have different energies
         :param energy: to initialize Sample by numpy matrix (to build correct column names of dataframe). Dict, if spectra is dict
+        :param spType: spType name
         :param meta: dict with keys 'nameColumn', 'labels', 'labelMaps', 'features'. labelMaps=dict{label: map(str->int)}
+        :param encodeLabels: whether to encode labels
+        :param makeCommonEnergy: whether to interp all the spectra to make common energy
+        :params interpArgs: np.interp arguments when interp all the spectra to make common energy
         """
         assert isinstance(params, pd.DataFrame), 'params should be pandas DataFrame object'
         params = copy.deepcopy(params)
         params = fixDtypes(params)
+        self.paramNames = params.columns.to_numpy()
+        self._params = params
         spectra = copy.deepcopy(spectra)
         if energy is not None: energy = copy.deepcopy(energy)
         meta = copy.deepcopy(meta)
@@ -42,30 +47,14 @@ class Sample:
             energies = energy
             if energy is None: energies = {spType:None for spType in spectras}
             else: assert isinstance(energy, dict)
+        self._spectra, self._energy = {}, {}
         first = True
         for spType in spectras:
-            spectra = spectras[spType]
-            assert len(spectra) > 0
-            energy = energies[spType]
-            if first: sp0 = spectra
-            first = False
-            if isinstance(spectra, np.ndarray):
-                assert energy is not None
-                assert len(energy) == spectra.shape[1], f'{len(energy)} != {spectra.shape[1]} energy vector must contain values for all columns of spectra matrix'
-                spectra = pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
-            elif isinstance(spectra, list):
-                spectra = utils.makeDataFrameFromSpectraList(spectra, energy, interpArgs=interpArgs)
+            if first: sp0 = spectras[spType]
             else:
-                assert isinstance(spectra, pd.DataFrame), 'spectra should be pandas DataFrame object'
-            assert len(params)==0 or params.shape[0] == spectra.shape[0], str(params.shape[0]) + ' != ' + str(spectra.shape[0])
-            assert len(sp0) == len(spectra), 'All spectra collections in dict must have the same count'
-            spectras[spType] = spectra
-            energies[spType] = utils.getEnergy(spectra)
-        self._spectra = spectras
-        self._energy = energies
-        self.paramNames = params.columns.to_numpy()
-        self._params = params
-        self.folder = None
+                assert len(sp0) == len(spectras[spType]), 'All spectra collections in dict must have the same count'
+            first = False
+            self.setSpectra(spectra=spectras[spType], energy=energies[spType], spType=spType, makeCommonEnergy=makeCommonEnergy, interpArgs=interpArgs)
         self.defaultSpType = self.spTypes()[0]
         if meta is None: meta = {'defaultSpType': self.defaultSpType}
         assert set(meta.keys()) <= {'nameColumn', 'labels', 'labelMaps', 'features', 'userDefined', 'defaultSpType'}
@@ -116,8 +105,9 @@ class Sample:
     def check(self):
         nparam = self.params.shape[0]
         for spType,spectra in self._spectra.items():
-            assert spectra.shape[0] == nparam, f'{spectra.shape[0]} != {nparam} for spType={spType}.\nAll spectra Sample must have the same count'
-            assert len(self.getEnergy(spType)) == spectra.shape[1], f'{len(self.getEnergy(spType))} != {spectra.shape[1]}'
+            assert len(spectra) == nparam, f'{len(spectra)} != {nparam} for spType={spType}.\nAll spectra Sample must have the same count'
+            if self.isCommonEnergy(spType):
+                assert len(self.getEnergy(spType)) == spectra.shape[1], f'{len(self.getEnergy(spType))} != {spectra.shape[1]}'
         assert np.all(self.paramNames == self.params.columns)
         for l in self.labels: assert l in self.paramNames, f'{l} not in params: {self.paramNames.tolist()}'
         self.checkNameColumn(self.nameColumn)
@@ -125,12 +115,13 @@ class Sample:
             assert label in self.paramNames, f'{l} not in params: {self.paramNames.tolist()}'
             self.checkEncodedLabel(label)
             assert self.params.dtypes[label] == 'float64', 'dtype of encoded label must be float, because int doesn\'t support NaN'
-            lab_vals = sorted(list(self.labelMaps[label].keys()))
+            # we can prepare dataframe by hand and then have not all the label values
+            # lab_vals = sorted(list(self.labelMaps[label].keys()))
             # assert np.any(lab_vals != np.arange(len(lab_vals))), f'For label {label} trivial encoding detected: {self.labelMaps[label]}'
 
     def __len__(self):
         spType = self.getDefaultSpType()
-        return self.getSpectra(spType).shape[0]
+        return len(self.getSpectra(spType))
 
     def __hash__(self):
         return hash((utils.hash(self._spectra), utils.hash(self.params), utils.hash(self.meta), self.defaultSpType, self.folder))
@@ -162,24 +153,36 @@ class Sample:
         del self._spectra[spType]
         del self._energy[spType]
 
-    def setSpectra(self, spectra, energy=None, spType=None):
+    def setSpectra(self, spectra, energy=None, spType=None, makeCommonEnergy=True, interpArgs=None):
         """
         Setter for spectra
         :param spectra: DataFrame or np.ndarray (in last case energy should be given)
         :param energy:
         :param spType: spectrum type name for the case of multiple spectra matrixes inside one sample
+        :param makeCommonEnergy: whether to interp all the spectra to make common energy
+        :params interpArgs: np.interp arguments when interp all the spectra to make common energy: left=None, right=None, period=None
         """
         if spType is None: spType = self.getDefaultSpType()
-        if isinstance(spectra, pd.DataFrame):
-            self._spectra[spType] = copy.deepcopy(spectra)
-            self._energy[spType] = utils.getEnergy(spectra)
-            self.folder = None
-        else:
-            assert isinstance(spectra, np.ndarray)
+        assert len(spectra) > 0
+        if isinstance(spectra, np.ndarray):
             assert energy is not None
-            self._spectra[spType] = utils.makeDataFrame(energy, copy.deepcopy(spectra))
-            self.folder = None
-            self._energy[spType] = energy
+            assert len(energy) == spectra.shape[
+                1], f'{len(energy)} != {spectra.shape[1]} energy vector must contain values for all columns of spectra matrix'
+            spectra = pd.DataFrame(data=spectra, columns=['e_' + str(e) for e in energy])
+        elif isinstance(spectra, list):
+            for s in spectra:
+                if energy is None:
+                    assert isinstance(s, utils.Spectrum), type(s)
+            if makeCommonEnergy:
+                spectra = utils.makeDataFrameFromSpectraList(spectra, energy, interpArgs=interpArgs)
+        else:
+            assert isinstance(spectra, pd.DataFrame), 'Spectra should be pandas DataFrame object'
+        assert len(self._params) == 0 or self._params.shape[0] == len(spectra), str(self._params.shape[0]) + ' != ' + str(len(spectra))
+        self._spectra[spType] = spectra
+        if isinstance(spectra, pd.DataFrame):
+            self._energy[spType] = utils.getEnergy(spectra)
+        else:
+            self._energy[spType] = None
 
     def getSpectra(self, spType=None):
         if spType is None: spType = self.getDefaultSpType()
@@ -204,6 +207,10 @@ class Sample:
 
     nameColumn = property(lambda self: self._nameColumn, setNameColumn)
 
+    def isCommonEnergy(self, spType=None):
+        if spType is None: spType = self.getDefaultSpType()
+        return self._energy[spType] is not None
+
     def getSpectrum(self, ind=None, name=None, spType=None, returnIntensityOnly=False):
         """
         By default returns spectrum of default spType. If spType=='all types' returns dict spType->spectrum
@@ -215,11 +222,14 @@ class Sample:
             ind = self.getIndByName(name)
         res = {}
         for spT in self._spectra:
-            intensity = self._spectra[spT].loc[ind].to_numpy().reshape(-1)
-            if returnIntensityOnly:
-                res[spT] = intensity
+            if self.isCommonEnergy(spT):
+                intensity = self._spectra[spT].loc[ind].to_numpy().reshape(-1)
+                if returnIntensityOnly:
+                    res[spT] = intensity
+                else:
+                    res[spT] = utils.Spectrum(self.getEnergy(spType=spT), intensity)
             else:
-                res[spT] = utils.Spectrum(self.getEnergy(spType=spT), intensity)
+                res[spT] = self._spectra[spT][ind]
         if spType is None: spType = self.getDefaultSpType()
         if spType == 'all types': return res
         return res[spType]
@@ -236,25 +246,40 @@ class Sample:
         if isinstance(name, str): return ind[0]
         else: return ind
 
-    def setSpectrum(self, i, spectrum, spType=None):
+    def getName(self, i):
+        assert self.nameColumn is not None
+        return self._params.loc[i, self.nameColumn]
+
+    def setSpectrum(self, spectrum, ind=None, name=None, spType=None):
         """
         Set spectrum
-        :param i: index
+        :param ind: index
+        :param name: name (alternative to index)
         :param spectrum: spectrum
         :param spType: if spType==None and there are several spTypes, spectrum should be dict of spectra for all spTypes
         """
+        if name is None: assert ind is not None
+        else:
+            assert ind is None
+            ind = self.getIndByName(name)
         if spType is None:
             if len(self._spectra) > 1:
                 assert isinstance(spectrum, dict) and set(spectrum.keys()) == set(self._spectra.keys())
                 for spType in spectrum:
-                    self._spectra[spType].loc[i] = spectrum[spType]
+                    if self.isCommonEnergy(spType):
+                        self._spectra[spType].loc[ind] = spectrum[spType]
+                    else:
+                        self._spectra[spType][ind] = spectrum[spType]
                 return
             else:
                 spType = self.getDefaultSpType()
         if isinstance(spectrum, dict):
             assert len(spectrum) == 1
             spectrum = spectrum[list(spectrum.keys())[0]]
-        self._spectra[spType].loc[i] = spectrum
+        if self.isCommonEnergy(spType):
+            self._spectra[spType].loc[ind] = spectrum
+        else:
+            self._spectra[spType][ind] = spectrum
 
     def setParams(self, params):
         assert isinstance(params, pd.DataFrame)
@@ -287,6 +312,7 @@ class Sample:
 
     def shiftEnergy(self, shift, spType=None, inplace=False):
         if spType is None: spType = self.getDefaultSpType()
+        assert self.isCommonEnergy(spType)
         newEnergy = self._energy[spType] + shift
         sam = self if inplace else self.copy()
         sam._energy[spType] = newEnergy
@@ -295,6 +321,7 @@ class Sample:
 
     def changeEnergy(self, newEnergy, spType=None, inplace=False, interpArgs=None):
         if spType is None: spType = self.getDefaultSpType()
+        assert self.isCommonEnergy(spType)
         if interpArgs is None: interpArgs = {}
         oldEnergy = self._energy[spType]
         sam = self if inplace else self.copy()
@@ -312,19 +339,24 @@ class Sample:
         if os.path.exists(binFile):
             try:
                 sample, savedHash = utils.loadData(binFile)
-                if savedHash == h: # user didn't change anything
+                if savedHash == h:  # user didn't change anything
                     return sample
             except:
                 warnings.warn(f"Can't read binary sample file {binFile}, but it exists. Different python versions can cause this. I use text format")
                 pass
         sampleFiles = getSampleFiles(folder)
         def readSpectra(f):
-            newFormat = os.path.splitext(f)[-1] == '.csv'
-            if newFormat:
-                res = pd.read_csv(f, sep=r'\s+', header=None).to_numpy().T
+            ext = os.path.splitext(f)[-1]
+            newFormat = True
+            if ext == '.csv':
+                res = pd.read_csv(f, sep='\t', header=None).to_numpy().T
                 res = utils.makeDataFrame(res[0], res[1:])
-            else:
+            elif ext == '.txt':  # old format
                 res = pd.read_csv(f, sep=r'\s+')
+                newFormat = False
+            else:
+                assert ext == '.json'
+                res = utils.loadData(f)
             return res, newFormat
         files = sampleFiles['spectra']
         if len(files) == 1 and os.path.split(files[0])[-1][:8] == 'spectra.':
@@ -347,9 +379,8 @@ class Sample:
                         meta['labelMaps'][label] = {int(k): mp[k] for k in mp}
         else: meta = None
         paramFile = sampleFiles['params']
-        sep = r'\t' if newFormat else r'\s+'
+        sep = '\t' if newFormat else r'\s+'
         res = cls(pd.read_csv(paramFile, sep=sep), spectra, meta=meta)
-        res.folder = folder
         return res
 
     @classmethod
@@ -367,14 +398,19 @@ class Sample:
         return utils.hash(h)
 
     def saveToFolder(self, folder, oldFormat=False, plot=False, **plotSampleKws):
-        def saveSpectra(spectra, filename):
+        def saveSpectra(spType, spectra, filename):
             if oldFormat:
                 spectra.to_csv(filename, index=False, sep=' ')
             else:
-                e = utils.getEnergy(spectra)
-                data = np.hstack((e.reshape(-1,1), spectra.to_numpy().T))
-                data = pd.DataFrame(data)
-                data.to_csv(filename, header=False, sep='\t', index=False)
+                if self.isCommonEnergy(spType):
+                    e = utils.getEnergy(spectra)
+                    data = np.hstack((e.reshape(-1,1), spectra.to_numpy().T))
+                    data = pd.DataFrame(data)
+                    data.to_csv(filename, header=False, sep='\t', index=False)
+                else:
+                    spectra = [[s.x.tolist(), s.y.tolist()] for s in spectra]
+                    filename = os.path.splitext(filename)[0]+'.json'
+                    utils.saveData(spectra, filename)
 
         if os.path.exists(folder): shutil.rmtree(folder)
         if not os.path.exists(folder): os.makedirs(folder)
@@ -382,10 +418,10 @@ class Sample:
             f.write('''Pyfitit sample consists of\n- parameters table (params.csv) where each row corresponds to one sample object\n- spectrum tables of different spectrum types (spectrumType_spectra.csv files), the first column contains energy/wavelength values, other columns are spectra (number of columns in spectrumType_spectra.csv files equals to the number of rows in params.csv)\n- meta information in JSON format:\n  * nameColumn - name of the parameter to use as index in the sample (names should be short to be pretty displayed on scatter plots!)\n  * labels - list of parameter names to predict\n  * features - list of parameter names to use as sample object features\n  * labelMaps - dict of dicts with label encoding in the format "stringLabelValue":number\n- sample in binary format (binary_repr.pkl), it is used for round-trip save/load floats (text format is not round-trip and modify floats)''')
         ext = 'txt' if oldFormat else 'csv'
         if len(self._spectra) == 1 and self.getDefaultSpType() == 'default':
-            saveSpectra(self.spectra, folder+os.sep+f'spectra.{ext}')
+            saveSpectra('default', self.spectra, folder+os.sep+f'spectra.{ext}')
         else:
             for spType in self._spectra:
-                saveSpectra(self._spectra[spType], folder + os.sep + f'{spType}_spectra.{ext}')
+                saveSpectra(spType, self._spectra[spType], folder + os.sep + f'{spType}_spectra.{ext}')
         sep = ' ' if oldFormat else '\t'
         self.params.to_csv(folder+os.sep+f'params.{ext}', sep=sep, index=False)
         self.folder = folder
@@ -407,7 +443,7 @@ class Sample:
         assert (paramData is None) or (paramGenerator is None)
         assert paramName != ''
         assert paramName not in self.paramNames, f'Parameter {paramName} already exists'
-        if isinstance(paramData, list): paramData = np.array(paramData)
+        if not isinstance(paramData, np.ndarray): paramData = np.array(paramData)
         n = self.params.shape[0]
         if paramData is None:
             if isinstance(paramName, str):  # need to construct one parameter
@@ -448,8 +484,10 @@ class Sample:
         sample.params.drop(i, inplace=True)
         sample.params.reset_index(inplace=True, drop=True)
         for spType in sample._spectra:
-            sample._spectra[spType].drop(i, inplace=True)
-            sample._spectra[spType].reset_index(inplace=True, drop=True)
+            if self.isCommonEnergy(spType):
+                sample._spectra[spType].drop(i, inplace=True)
+                sample._spectra[spType].reset_index(inplace=True, drop=True)
+            else: del sample._spectra[spType][i]
         if not inplace: return sample
 
     def delRowByName(self, names, inplace=True):
@@ -464,9 +502,14 @@ class Sample:
         if len(ind.shape) != 1:
             assert np.prod(ind.shape) == np.max(ind.shape)
             ind = ind.flatten()
-        spectra = {st:self._spectra[st].loc[ind].reset_index(drop=True, inplace=False) for st in self._spectra}
+        spectra = {}
+        for spType in self.spTypes():
+            if self.isCommonEnergy(spType):
+                spectra[spType] = self._spectra[spType].loc[ind].reset_index(drop=True, inplace=False)
+            else:
+                spectra[spType] = [self._spectra[spType][i] for i in ind]
         p = self.params.loc[ind].reset_index(drop=True, inplace=False)
-        sample = Sample(params=p, spectra=spectra, meta=self.meta)
+        sample = Sample(params=p, spectra=spectra, meta=self.meta, makeCommonEnergy=False)
         return sample
 
     def takeRowsByName(self, names):
@@ -475,30 +518,32 @@ class Sample:
 
     def unionWith(self, other):
         if other is None: return
-
         # checks
         assert isinstance(other, self.__class__)
         assert np.all(self.params.shape[1] == other.params.shape[1]), 'Params differ: self = '+str(self.paramNames)+' other = '+str(other.paramNames)
         assert self._spectra.keys() == other._spectra.keys()
         for spType in self._spectra:
-            assert np.all(self._spectra[spType].shape[1] == other._spectra[spType].shape[1]), f'spType={spType} {self._spectra[spType].shape[1]} != {other._spectra[spType].shape[1]}'
-            assert np.all(self._energy[spType] == other._energy[spType])
+            assert self.isCommonEnergy(spType) == other.isCommonEnergy(spType)
+            if self.isCommonEnergy(spType):
+                assert np.all(self._spectra[spType].shape[1] == other._spectra[spType].shape[1]), f'spType={spType} {self._spectra[spType].shape[1]} != {other._spectra[spType].shape[1]}'
+                assert np.all(self._energy[spType] == other._energy[spType])
         assert set(self.paramNames) == set(other.paramNames), 'Params differ: self = ' + str(self.paramNames) + ' other = ' + str(other.paramNames)
         assert self.labelMaps == other.labelMaps, f'{self.labelMaps} != {other.labelMaps}'
 
         # union
         self.params = pd.concat((self.params, other.params), ignore_index=True)
         for spType in self._spectra:
-            self._spectra[spType] = pd.concat((self._spectra[spType], other._spectra[spType]), ignore_index=True)
+            if self.isCommonEnergy(spType):
+                self._spectra[spType] = pd.concat((self._spectra[spType], other._spectra[spType]), ignore_index=True)
+            else:
+                self._spectra[spType] += other._spectra[spType]
         self.folder = None
         self.check()
 
-    def addSpectrumType(self, spectra, spType, energy=None, interpArgs=None):
+    def addSpectrumType(self, spectra, spType, energy=None, makeCommonEnergy=True, interpArgs=None):
         assert spType not in self.spTypes(), f'Spectrum type {spType} already exists'
         assert self.getDefaultSpType() != 'default', 'Rename default spType by renameSpType before adding new one'
-        if isinstance(spectra, list):
-            spectra = utils.makeDataFrameFromSpectraList(spectra, energy, interpArgs=interpArgs)
-        self.setSpectra(spectra, energy, spType=spType)
+        self.setSpectra(spectra=spectra, energy=energy, spType=spType, makeCommonEnergy=makeCommonEnergy, interpArgs=interpArgs)
 
     def addRow(self, spectrum=None, params=None):
         i = self.params.shape[0]
@@ -509,9 +554,10 @@ class Sample:
             for spType in spectrum:
                 sp = spectrum[spType]
                 if isinstance(sp, utils.Spectrum):
-                    if len(self._energy[spType]) != len(sp.energy) or ~np.all(self._energy[spType] == sp.energy):
-                        sp = np.interp(self._energy[spType], sp.energy, sp.intensity)
-                    else: sp = sp.intensity
+                    if self.isCommonEnergy(spType):
+                        if len(self._energy[spType]) != len(sp.energy) or ~np.all(self._energy[spType] == sp.energy):
+                            sp = np.interp(self._energy[spType], sp.energy, sp.intensity)
+                        else: sp = sp.intensity
                 else:
                     assert isinstance(sp, np.ndarray)
                     sp = sp.reshape(-1)
@@ -524,7 +570,11 @@ class Sample:
                 spectrum[spType][:] = np.nan
         # print(spectrum.shape, self.spectra.shape)
         for spType in self.spTypes():
-            self._spectra[spType].loc[i] = spectrum[spType]
+            if self.isCommonEnergy(spType):
+                self._spectra[spType].loc[i] = spectrum[spType]
+            else:
+                assert isinstance(spectrum[spType], utils.Spectrum)
+                self._spectra[spType].append(spectrum[spType])
         if params is not None:
             if isinstance(params, pd.Series): params = params.to_dict()
             assert isinstance(params, dict)
@@ -534,11 +584,11 @@ class Sample:
         else: params = {}
         self.params.loc[i, :] = np.nan
         for p in params: self.params.loc[i, p] = params[p]
-        self.folder = None
 
     def limit(self, energyRange, spType=None, inplace=True):
         if spType is None: spType = self.getDefaultSpType()
         assert spType in self.spTypes(), f'Spectrum type {spType} not in {self.spTypes()}'
+        assert self.isCommonEnergy(spType)
         ind = (energyRange[0] <= self._energy[spType]) & (self._energy[spType] <= energyRange[1])
         energy = self._energy[spType][ind]
         assert len(energy) > 0, f'There are no energy points in the interval {energyRange}. Energy = {self._energy[spType]}'
@@ -657,8 +707,8 @@ class Sample:
             known, unknown = self.copy(), None
         else:
             s = self._spectra
-            known = Sample(p.loc[~nan].reset_index(drop=True), {spType: s[spType].loc[~nan].reset_index(drop=True) for spType in s}, meta=self.meta)
-            unknown = Sample(p.loc[nan].reset_index(drop=True), {spType: s[spType].loc[nan].reset_index(drop=True) for spType in s}, meta=self.meta)
+            known = self.takeRows(~nan)
+            unknown = self.takeRows(nan)
         if returnInd:
             return known, unknown, np.where(~nan)[0], np.where(nan)[0]
         else:
@@ -681,7 +731,7 @@ class Sample:
             for n,v in plotSampleKws1.items():
                 if isinstance(v, dict) and set(v.keys()) == set(self.spTypes()):
                     plotSampleKws1[n] = v[spType]
-            plotting.plotSample(self._energy[spType], self._spectra[spType].to_numpy(), fileName=folder + os.sep + f'plot_{spType}.png', colorParam=colorParam, **plotSampleKws1)
+            plotting.plotSample(self._energy[spType], self._spectra[spType], fileName=folder + os.sep + f'plot_{spType}.png', colorParam=colorParam, **plotSampleKws1)
         if plotIndividualParams is not None:
             assert isinstance(plotIndividualParams, dict)
             for spType in self.spTypes():
@@ -692,13 +742,14 @@ class Sample:
                     if plotIndividualParams.get('plot on sample', False):
                         if colorParam is not None:
                             fileName = [fileName, f'{folder}{os.sep}individ_{spType}_sorted{os.sep}{colorParam[i]}_{name}.png']
-                        plotting.plotSample(self._energy[spType], self._spectra[spType].to_numpy(), fileName=fileName, colorParam=colorParam, highlight_inds=[i], **kw)
+                        plotting.plotSample(self._energy[spType], self._spectra[spType], fileName=fileName, colorParam=colorParam, highlight_inds=[i], **kw)
                     else:
                         plotting.plotToFile(s.x,s.y,'', fileName=fileName, **plotIndividualParams)
                     if maxIndivPlotCount is not None and i>=maxIndivPlotCount: break
 
     def convertEnergyToWeights(self):
         e = self.energy
+        assert e is not None, 'There is no common energy'
         de2 = e[2:]-e[:-2]
         w = np.insert(de2, 0, e[1]-e[0])
         w = np.append(w, e[-1]-e[-2])
@@ -725,6 +776,16 @@ class Sample:
         for k in lm:
             if isinstance(k, str): return False
         return True
+
+    def makeCommonEnergy(self, spType=None, inplace=False, interpArgs=None):
+        """
+        :params interpArgs: arguments of the np.interp: left=None, right=None, period=None
+        """
+        assert not self.isCommonEnergy(spType), 'Energy is already common'
+        if inplace: s = self
+        else: s = self.copy()
+        s.setSpectra(spectra=self.getSpectra(spType), spType=spType, makeCommonEnergy=True, interpArgs=interpArgs)
+        if not inplace: return s
 
 
 readSample = Sample.readFolder
@@ -1591,21 +1652,6 @@ class KrigingGaussianProcess:
         return self.model.predict(x, return_std=True)
 
 
-class KrigingEnhancedGaussianProcess:
-    def __init__(self, n_restarts_optimizer=9, kernel=None, alpha=1e-10):
-        if kernel is None:
-            # kernel = sklearn.gaussian_process.kernels.ExpSineSquared()
-            # kernel = sklearn.gaussian_process.kernels.RBF()
-            pass
-        self.model = EnhancedGaussianProcessRegressor(n_restarts_optimizer=n_restarts_optimizer, kernel=kernel, alpha=alpha)
-
-    def fit(self, x, y):
-        self.model.fit(x, y)
-
-    def predict(self, x):
-        return self.model.predict(x, return_std=True)
-
-
 class KrigingNNKCDE:
     def __init__(self, bandwidth=0.2, k=10):
         self.regressor = RBF(function='linear')
@@ -1913,7 +1959,7 @@ def getSampleFiles(folder):
     assert len(paramFiles) > 0, 'Param file not found in the folder ' + folder
     paramFile = paramFiles[0]
     files = glob.glob(folder + os.sep + '*spectra.*')
-    files = [f for f in files if os.path.splitext(f)[-1] in ['.txt', '.csv']]
+    files = [f for f in files if os.path.splitext(f)[-1] in ['.txt', '.csv', '.json']]
     assert len(files) > 0, 'No spectrum files were found in the folder ' + folder
     res = {'params':paramFile, 'spectra':files}
     meta = folder + os.sep + 'meta.json'

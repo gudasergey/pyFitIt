@@ -1,9 +1,7 @@
 import numpy as np
 from parsy import regex, generate, whitespace, string
 import math, scipy, copy, os, io
-from . import utils, geometry
-if os.path.exists(os.path.split(__file__)[0]+os.sep+'wbm.py'):
-    from . import wbm
+from . import utils, geometry, wbm
 
 uintParser = regex(r"\d+").map(int)
 pi = np.pi
@@ -647,7 +645,7 @@ def matchAtomsHelper(mol1, mol2, closeAtomCountForAngleOptimizing, verbose=True)
     bestDist = results[ind][0]
     m1_ = np.copy(m1); m1_[:,:3]-=m1[0,:3]
     m2_ = np.copy(bestM2); m2_[:,:3]-=m2_[0,:3]
-    cdist = scipy.spatial.distance.cdist(m1_, m2_, metric='wminkowski', w=[1.0, 1.0, 1.0, 1000.0], p=5)
+    cdist = scipy.spatial.distance.cdist(m1_, m2_, metric='minkowski', w=[1.0, 1.0, 1.0, 1000.0], p=5)
     dist1_ = np.insert(dist1,0,0).reshape(-1,1); dist2_ = np.insert(dist2,0,0).reshape(1,-1)
     dist_ = (dist1_ + dist2_)/2
     assert (dist_.shape[0] == dist1_.size) and (dist_.shape[1] == dist2_.size)
