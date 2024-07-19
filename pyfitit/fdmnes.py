@@ -124,7 +124,7 @@ def parseAtomPositions(bavfilename):
     i = bav.find("\n",i)+1
     j = bav.find("\n\n",i)
     moleculaText = bav[i:j]
-    molecula = pd.read_csv(StringIO(moleculaText), sep='\s+', names=['proton_number', 'Typ', 'x', 'y', 'z'])
+    molecula = pd.read_csv(StringIO(moleculaText), sep=r'\s+', names=['proton_number', 'Typ', 'x', 'y', 'z'])
     return molecula
 
 
@@ -178,30 +178,29 @@ def parseInput(d):
     return {'filout':filout, 'energpho':Energpho, 'absorber':absorber}
 
 
-def parseOutFile(xanesFile, Energpho):
-    if not os.path.isfile(xanesFile):
-        raise Exception('Error: the filout file '+xanesFile+' doesn\'t exist')
-    xanes = np.genfromtxt(xanesFile, skip_header=2)
-    energies = xanes[:,0].ravel()
-    xanesVal = xanes[:,1].ravel()
-
-    # parse energy shift
+def parseHeader(xanesFile):
     with open(xanesFile,'r') as f: s = f.read()
     i = s.find('\n')
     if i<0: raise Exception('Error: can\'t find header in output file: '+xanesFile)
     s = s[:i]
     values, names = s.split('=')
     names = list(map(lambda w: w.strip(), names.strip().split(',')))
-    i = names.index('Epsii')
     values = list(map(lambda w: w.strip(), values.strip().split()))
-    Epsii = float(values[i])
-    i = names.index('E_edge')
-    E_edge = float(values[i])
+    assert len(names) == len(values), f'Wrong fdmnes info line: {s}'
+    result = {names[i]:float(values[i]) for i in range(len(names))}
+    return result
 
-    if Energpho: energies -= E_edge
 
+def parseOutFile(xanesFile, Energpho):
+    if not os.path.isfile(xanesFile):
+        raise Exception('Error: the filout file '+xanesFile+' doesn\'t exist')
+    xanes = np.genfromtxt(xanesFile, skip_header=2)
+    energies = xanes[:,0].ravel()
+    xanesVal = xanes[:,1].ravel()
+    info = parseHeader(xanesFile)
+    if Energpho: energies -= info['E_edge']
     if useEpsiiShift:
-        energies += Epsii
+        energies += info['Epsii']
     return utils.Spectrum(energies, xanesVal)
 
 

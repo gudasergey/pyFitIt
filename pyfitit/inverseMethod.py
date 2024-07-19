@@ -86,6 +86,33 @@ def prepareDiffFrom(samplePreprocessor, proj, diffFrom, smoothType):
     return diffFrom
 
 
+def inverseMethodCV(regressor, sample_cv, CVcount, folderToSaveCVresult=None):
+    res, individualSpectrErrors, predictions = ML.crossValidation(regressor, sample_cv.params, sample_cv.spectra, CVcount=CVcount, YColumnWeights=sample_cv.convertEnergyToWeights())
+    if folderToSaveCVresult is None: return res, individualSpectrErrors, predictions
+    os.makedirs(folderToSaveCVresult, exist_ok=True)
+    output = 'Inverse method relative to constant prediction error = %5.3g\n' % res
+    with open(folderToSaveCVresult+'/info.txt', 'w') as f: f.write(output)
+    ind = np.argsort(individualSpectrErrors)
+    n = individualSpectrErrors.size
+    energy = sample_cv.energy
+
+    def plotCVres(energy, trueXan, predXan, fileName):
+        plotting.plotToFile(energy, trueXan, "True spectrum", energy, predXan, "Predicted spectrum", title=os.path.basename(fileName), fileName=fileName, save_csv=True)
+
+    i = ind[n//2]
+    plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], folderToSaveCVresult+'/xanes_mean_error.png')
+    i = ind[9*n//10]
+    plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], folderToSaveCVresult+'/xanes_max_0.9_error.png')
+    i = ind[-1]
+    plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], folderToSaveCVresult+'/xanes_max_error.png')
+    sp = sample_cv.spectra.to_numpy()
+    error_by_en = np.sqrt(np.mean((predictions-sp)**2, axis=0))
+    rFactor_by_en = sklearn.metrics.r2_score(sp, predictions, multioutput='raw_values')
+    plotting.plotToFile(energy, error_by_en, "", title='RMSE by energy', fileName=folderToSaveCVresult+'/RMSE by energy.png')
+    plotting.plotToFile(energy, rFactor_by_en, "", title='R2-score by energy', fileName=folderToSaveCVresult+'/R2-score by energy.png')
+    return res, individualSpectrErrors, predictions
+
+
 class Estimator:
     def __init__(self, method, proj, samplePreprocessor=None, normalize=True, CVcount=10, folderToSaveCVresult='', diffFrom=None, smoothType='fdmnes', **params):
         """
@@ -144,16 +171,11 @@ class Estimator:
         for pName in sample.paramNames:
             self.geometryParamRanges[pName] = [np.min(sample.params[pName]), np.max(sample.params[pName])]
         sample_cv = sample.limit(energyRange=self.proj.intervals['fit_geometry'], inplace=False)
-        res, individualSpectrErrors, predictions = ML.crossValidation(self.regressor, sample_cv.params, sample_cv.spectra, CVcount=self.CVcount, YColumnWeights=sample_cv.convertEnergyToWeights())
-        # m = self.expSpectrum.changeEnergy(sample_cv.energy).y
-        # true_rFactor = np.array([utils.rFactor(sample_cv.getEnergy(), sample_cv.spectra.loc[i].to_numpy(), m) for i in range(len(sample_cv))])
-        # predicted_rFactor = np.array([utils.rFactor(sample_cv.getEnergy(), predictions[i], m) for i in range(len(sample_cv))])
-        # rFactorError = np.mean(np.abs(predicted_rFactor-true_rFactor))
+        res,_,_ = inverseMethodCV(self.regressor, sample_cv, CVcount=self.CVcount, folderToSaveCVresult=self.folderToSaveCVresult)
         output = 'Inverse method relative to constant prediction error = %5.3g\n' % res
-        # output += f'Mean rFactor error = {rFactorError}. rFactor - is an optimized function in findGlobalL2NormMinimum\n'
-        # output += f'Median rFactor = {np.median(true_rFactor)}. Can be taken as unit for sensitivity comparison\n'
         print(output)
         if self.smoothType == 'optical' and self.norm is not None:
+            # TODO: delete these code. We need special ML method, but this class must be the general
             assert 'SeparateNorm' in self.regressor.name, self.regressor.name
             if self.normalize: sepNorm = self.regressor.learner
             else: sepNorm = self.regressor
@@ -173,22 +195,6 @@ class Estimator:
             output3 = 'relToConstPredError on norm values = %5.3g\n' % res
             output += output3
             print(output3)
-        if self.folderToSaveCVresult != '':
-            os.makedirs(self.folderToSaveCVresult, exist_ok=True)
-            with open(self.folderToSaveCVresult+'/info.txt', 'w') as f: f.write(output)
-            ind = np.argsort(individualSpectrErrors)
-            n = individualSpectrErrors.size
-            energy = sample_cv.energy
-
-            def plotCVres(energy, trueXan, predXan, fileName):
-                plotting.plotToFile(energy, trueXan, "True spectrum", energy, predXan, "Predicted spectrum", title=os.path.basename(fileName), fileName=fileName, save_csv=True)
-
-            i = ind[n//2]
-            plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_mean_error.png')
-            i = ind[9*n//10]
-            plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_max_0.9_error.png')
-            i = ind[-1]
-            plotCVres(energy, sample_cv.spectra.loc[i], predictions[i], self.folderToSaveCVresult+'/xanes_max_error.png')
         self.regressor.fit(sample.params, sample.spectra)
         self.paramNames = list(sample.paramNames)
         # calcParamStdDev(self)

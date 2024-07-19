@@ -1,37 +1,59 @@
 import copy, scipy
 import numpy as np
-from . import utils
+from . import utils, larch
+from .larch import xafs
 
-class Exafs:
+
+class Exafs(utils.Spectrum):
     def __init__(self, k, chi):
-        self.k = k
-        self.chi = chi
+        super().__init__(k, chi, xName='k', yName='chi')
 
     def toXanes(self, Efermi, k_power):
         me = 2 * 9.109e-31  # kg
         h = 1.05457e-34  # J*s
         J = 6.24e18  # 1 J = 6.24e18 eV
-        e = self.k**2 * J / me * h**2 * 1e20 + Efermi
-        k = copy.deepcopy(self.k)
-        k[k==1] = 1
-        return utils.Spectrum(e, self.chi/k**k_power + 1)
+        e = np.sign(self.x)*self.x**2 * J / me * h**2 * 1e20 + Efermi
+        k = copy.deepcopy(self.x)
+        k[k==0] = 1
+        return utils.Spectrum(e, self.y/k**k_power + 1)
 
-    def shift(self, dE, Efermi, inplace=False):
+    def shiftEnergy(self, shift, inplace=False):
+        """
+        shift - energy shift in eV
+        """
+        # the result doesn't depend on Efermi
+        Efermi = self.x[0]
         xan = self.toXanes(Efermi, k_power=0)
-        xan.energy += dE
-        exafs = xan.toExafs(Efermi, k_power=0)
-        if inplace:
-            self.k, self.chi = exafs.k, exafs.chi
-        else:
-            return exafs
+        xan.energy += shift
+        res = xanes2exafs(xan, Efermi, k_power=0, preserveGrid=True)
+        if inplace: self.x[:], self.y[:] = res.x, res.y
+        else: return res
 
     def smooth(self, SO2, sigmaSquare, inplace=False):
-        chi1 = self.chi * np.exp(-2 * self.k ** 2 * sigmaSquare) * SO2
-        if inplace: self.chi = chi1
-        else: return Exafs(self.k, chi1)
+        exp = np.exp(-2 * self.x ** 2 * sigmaSquare) * SO2
+        if inplace: self.y *= exp
+        else: return Exafs(self.x, self.y*exp)
 
 
-def ftwindow(x, xmin=None, xmax=None, dx=1, dx2=None, window='hanning', **kws):
+def xanes2exafs(xanes, Efermi, k_power, preserveGrid=False):
+    me = 2 * 9.109e-31  # kg
+    h = 1.05457e-34  # J*s
+    J = 6.24e18  # 1 J = 6.24e18 eV
+    e, s = xanes.x, xanes.y
+    i = e >= Efermi
+    k = np.sqrt((e[i] - Efermi) / J * me / h ** 2 / 1e20)  # J * kg /  (J*s)^2 = kg / (J * s^2) = kg / ( kg*m^2 ) = 1/m^2 = 1e-20 / A^2
+    intSqr = (s[i] - 1) * k ** k_power
+    if preserveGrid:
+        k1 = np.sign(e-Efermi)*np.sqrt(np.abs(e-Efermi) / J * me / h ** 2 / 1e20)
+        intSqr1 = np.zeros(len(e))
+        intSqr1[i] = intSqr
+    else:
+        k1 = np.linspace(k[0], k[-1], int((k[-1]-k[0])*100))
+        intSqr1 = np.interp(k1, k, intSqr)
+    return Exafs(k1, intSqr1)
+
+
+def ftwindow(x, xmin=None, xmax=None, dx=1, dx2=None, window='han', **kws):
     VALID_WINDOWS = ['han', 'fha', 'gau', 'kai', 'par', 'wel', 'sin', 'bes']
     if window is None:
         window = VALID_WINDOWS[0]
@@ -105,25 +127,49 @@ def ftwindow(x, xmin=None, xmax=None, dx=1, dx2=None, window='hanning', **kws):
 
 
 def FT_Transform(k,chi):
-    ZF=2048 #2^11
-    npt=ZF/2
-    pask=1/(k[1]-k[0])
-    freq=(1/ZF)*(np.arange(npt))*pask
-    omega=2*(np.pi)*freq
-    tff=np.fft.fft(chi,ZF,norm='ortho')
-    ft=tff[0:int(npt)]
+    nfft = 2048 #2^11
+    kstep = k[1]-k[0]
+    omega = 2*np.pi/(kstep*nfft) * np.arange(int(nfft/2))
+    ft = np.fft.fft(chi,nfft)[0:int(nfft/2)] *kstep/np.sqrt(np.pi)
+    # ft = scipy.fftpack.fft(chi,nfft)[0:int(nfft/2)] *kstep/np.sqrt(np.pi)
     return omega/2, ft
+    # print('kstep =', kstep)
+    # ft = scipy.fftpack.fft(chi,nfft)[:int(nfft/2)] *kstep/np.sqrt(np.pi)
+    # print('Andrea: out.shape =',ft.shape, ft[100:102])
+    # return np.pi/(kstep*nfft)*np.arange(int(nfft/2)), ft
 
 
-def convert2RSpace(k, chi, kmin=3, kmax=11, dk=1, dk2=None, window='kaiser'):
+def convert2RSpace(k, chi, kmin=3, kmax=11, dk=1, dk2=None, window='kaiser', kweight=0, rmax_out=10, kstep=0.05):
+    if dk2 is None: dk2 = dk
+    k_max = max(max(k), kmax+dk2)
+    k_   = kstep * np.arange(int(1.01+k_max/kstep), dtype='float64')
+    k, chi = k_, np.interp(k_,k,chi)
+    if kweight != 0: chi = chi*k**kweight
+    r,chi = FT_Transform(k, ftwindow(k, xmin=kmin, xmax=kmax, dx=dk, dx2=dk2, window=window) * chi)
+    i = (0<=r) & (r<=rmax_out)
+    return r[i], chi[i]
+
+
+def convert2RSpace_larch(k,chi,kmin=3, kmax=11, dk=1, dk2=None, window='kaiser', kweight=0, rmax_out=10):
+    group = larch.Group(name='tmp')
+    larch.xafs.xftf(k, chi=chi, group=group, kmin=kmin, kmax=kmax, kweight=kweight, dk=dk, dk2=dk2, with_phase=False, window=window, rmax_out=rmax_out, nfft=2048, kstep=0.05, _larch=None)
+    return group.r, group.chir
+
+
+def plotWavelet(kw, rw, w, fileName, levels=None):
+    from . import plotting
+    X_exp, Y_exp = np.meshgrid(kw, rw)
+    fig, ax = plotting.createfig()
+    C = ax.contourf(X_exp, Y_exp, w.T, levels=levels)
+    fig.colorbar(C, ax=ax)
+    ax.set_xlabel('k')
+    ax.set_ylabel('R')
+    plotting.savefig(fileName, fig)
+
+
+def waveletTransform(k, chi, interval=None, sigma=1, eta=5, kmin=2.4, kmax=10.5, Rmin=0.5, Rmax=4.5, knum=200, Rnum=200, plotFilename=None, levels=None):
     """
-    Doesn't multiply spectrum by k**2. You should do it manually
-    """
-    return FT_Transform(k, ftwindow(k, xmin=kmin, xmax=kmax, dx=dk, dx2=dk2, window=window) * chi)
-
-
-def waveletTransform(k, chi, interval=None, sigma=1, eta=5, kmin=2.4, kmax=10.5, Rmin=0.5, Rmax=4.5, knum=200, Rnum=200, plotFilename=None):
-    """
+    doi.org/10.1016/j.radphyschem.2019.05.023
     :param interval: [k1, k2] - k-space for the wavelet
     :param sigma: don't touch this parameter
     :param eta: put this value equal to two time the distance where you suppose to have your scattering
@@ -134,37 +180,58 @@ def waveletTransform(k, chi, interval=None, sigma=1, eta=5, kmin=2.4, kmax=10.5,
     :returns: arra of k values, array of r values, w matrix (rows - k, cols - r)
     """
     if interval is None: interval = [k[0], k[-1]]
+    k_redW, chi_redW = k, chi*ftwindow(k, xmin=interval[0], xmax=interval[-1], window='han')
     # range of the apodization window (rectangular)
-    i = (interval[0]<=k) & (k<=interval[1])
-    k_redW, chi_redW = k[i], chi[i]
+    # i = (interval[0]<=k) & (k<=interval[1])
+    # k_redW, chi_redW = k[i], chi[i]
     kw = np.linspace(*interval, num=knum)  # k-points of the Wavelet
     rw = np.linspace(Rmin, Rmax, num=Rnum)  # R-points of the Wavelet
 
     def fz(k, eta, sigma):
         I = complex(0, 1)
-        return np.exp(k * eta * I) * np.exp((-k ** 2) / (2 * sigma ** 2))
+        return 1/np.sqrt(2*np.pi)/sigma * np.exp(k * eta * I) * np.exp(-k**2 / (2 * sigma**2))
 
     # interpolation of the experimental signal
     def chi1(omega):
-        return np.interp(omega, k_redW, chi_redW * ftwindow(k_redW, xmin=kmin, xmax=kmax, dx=1, dx2=None, window='hanning'))
+        return np.interp(omega, k_redW, chi_redW)
 
-    # function experimental wavelet
+    # function experimental wavelet (The formula (1) and the Morlet function are used in article)
     def W_exp(omega, r):
-        a = eta / (2 * r)
+        a = eta / (2 * r) # a.shape = Rnum
         k2 = k_redW
-        a1 = (k2[:, None] - omega)
-        return (1 / np.sqrt(a)) * np.trapz(((chi1(k2) * np.conj(fz(a1[..., None] / a, eta, sigma)).T).T), k2, axis=0)
+        a1 = k2[:, None] - omega[None,:]   # k2[:, None].shape = (len(k), 1); omega.shape = knum; a1.shape = (len(k), knum)
+        if 2*Rnum*knum*Rnum < 10e6:
+            pod_ind = (chi1(k2) * np.conj(fz(a1[..., None] / a, eta, sigma)).T).T
+            integral = np.trapz(pod_ind, k2, axis=0)
+        else:
+            integral = np.zeros((knum,Rnum), dtype=np.complex64)
+            for j in range(Rnum):
+                # chi1(k2).shape = len(k)
+                # a1.shape = (len(k), knum)
+                # np.conj(fz(a1 / a[j], eta, sigma)).shape = (len(k), knum)
+                # np.conj(fz(a1 / a[j], eta, sigma)).T.shape = (knum, len(k))
+                # (chi1(k2) * np.conj(fz(a1 / a[j], eta, sigma)).T).shape = (knum, len(k))
+                # pod_ind = (len(k), knum)
+                pod_ind = (chi1(k2)[None,:] * np.conj(fz(a1 / a[j], eta, sigma)).T).T
+                integral[:,j] = np.trapz(pod_ind, k2, axis=0) # integral.shape = (knum,Rnum)
+        return (1 / np.sqrt(a)) * integral
 
-    def plot(kw, rw, w, fileName):
-        from . import plotting
-        X_exp, Y_exp = np.meshgrid(kw, rw)
-        fig, ax = plotting.createfig()
-        C = ax.contourf(X_exp, Y_exp, w.T)
-        fig.colorbar(C, ax=ax)
-        ax.set_xlabel('k')
-        ax.set_ylabel('R')
-        plotting.savefig(fileName, fig)
-
-    w = np.abs(W_exp(kw,rw))
-    if plotFilename is not None: plot(kw, rw, w, plotFilename)
+    w = W_exp(kw,rw)
+    if plotFilename is not None: plotWavelet(kw, rw, np.abs(w), plotFilename, levels=levels)
     return kw, rw, w
+
+
+def waveletTransform_larch(k, chi, interval=None, Rmin=0.5, Rmax=4.5, plotFilename=None, levels=None):
+    if interval is None: interval = [k[0], k[-1]]
+    group = larch.Group(name='tmp')
+    if interval is None: chi1 = chi
+    else: chi1 = chi*ftwindow(k, xmin=interval[0], xmax=interval[-1], window='han')
+    larch.xafs.cauchy_wavelet(k, chi1, group, kweight=0, rmax_out=Rmax, nfft=2048)
+    kw,rw,w = group.wcauchy_k, group.wcauchy_r, group.wcauchy.T
+    i = (Rmin<=rw) & (rw<=Rmax)
+    rw, w = rw[i], w[:,i]
+    i = (interval[0]<=k) & (k<=interval[1])
+    kw, w = kw[i], w[i,:]
+    if plotFilename is not None: plotWavelet(kw, rw, np.abs(w), plotFilename, levels=levels)
+    return kw, rw, w
+

@@ -41,7 +41,7 @@ from .mback import mback, mback_norm
 # from .feff8lpath import feff8_xafs
 # from .feffutils import get_feff_pathinfo
 #
-# from .cauchy_wavelet import cauchy_wavelet
+from .cauchy_wavelet import cauchy_wavelet
 # from .deconvolve import xas_convolve, xas_deconvolve
 # from .estimate_noise import estimate_noise
 # from .rebin_xafs import rebin_xafs, sort_xafs

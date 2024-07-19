@@ -9,11 +9,11 @@ from . import inverseMethod, ML, molecule, mpi, optimize,  plotting, sampling, s
 from . import uiControls, msPathGroupManager, funcModel
 
 from .adaptiveSampling import minlpe
-from .curveFitting import autobk, substractBaseAuto, substractBase, mback
+from .curveFitting import autobk, subtractBaseAuto, subtractBase, mback
 from .descriptor import addDescriptors, calcPreedge, descriptorQuality, efermiDescriptor, pcaDescriptor, plotDescriptors1d, plotDescriptors2d, relPcaDescriptor, stableExtrema
 from .directMethod import Estimator as constructDirectEstimator
 from .directMethod import compareDifferentMethods as compareDifferentDirectMethods
-from .exafs import convert2RSpace, waveletTransform
+from .exafs import Exafs, convert2RSpace, waveletTransform, xanes2exafs, FT_Transform
 from .fdmnes import parseOneFolder as parseFdmnesFolder
 from .feff import parseOneFolder as parseFeffFolder
 from .funcModel import FuncModel, ParamProperties

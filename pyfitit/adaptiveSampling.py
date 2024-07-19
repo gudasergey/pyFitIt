@@ -154,7 +154,7 @@ class CalculationOrchestrator:
         threadPool.map(self.addResultCalculateAndUpdate, self.generator.getInitialPoints())
         threadPool.close()
         if self.debug: print("Done initial")
-        if np.all(np.array(self.generator.ys) == None):
+        if np.all([y is None for y in self.generator.ys]):
             raise Exception('No good points in the initial sample. Check sampling settings')
 
     def calculateLazy(self, points):
@@ -198,6 +198,7 @@ class CalculationOrchestrator:
             self.calcTimes.append(dt)
             assert hasattr(self.generator.sampler, 'avgPointCalcTime')
             self.generator.sampler.avgPointCalcTime = np.mean(self.calcTimes)
+            if self.debug: print(f'Calculation time was {dt}. Average = {self.generator.sampler.avgPointCalcTime}')
         return res
 
     def addResultCalculateAndUpdate(self, x):
@@ -534,30 +535,62 @@ class ErrorPredictingSampler(Sampler):
         self.initial, _ = geometry.unique_mulitdim(self.initial)
 
     def calculateScale(self):
+        if self.debug: print('Calculating scale grad')
         n = len(self.leftBorder)
-        count = 2*n+1
-        if self.xs.shape[0] < count: return
-        px = self.getInitialByScalePoints()
-        py = np.zeros((count, self.ys.shape[1]))
-        # find initial points px to calculate scale in the calculated sample xs
-        for i in range(count):
-            dists = geometry.relDist(self.xs, px[i])
-            j = np.argmin(dists)
-            if dists[j] > 1e-6: return
-            py[i] = self.ys[j]
-        c = (self.leftBorder + self.rightBorder) / 2
-        assert np.all(px[0] == c)
         grad = np.zeros(n)
-        for i in range(n):
-            h = (self.rightBorder[i]-self.leftBorder[i]) / 2
-            assert h > 0
-            grad[i] = np.max([self.yDist(py[2*i+2], py[0])/h, self.yDist(py[0], py[2*i+1])/h])
-        grad = grad / np.max(grad)
+        eps = 0.01
+        for i in range(len(self.xs)):
+            diffs = np.abs(self.xs[i].reshape(1,-1) - self.xs)
+            big_dif = (diffs>=eps).astype(float)
+            big_dif_good_only = (np.sum(big_dif, axis=1) == 1).astype(float).reshape(-1,1)*big_dif
+            good_coords = np.sum(big_dif_good_only, axis=0)
+            if np.all(good_coords == 0): continue
+            for j in np.where(good_coords != 0)[0]:
+                for i2 in np.where(big_dif_good_only[:,j] != 0)[0]:
+                    g = self.yDist(self.ys[i2], self.ys[i]) / self.xDist(self.xs[i2],self.xs[i])
+                    grad[j] = max(grad[j], np.abs(g))
+        maxGrad = np.max(grad)
+        if maxGrad == 0: maxGrad = 1
+        grad = grad / maxGrad
         eps = self.settings['gradEps']
         if len(grad[grad <= eps]) > 0:
             grad[grad <= eps] = np.min(grad[grad > eps]) * 0.1
         self.scaleGrad = grad
         self.scaleForDist = np.linalg.norm(grad*(self.paramRanges[:,1]-self.paramRanges[:,0]).reshape(-1))
+        if self.debug: print('Scale grad =', self.scaleGrad)
+
+    def canCalculateScale(self, returnBadCoord=False):
+        def result(res, badCoord):
+            if returnBadCoord: return res, badCoord
+            else: return res
+
+        if len(self.xs) <= 1:
+            return result(False, 0)
+        eps = 0.01
+        good_coords = np.zeros(len(self.paramRanges))
+        for i in range(len(self.xs)):
+            diffs = np.abs(self.xs[i].reshape(1,-1) - self.xs)
+            big_dif = (diffs>=eps).astype(float)
+            good_coords += np.sum((np.sum(big_dif, axis=1) == 1).astype(float).reshape(-1,1)*big_dif, axis=0)
+        can = np.all(good_coords != 0)
+        badCoord = np.where(good_coords == 0)[0][0] if not can else None
+        return result(can, badCoord)
+
+    def getNewPointToCalculateScale(self):
+        can, badCoord = self.canCalculateScale(returnBadCoord=True)
+        assert not can
+        sz = len(self.xs)
+        if sz == 0: return (self.leftBorder+self.rightBorder)/2
+        randomPoints = []
+        for _ in range(1000):
+            i = self.rng.choice(len(self.xs))
+            v = self.rng.uniform()*(self.rightBorder[badCoord]-self.leftBorder[badCoord]) + self.leftBorder[badCoord]
+            x = np.copy(self.xs[i])
+            x[badCoord] = v
+            randomPoints.append(x)
+        randomPoints = np.array(randomPoints)
+        newPoint = self.chooseBestCandidateByDistance(randomPoints)
+        return newPoint
 
     def getParamBorders(self):
         return self.paramRanges[:,0], self.paramRanges[:,1]
@@ -746,13 +779,23 @@ class ErrorPredictingSampler(Sampler):
             assert False, f'Unknown sampling method {samplingMethod}'
         return candidates
 
+    def chooseBestCandidateByDistance(self, randomPoints):
+        d = self.cdist(randomPoints, self.xs)
+        min_d = np.min(d, axis=1)
+        ind = np.argmax(min_d)
+        newPoint = randomPoints[ind]
+        return newPoint
+
     def getNewPointHelper(self, samplingMethod):
         if self.profilingInfoFile is not None:
             start_time = time.time()
-        assert self.xs.shape[0] >= len(self.initial), f'{self.xs.shape[0]} < {len(self.initial)}'
-        if self.xs.shape[0] >= len(self.initial) and self.settings['normalizeGradientsGlobally'] and self.scaleGrad is None:
-            self.calculateScale()
-
+        if self.settings['normalizeGradientsGlobally'] and self.scaleGrad is None:
+            if self.canCalculateScale():
+                self.calculateScale()
+            else:
+                newPoint = self.getNewPointToCalculateScale()
+                if self.debug: print('Can\'t calculate scale in getNewPoint. Add point for scale calculation: ', newPoint)
+                return newPoint
         # if self.debug:
         #     if self.xs.shape[1] == 2 and len(self.xs) % 10 == 0:
         #         self.plotErrorMap(f'graphs/debug/{len(self.xs)}.png')
@@ -760,10 +803,7 @@ class ErrorPredictingSampler(Sampler):
         if samplingMethod['errorEst'] == 'distance':
             assert samplingMethod['candidates'] == 'random', 'Other than random candidates are impractical for distance error estimation'
             randomPoints = randomSample(self.paramRanges, self.rng, self.xs.shape[0])
-            d = self.cdist(randomPoints, self.xs)
-            min_d = np.min(d, axis=1)
-            ind = np.argmax(min_d)
-            newPoint = randomPoints[ind]
+            newPoint = self.chooseBestCandidateByDistance(randomPoints)
         else:
             canPredictCount = self.getCanErrorCalcCount()
             candidates = self.getNewPointCandidates(samplingMethod, maxPointNum=canPredictCount)
@@ -784,8 +824,24 @@ class ErrorPredictingSampler(Sampler):
         assert not self.isDublicate(newPoint)
         return newPoint
 
+    def isInsideDomain(self, xs):
+        """
+        If xs id array of points, then returns boolean array for each x in xs.
+        """
+        if len(xs.shape) == 1:
+            xs = [xs]
+            packed = True
+        else: packed = False
+        res = np.zeros(len(xs), dtype=bool)
+        left, right = self.getParamBorders()
+        for i,x in enumerate(xs): res[i] = np.all(left<=x) and np.all(x<=right)
+        if packed: res = res[0]
+        return res
+
     def getNewPoint(self, dataset):
-        return self.getNewPointHelper(self.samplingMethod)
+        x = self.getNewPointHelper(self.samplingMethod)
+        assert self.isInsideDomain(x), f'{x} is not inside {self.paramRanges}'
+        return x
 
     def switchToNoModel(self):
         assert self.samplingMethod['errorEst'] == 'model-cv'
@@ -831,16 +887,35 @@ class ErrorPredictingSampler(Sampler):
         return self.isDublicateByDist(d)
 
     def getUniquePointFromRandomDirection(self, origin, expectedDist):
+        left, right = self.getParamBorders()
+        assert self.isInsideDomain(origin), f'{origin} is not inside domain: {self.paramRanges}'
         originNormed = scaleX(origin, self.scaleGrad)
+        tryCount = 0
         while True:
+            tryCount += 1
             direction = randomDirection(self.xs.shape[1], self.rng)
-            candidate = direction * expectedDist * self.rng.uniform(low=0.5, high=2.5) + originNormed
+            expectedDist1 = expectedDist * self.rng.uniform(low=0.5, high=2.5)
+            candidate = direction * expectedDist1 + originNormed
             candidate = unscaleX(candidate, self.scaleGrad)
-            left, right = self.getParamBorders()
-            # candidate = np.clip(candidate, left, right) - results in too many points on boundaries
-            if np.all(left <= candidate) and np.all(candidate <= right):
-                if not self.isDublicate(candidate):
-                    return candidate
+            if np.any(left > candidate) or np.any(right < candidate):
+                if tryCount <= 10: continue
+                # often region is too thin, we should not repeat loop, better - to project, taking random coords inside thin dimensions
+                candidate = np.clip(candidate, left, right)
+                candidate = scaleX(candidate, self.scaleGrad)
+                dir = candidate-originNormed
+                if np.linalg.norm(dir) == 0: continue
+                # fix dist after clip
+                candidate = dir/np.linalg.norm(dir)*expectedDist1 + originNormed
+                candidate = unscaleX(candidate, self.scaleGrad)
+                # assign random values to outer coords
+                for i in range(len(left)):
+                    if candidate[i]<left[i] or candidate[i]>right[i]:
+                        candidate[i] = self.rng.uniform(low=left[i], high=right[i])
+                assert self.isInsideDomain(candidate)
+            assert np.all(np.isfinite(candidate))
+            if not self.isDublicate(candidate):
+                return candidate
+
 
     def fitModel(self):
         assert self.samplingMethod['errorEst'] == 'model-cv'
@@ -911,7 +986,7 @@ class ErrorPredictingSampler(Sampler):
             y = self.ys[ind[0]] if trueY is None else trueY
         else:
             minDist = sorted_dists[0]
-            y = self.predict(np.array([x])) if trueY is None else trueY
+            y = self.predict(np.array([x]))[0] if trueY is None else trueY
         if minDist == 0: result = 0
         else:
             neighbInd = np.where((0 < dists) & (dists <= minDist*2))[0]
@@ -990,23 +1065,23 @@ def nextPoint(X, Y, bounds, **samplerParams):
     :returns: next point x (1D array)
     """
     if isinstance(X, list): X = np.array(X)
-    if isinstance(Y, list): Y = np.array(Y)
+    assert len(bounds) == X.shape[1], f'{len(bounds)} != {X.shape[1]}'
+    if not isinstance(Y, list): Y = list(Y)
     if len(X.shape) == 1:
         print('Assume, that X is column, but not row')
         X = X.reshape(-1,1)
-    if len(Y.shape) == 1: Y = Y.reshape(-1, 1)
     if isinstance(bounds, list): bounds = np.array(bounds)
     if len(bounds.shape) == 1: bounds = bounds.reshape(1, 2)
     if 'samplerTimeConstraint' not in samplerParams:
         samplerParams['samplerTimeConstraint'] = 1
     initial = ErrorPredictingSampler(bounds, checkSampleIsGoodFunc=lambda d: True, **samplerParams).initial
-    sampler = ErrorPredictingSampler(bounds, initialDataset=X, checkSampleIsGoodFunc=lambda dataset: len(dataset[0]) >= len(X), **samplerParams)
+    sampler = ErrorPredictingSampler(bounds, checkSampleIsGoodFunc=lambda dataset: len(dataset[0]) >= len(X), **samplerParams)
 
     def func(x):
         for i in range(len(X)):
-            if x == X[i]: return Y[i]
+            if np.all(x == X[i]): return Y[i]
         assert False, "Calculate function for all the initial points:\n"+str(initial)
-    orchestrator = CalculationOrchestrator(func)
+    orchestrator = CalculationOrchestrator(func, existingDatasetGetter=lambda: (X,Y))
     generator = DatasetGenerator(sampler, orchestrator)
     generator.generate()
     return generator.getNewPoint()

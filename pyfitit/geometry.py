@@ -141,15 +141,40 @@ def get_line_by_2_points(x1, y1, x2, y2):
     return a,b,c
 
 
+def get_line_by_2_points_kb(x1, y1, x2, y2):
+    """
+    Return b,k for the model y=kx+b
+    """
+    a,b,c = get_line_by_2_points(x1, y1, x2, y2)
+    assert np.abs(b) > max(np.abs(a), np.abs(c))*1e-10
+    return -c/b,-a/b
+
+
+def get_line_intersection_kb(b1, k1, b2, k2):
+    return get_line_intersection(k1, -1, b1, k2, -1, b2)
+
+
 def get_line_intersection(a1, b1, c1, a2, b2, c2):
     d = a1*b2 - b1*a2
-    assert d != 0, f'{a1}x + {b1}y + {c1} = 0  {a2}x + {b2}y + {c2} = 0'
+    if d == 0:
+        n1 = np.linalg.norm([a1,b1])
+        n2 = np.linalg.norm([a2,b2])
+        if n1 == 0 and c1 != 0: return np.nan, np.nan
+        if n2 == 0 and c2 != 0: return np.nan, np.nan
+        if n1 == 0 and n2 == 0: return 0,0
+        if n1 == 0: return a2/n2**2*c2, b2/n2**2*c2
+        if n2 == 0: return a1/n1**2*c1, b1/n1**2*c1
+        if np.isclose(c1/n1, c2/n2, rtol=1e-6): return a1/n1**2*c1, b1/n1**2*c1
+        else: return np.nan, np.nan
     z = np.linalg.solve(np.array([[a1,b1], [a2,b2]]), [-c1,-c2])
     x = z[0]; y = z[1]
     assert np.abs(a1*x+b1*y+c1)<1e-6, f'{np.abs(a1*x+b1*y+c1)}>1e-6. a1={a1} b1={b1} c1={c1}   a2={a2} b2={b2} c2={c2}'
     assert np.abs(a2*x+b2*y+c2)<1e-6, f'{np.abs(a2*x+b2*y+c2)}>1e-6. a1={a1} b1={b1} c1={c1}   a2={a2} b2={b2} c2={c2}'
     return x, y
 
+
+def get_dist_to_line(a,b,c,x0,y0):
+    return np.abs(a*x0+b*y0+c)/np.sqrt(a**2+b**2)
 
 def getNNdistsStable(x1, x2):
     dists = scipy.spatial.distance.cdist(x1, x2)

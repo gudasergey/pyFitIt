@@ -28,18 +28,20 @@ class Spectrum(object):
         super(Spectrum, self).__init__()
         self.__initialized = False
         assert len(x) == len(y), f'{len(x)} != {len(y)}'
+        assert np.all(np.isfinite(x)), str(x)
+        assert np.all(np.isfinite(y)), str(y)
         self.checkSorting = checkSorting
         if not np.all(x[1:]>=x[:-1]):
             i = np.argsort(x)
             x = x[i]
             y = y[i]
             if checkSorting:
-                raise Exception('Spectrum energy is not sorted')
+                raise Exception('Spectrum energy is not sorted: '+str(x))
             else:
                 warnings.warn('Spectrum energy is not sorted. I sort it')
         if copy:
-            self.x = np.copy(x).reshape(-1)
-            self.y = np.copy(y).reshape(-1)
+            self.x = np.copy(x).flatten()
+            self.y = np.copy(y).flatten()
         else:
             self.x = x
             self.y = y
@@ -87,7 +89,7 @@ class Spectrum(object):
     def clone(self):
         return Spectrum(self.x, self.y, xName=self.xName, yName=self.yName, copy=True, checkSorting=False, spectrum_type=self.type)
 
-    def limit(self, interval):
+    def limit(self, interval, inplace=False):
         assert len(interval) == 2, str(interval)
         assert interval[0] < interval[1], str(interval)
         assert self.x[0] < interval[1] and interval[0] < self.x[-1], f'Spectrum energy interval [{self.x[0]},{self.x[-1]}] doesn\'t intersect with interval {interval}'
@@ -98,16 +100,25 @@ class Spectrum(object):
         if e[-1] != interval[1] and self.x[0] < interval[1] < self.x[-1]:
             e = np.append(e, interval[1])
             inten = np.append(inten, np.interp(interval[1], self.x, self.y))
-        return Spectrum(e, inten, xName=self.xName, yName=self.yName, copy=True, spectrum_type=self.type)
+        if inplace:
+            self.x.resize(len(e))
+            self.y.resize(len(e))
+            self.x[:], self.y[:] = e, inten
+        else: return Spectrum(e, inten, xName=self.xName, yName=self.yName, copy=True, spectrum_type=self.type)
 
-    def changeEnergy(self, newEnergy, interpArgs=None):
+    def changeEnergy(self, newEnergy, interpArgs=None, inplace=False):
         if self.checkSorting: assert np.all(newEnergy[1:]>=newEnergy[:-1])
         if interpArgs is None: interpArgs = {}
         newInt = np.interp(newEnergy, self.x, self.y, **interpArgs)
-        return Spectrum(newEnergy, newInt, xName=self.xName, yName=self.yName, copy=True, checkSorting=self.checkSorting, spectrum_type=self.type)
+        if inplace:
+            self.x.resize(len(newEnergy))
+            self.y.resize(len(newInt))
+            self.x[:], self.y[:] = newEnergy, newInt
+        else: return Spectrum(newEnergy, newInt, xName=self.xName, yName=self.yName, copy=True, checkSorting=self.checkSorting, spectrum_type=self.type)
 
-    def shiftEnergy(self, shift, inplace=False):
-        return self.changeEnergy(newEnergy=self.x+shift, inplace=inplace)
+    def shiftEnergy(self, shift, inplace):
+        if inplace: self.x += shift
+        else: return Spectrum(self.x+shift, self.y, xName=self.xName, yName=self.yName)
 
     def val(self, energyValue):
         """
@@ -117,32 +128,23 @@ class Spectrum(object):
 
     def inverse(self, y, select='min'):
         from . import geometry
-        ind = np.where((self.y[:-1] - y) * (self.y[1:] - y) <= 0)[0]
-        if len(ind) == 0: return None
-        if select == 'min': i = ind[0]
-        else:
-            assert select == 'max'
-            i = ind[-1]
-        a,b,c = geometry.get_line_by_2_points(self.x[i], self.y[i], self.x[i+1], self.y[i+1])
-        e,inten = geometry.get_line_intersection(a, b, c, 0, 1, -y)
-        return e
-
-    def toExafs(self, Efermi, k_power, preserveGrid=False):
-        me = 2 * 9.109e-31  # kg
-        h = 1.05457e-34  # J*s
-        J = 6.24e18  # 1 J = 6.24e18 eV
-        e, s = self.x, self.y
-        i = e >= Efermi
-        k = np.sqrt((e[i] - Efermi) / J * me / h ** 2 / 1e20)  # J * kg /  (J*s)^2 = kg / (J * s^2) = kg / ( kg*m^2 ) = 1/m^2 = 1e-20 / A^2
-        intSqr = (s[i] - 1) * k ** k_power
-        if preserveGrid:
-            k1 = np.sign(e-Efermi)*np.sqrt(np.abs(e-Efermi) / J * me / h ** 2 / 1e20)
-            intSqr1 = np.zeros(len(e))
-            intSqr1[i] = intSqr
-        else:
-            k1 = np.linspace(k[0], k[-1], int((k[-1]-k[0])*100))
-            intSqr1 = np.interp(k1, k, intSqr)
-        return Spectrum(k1, intSqr1, xName='k', yName='chi')
+        y0 = y
+        if not isArray(y): y = [y]
+        result = np.zeros(len(y))
+        for j,y1 in enumerate(y):
+            ind = np.where((self.y[:-1] - y1) * (self.y[1:] - y1) <= 0)[0]
+            if len(ind) == 0:
+                result[j] = np.nan
+                continue
+            if select == 'min': i = ind[0]
+            else:
+                assert select == 'max'
+                i = ind[-1]
+            a,b,c = geometry.get_line_by_2_points(self.x[i], self.y[i], self.x[i+1], self.y[i+1])
+            e,inten = geometry.get_line_intersection(a, b, c, 0, 1, -y1)
+            result[j] = e
+        if not isArray(y0): return result[0]
+        else: return result
 
     def toTuple(self):
         return self.x, self.y
@@ -355,7 +357,7 @@ def read_non_uniform_data(file, skiprows=0):
     else:
         lines = file.read().decode("utf-8")
     lines = lines.split('\n')
-    #skip lines
+    # skip lines
     lines = lines[skiprows:]
     lines = [l.strip() for l in lines]
     # delete empty lines
@@ -388,32 +390,48 @@ def read_non_uniform_data(file, skiprows=0):
     result = []
     if header is not None:
         header = re.split(r"[\s;]+", header)
+        # delete comments
         if header[0] in ['#', '!', ';', '//']: header = header[1:]
     for i in range(len(lines)):
         numbers = re.findall(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', lines[i])
         result.append(np.array([float(n) for n in numbers]))
     assert len(result) > 0, 'Unknown file format. Can\'t guess'
-    return result, header
+    format = None
+    if header == ['e', 'norm', 'nbkg', 'flat', 'fbkg', 'nder', 'nsec']: format = 'nor'
+    if header == ['k', 'chi', 'chik', 'chik2', 'chik3', 'win', 'energy']: format = 'chik'
+    if header == ['e', 'xmu', 'bkg', 'pre_edge', 'post_edge', 'der', 'sec', 'chie'] or header == ['e', 'xmu', 'bkg', 'pre_edge', 'post_edge', 'der', 'sec', 'i0', 'chie']: format = 'xmu'
+    if header == ['omega', 'e', 'k', 'mu', 'mu0', 'chi', '@#']: format = 'feff xmu'
+    if header == ['k', 'chi', 'mag', 'phase', '@#']: format = 'feff chi'
+    if header == ['Energy', '<xanes>']: format = 'fdmnes'
+    return result, header, format
 
 
-def read_data(file, skiprows=0, separator=r'\s+', decimal=".", guess=True):
+def read_data(file, skiprows=0, separator=r'\s+', decimal=".", guess=True, returnFormat=False):
     """
     Read spectra from file (columnwise). Try guess=True first
+    Returns result, header. If returnFormat==True the function returns also string with known formats: nor, chik, xmu, feff xmu, feff chi, fdmnes. Otherwise format == extension
     """
+    format = os.path.splitext(file)[-1][1:]
     if guess:
-        data, header = read_non_uniform_data(file, skiprows=0)
+        data, header, format1 = read_non_uniform_data(file, skiprows=0)
+        if format1 is not None: format = format1
         ncols = len(data[-1])
         for row in data:
             assert len(row) == ncols, f'Rows with different number of columns detected: {len(row)} and {ncols}'
         if header is not None:
             assert len(header) == ncols, f'Header contains different number of columns: {len(header)} != {ncols}'
         result = np.array(data)
+        if format == 'fdmnes' and result[0,0] < 100:
+            from . import fdmnes
+            info = fdmnes.parseHeader(file)
+            result[:, 0] += info['Epsii']
     else:
         result = pd.read_csv(file, sep=separator, decimal=decimal, skiprows=skiprows, header=None)
         result = result.select_dtypes(include=np.number)
         header = result.columns
         result = result.to_numpy()
-    return result, header
+    if returnFormat: return result, header, format
+    else: return result, header
 
 
 def fixMultiValue(x, y, gatherOp):
@@ -695,9 +713,12 @@ def gauss(x,a,s):
     return 1/s/np.sqrt(2*np.pi)*np.exp(-(x-a)**2/2/s**2)
 
 
-def findFile(folder='.', postfix=None, mask=None, check_unique=True, ignoreSlurm=True, returnAll=False):
+def findFile(folder='.', postfix=None, mask=None, check_unique=None, ignoreSlurm=True, returnAll=False):
     assert (mask is not None) or (postfix is not None)
     assert (mask is None) or (postfix is None)
+    if check_unique is None:
+        if returnAll: check_unique=False
+        else: check_unique=True
     if postfix is not None: mask = f'*{postfix}'
     if folder != '.': mask = f'{folder}/{mask}'
     files = sorted(glob.glob(mask))
@@ -835,6 +856,15 @@ def comb_index(n, k, repetition=False):
     return index.reshape(-1, k)
 
 
+def cartesian_product(*arrays):
+    la = len(arrays)
+    dtype = np.result_type(*arrays)
+    arr = np.empty([len(a) for a in arrays] + [la], dtype=dtype)
+    for i, a in enumerate(np.ix_(*arrays)):
+        arr[...,i] = a
+    return arr.reshape(-1, la)
+
+
 def find_nearest_in_sorted_array(array, value):
     idx = np.searchsorted(array, value, side="left")
     if idx > 0 and (idx == len(array) or math.fabs(value - array[idx-1]) < math.fabs(value - array[idx])):
@@ -890,6 +920,8 @@ def rFactorSp(theory, exp, weight=None, p=2, sub1=False, interval=None, fit=None
         :param normalize: normalize spectra before comparison ('L1', 'L2', None)
         :param divBy: 'exp' or 'theory' or '1'
     """
+    assert isinstance(theory, Spectrum), str(theory)
+    assert isinstance(exp, Spectrum), str(exp)
     from . import curveFitting
     theory = copy.deepcopy(theory)
     exp = copy.deepcopy(exp)
@@ -897,15 +929,18 @@ def rFactorSp(theory, exp, weight=None, p=2, sub1=False, interval=None, fit=None
         assert len(weight) == len(exp.x), 'Weight should be defined for exp spectrum'
     et, e = theory.x, exp.x
     yt, ye = theory.y, exp.y
-    if interval is None: interval = [max(e[0],et[0]), min(e[-1], et[-1])]
-    ind = (interval[0]<=e) & (e<=interval[1])
+    interv = intervalIntersection(et[[0, -1]], e[[0, -1]])
+    assert interv is not None, f'Spectrum energies don\'t intersect: {et[[0, -1]]} {e[[0, -1]]}'
+    if interval is not None: interv = intervalIntersection(interval, interv)
+    assert interv is not None, f'User defined and common spectrum intervals don\'t intersect: {interval} {interv}'
+    ind = (interv[0]<=e) & (e<=interv[1])
     e,ye = e[ind],ye[ind]
     if weight is not None:
         weight = weight[ind]
     if len(et) != len(e) or np.any(et != e):
         yt = np.interp(e, et, yt)
     if fit is not None:
-        yt, _ = curveFitting.fit_to_experiment_by_norm_or_regression(e, ye, interval, e, yt, 0, None, normType=fit)
+        yt, _ = curveFitting.fit_to_experiment_by_norm_or_regression(e, ye, interv, e, yt, 0, None, normType=fit)
     if normalize is not None:
         assert normalize in ['L1', 'L2']
         p2 = 1 if normalize == 'L1' else 2
@@ -1143,6 +1178,7 @@ def hash(obj):
         return hashlib.md5(pickle.dumps(obj)).hexdigest()
     def dict_hash(d):
         return pickle_hash(json.dumps({k:hash(v) for k,v in d.items()}, sort_keys=True, cls=NumpyEncoder))
+    from . import ML
     # try:
     if isinstance(obj, dict):
         return dict_hash(obj)
@@ -1152,6 +1188,8 @@ def hash(obj):
         return pickle_hash(pd.util.hash_pandas_object(obj).sum())
     elif isinstance(obj, pd.Series):
         return pickle_hash(pd.util.hash_pandas_object(obj))
+    elif isinstance(obj, ML.Sample):
+        return obj.__hash__()
     else:
         return pickle_hash(obj)
     # except:
@@ -1176,39 +1214,41 @@ class Cache:
             os.makedirs(folder, exist_ok=True)
         self.debug = debug
 
-    def getIfUpToDate(self, dataName, dependData):
+    def getIfUpToDate(self, dataName, dependDataHash):
         if dataName in self.dataDict:
             h, data = self.dataDict[dataName]
-            if h == hash(dependData):
+            if h == dependDataHash:
                 if self.debug: print(f'key {dataName} with hash {h} was found in memory cache')
                 return 'memory', data
         # try to read from disk
         if self.folder is not None:
-            h = hash(dependData)
-            fileName = self.folder +os.sep+ f'{dataName}_{h}.pkl'
+            fileName = self.folder +os.sep+ f'{dataName}_{dependDataHash}.pkl'
             if os.path.exists(fileName):
-                if self.debug: print(f'key {dataName} with hash {h} was found in disk cache')
+                if self.debug: print(f'key {dataName} with hash {dependDataHash} was found in disk cache')
                 data = loadData(fileName)
-                self.dataDict[dataName] = (h, data)
+                self.dataDict[dataName] = (dependDataHash, data)
                 return 'disk', data
+            else:
+                if self.debug and (findFile(self.folder, mask=f'{dataName}_*.pkl', check_unique=False, returnAll=True) is not None):
+                    print(f'key {dataName} was found, but with another hash != {dependDataHash}')
         return None, None
 
     def getFromCacheOrEval(self, dataName, evalFunc, dependData):
-        src, data = self.getIfUpToDate(dataName, dependData)
+        h = hash(dependData)
+        src, data = self.getIfUpToDate(dataName, h)
         if src is None:
             data = evalFunc()
-            self.updateEntry(dataName, data, dependData)
-            if self.debug: print(f'key {dataName} was not found in cache and was evaluated')
+            self.updateEntry(dataName, data, h)
+            if self.debug: print(f'key {dataName} was evaluated')
         # we should not return the same reference, because otherwise user can change data inside cache
         data = copy.deepcopy(data)
         return data
 
-    def updateEntry(self, dataName, data, dependData):
+    def updateEntry(self, dataName, data, dependDataHash):
         data = copy.deepcopy(data)
-        h = hash(dependData)
-        self.dataDict[dataName] = (h, data)
+        self.dataDict[dataName] = (dependDataHash, data)
         if self.folder is not None:
-            fileName = self.folder + os.sep + f'{dataName}_{h}.pkl'
+            fileName = self.folder + os.sep + f'{dataName}_{dependDataHash}.pkl'
             saveData(data, fileName)
 
 
@@ -1346,3 +1386,53 @@ def loadLibrary(path):
     module = _importlib_util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def intervalIntersection(interval1, interval2):
+    assert len(interval1) == 2
+    assert len(interval2) == 2
+    left = max(interval1[0], interval2[0])
+    right = min(interval1[1], interval2[1])
+    if left > right: return None
+    return [left, right]
+
+
+def importXrayDB():
+    def make_engine(dbname):
+        "create engine for sqlite connection"
+        # print('call to my make_engine')
+        try:
+            import sqlalchemy
+            engine = sqlalchemy.create_engine('sqlite:///%s' % (dbname), poolclass=sqlalchemy.pool.SingletonThreadPool, connect_args={'check_same_thread': False})
+        except:
+            # print('Except')
+            # import traceback
+            # print(traceback.format_exc())
+            table_count = 0
+            try:
+                engine = sqlalchemy.create_engine('sqlite:///:memory:', echo=False, poolclass=sqlalchemy.pool.SingletonThreadPool)
+                with engine.connect() as con:
+                    with open(os.path.split(__file__)[0]+os.sep+"xraydb_dump.sql") as file:
+                        for l in file.read().split(';'):
+                            if l.strip() == '': continue
+                            query = sqlalchemy.text(l)
+                            con.execute(query)
+                insp = sqlalchemy.inspect(engine)
+                table_count = len(insp.get_table_names())
+            except:
+                # print('Except 2')
+                # import traceback
+                # print(traceback.format_exc())
+                pass
+            if table_count == 0: raise Exception('Error while restoring dump to memory database')
+            # check
+            if xraydb.xraydb.make_engine != make_engine and not xraydb.xraydb.isxrayDB(dbname):
+                if os.path.exists('xraydb.sqlite'): os.unlink('xraydb.sqlite')
+                raise Exception('XrayDB has been changed. Update xraydb_dump.sql file by the command:\n/opt/anaconda/bin/sqlite3 /opt/anaconda/lib/python3.10/site-packages/xraydb/xraydb.sqlite .dump > xraydb_dump.sql')
+        return engine
+    # check if XrayDB has been changed
+    import xraydb
+    db_path = os.path.split(xraydb.__file__)[0]+os.sep+'xraydb.sqlite'
+    make_engine(db_path)
+    xraydb.xraydb.make_engine = make_engine
+    return xraydb

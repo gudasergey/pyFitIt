@@ -2,7 +2,7 @@ from typing import Optional
 from scipy.interpolate import RBFInterpolator
 import numpy as np
 import pandas as pd
-import math, copy, os, time, warnings, glob, sklearn, inspect, json, re, shutil
+import math, copy, os, time, warnings, glob, sklearn, sklearn.linear_model, inspect, json, re, shutil, scipy, scipy.stats, scipy.special
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from . import geometry, utils, plotting
@@ -55,7 +55,7 @@ class Sample:
                 assert len(sp0) == len(spectras[spType]), 'All spectra collections in dict must have the same count'
             first = False
             self.setSpectra(spectra=spectras[spType], energy=energies[spType], spType=spType, makeCommonEnergy=makeCommonEnergy, interpArgs=interpArgs)
-        self.defaultSpType = self.spTypes()[0]
+        self.setDefaultSpType()
         if meta is None: meta = {'defaultSpType': self.defaultSpType}
         assert set(meta.keys()) <= {'nameColumn', 'labels', 'labelMaps', 'features', 'userDefined', 'defaultSpType'}
         if 'defaultSpType' in meta: self.defaultSpType = meta['defaultSpType']
@@ -124,7 +124,8 @@ class Sample:
         return len(self.getSpectra(spType))
 
     def __hash__(self):
-        return hash((utils.hash(self._spectra), utils.hash(self.params), utils.hash(self.meta), self.defaultSpType, self.folder))
+        res = utils.hash((utils.hash(self._spectra), utils.hash(self.params), utils.hash(self.meta)))
+        return res
 
     def getLength(self): return len(self)
 
@@ -134,7 +135,10 @@ class Sample:
     def getDefaultSpType(self):
         return self.defaultSpType
 
-    def setDefaultSpType(self, spType):
+    def setDefaultSpType(self, spType=None):
+        if spType is None:
+            if 'default' in self.spTypes(): spType = 'default'
+            else: spType = self.spTypes()[0]
         assert spType in self.spTypes(), f'{spType} not in {self.spTypes()}'
         self.defaultSpType = spType
 
@@ -149,9 +153,11 @@ class Sample:
             self.setDefaultSpType(newName)
 
     def delSpType(self, spType):
-        assert spType in self._spectra
+        assert spType in self._spectra, f'spType {spType} not in sample spTypes: {self.spTypes()}'
+        assert len(self.spTypes())>1, f'Can\'t delete the only existing spType'
         del self._spectra[spType]
         del self._energy[spType]
+        if self.getDefaultSpType() == spType: self.setDefaultSpType()
 
     def setSpectra(self, spectra, energy=None, spType=None, makeCommonEnergy=True, interpArgs=None):
         """
@@ -209,6 +215,7 @@ class Sample:
 
     def isCommonEnergy(self, spType=None):
         if spType is None: spType = self.getDefaultSpType()
+        assert spType in self.spTypes(), f'Unknown spType: {spType}. All types: {self.spTypes()}'
         return self._energy[spType] is not None
 
     def getSpectrum(self, ind=None, name=None, spType=None, returnIntensityOnly=False):
@@ -232,6 +239,7 @@ class Sample:
                 res[spT] = self._spectra[spT][ind]
         if spType is None: spType = self.getDefaultSpType()
         if spType == 'all types': return res
+        assert spType in res, f'Unknown spType: {spType}. All types: {self.spTypes()}'
         return res[spType]
 
     def getIndByName(self, name):
@@ -262,17 +270,25 @@ class Sample:
         else:
             assert ind is None
             ind = self.getIndByName(name)
+        if isinstance(spectrum, dict):
+            assert set(spectrum.keys()) == set(self._spectra.keys())
+            for k in spectrum:
+                assert isinstance(spectrum[k], np.ndarray), str(spectrum[k])
+                assert len(spectrum[k]) == len(self._energy[k])
+        else:
+            spType = self.getDefaultSpType()
+            assert isinstance(spectrum, np.ndarray), str(spectrum)
+            assert len(spectrum) == len(self._energy[spType])
+
         if spType is None:
             if len(self._spectra) > 1:
-                assert isinstance(spectrum, dict) and set(spectrum.keys()) == set(self._spectra.keys())
+                assert isinstance(spectrum, dict)
                 for spType in spectrum:
                     if self.isCommonEnergy(spType):
                         self._spectra[spType].loc[ind] = spectrum[spType]
                     else:
                         self._spectra[spType][ind] = spectrum[spType]
                 return
-            else:
-                spType = self.getDefaultSpType()
         if isinstance(spectrum, dict):
             assert len(spectrum) == 1
             spectrum = spectrum[list(spectrum.keys())[0]]
@@ -292,6 +308,7 @@ class Sample:
 
     def getEnergy(self, spType=None):
         if spType is None: spType = self.getDefaultSpType()
+        assert spType in self.spTypes(), f'SpType {spType} is unknown. Known: {self.spTypes()}'
         return self._energy[spType]
 
     def setEnergy(self, energy, spType=None):
@@ -442,12 +459,15 @@ class Sample:
         """
         assert (paramData is None) or (paramGenerator is None)
         assert paramName != ''
-        assert paramName not in self.paramNames, f'Parameter {paramName} already exists'
-        if not isinstance(paramData, np.ndarray): paramData = np.array(paramData)
+        if isinstance(paramName, str):  # need to construct one parameter
+            paramName = [paramName]
+        for pn in paramName:
+            assert pn not in self.paramNames, f'Parameter {pn} already exists'
         n = self.params.shape[0]
+        if paramGenerator is None and paramData is None:
+            paramData = np.zeros((n, len(paramName)))
+            paramData[:,:] = np.nan
         if paramData is None:
-            if isinstance(paramName, str):  # need to construct one parameter
-                paramName = [paramName]
             newParam = np.zeros((n, len(paramName)))
             for i in range(n):
                 params = {self.paramNames[j]:self.params.loc[i,self.paramNames[j]] for j in range(self.paramNames.size)}
@@ -456,10 +476,13 @@ class Sample:
                 newParam[i] = t
             for p,j in zip(paramName, range(len(paramName))): self.params[p] = newParam[:,j]
         else:
-            assert paramData.size == n
-            self.params[paramName] = paramData
+            if not isinstance(paramData, np.ndarray): paramData = np.array(paramData)
+            assert paramData.shape[0] == n, f'{paramData.shape[0]} != {n}'
+            if len(paramData.shape) == 1: paramData = paramData.reshape(-1,1)
+            assert len(paramData.shape) == 2, f'len({paramData.shape}) != 2'
+            for j,pn in enumerate(paramName):
+                self.params[pn] = paramData[:,j]
         self.paramNames = self.params.columns.values
-        self.folder = None
 
     def delParam(self, paramName):
         assert self.params.shape[1]>1, 'Can\'t delete last parameter'
@@ -472,7 +495,6 @@ class Sample:
             if p in self.features: del self.features[self.features.index(p)]
             if p in self.labelMaps: del self.labelMaps[p]
         self.paramNames = self.params.columns.to_numpy()
-        self.folder = None
 
     def delRow(self, i, inplace=True):
         if inplace:
@@ -516,12 +538,12 @@ class Sample:
         ind = [self.getIndByName(name) for name in names]
         return self.takeRows(ind)
 
-    def unionWith(self, other):
+    def unionWith(self, other, inplace=False):
         if other is None: return
         # checks
         assert isinstance(other, self.__class__)
         assert np.all(self.params.shape[1] == other.params.shape[1]), 'Params differ: self = '+str(self.paramNames)+' other = '+str(other.paramNames)
-        assert self._spectra.keys() == other._spectra.keys()
+        assert self.spTypes() == other.spTypes(), f'{self.spTypes()} != {other.spTypes()}'
         for spType in self._spectra:
             assert self.isCommonEnergy(spType) == other.isCommonEnergy(spType)
             if self.isCommonEnergy(spType):
@@ -531,14 +553,17 @@ class Sample:
         assert self.labelMaps == other.labelMaps, f'{self.labelMaps} != {other.labelMaps}'
 
         # union
-        self.params = pd.concat((self.params, other.params), ignore_index=True)
+        if inplace: res = self
+        else: res = self.copy()
+        res.params = pd.concat((self.params, other.params), ignore_index=True)
         for spType in self._spectra:
             if self.isCommonEnergy(spType):
-                self._spectra[spType] = pd.concat((self._spectra[spType], other._spectra[spType]), ignore_index=True)
+                res._spectra[spType] = pd.concat((self._spectra[spType], other._spectra[spType]), ignore_index=True)
             else:
-                self._spectra[spType] += other._spectra[spType]
-        self.folder = None
-        self.check()
+                res._spectra[spType] += other._spectra[spType]
+        res.folder = None
+        res.check()
+        if not inplace: return res
 
     def addSpectrumType(self, spectra, spType, energy=None, makeCommonEnergy=True, interpArgs=None):
         assert spType not in self.spTypes(), f'Spectrum type {spType} already exists'
@@ -613,6 +638,8 @@ class Sample:
 
     def decode(self, label: str, labelMap=None, values=None):
         if isinstance(values, pd.Series): values = values.to_numpy()
+        if values is not None and not isinstance(values,np.ndarray):
+            values = np.array(values)
         inplace = values is None
         if labelMap is None:
             labelMap = self.labelMaps[label]
@@ -629,9 +656,13 @@ class Sample:
             good_ind = np.where(~np.isnan(values))[0]
             if isinstance(values, list): values = np.array(values)
             values = values[good_ind]
-            if len(values) == 0: return values0  # all values are NaNs
+            if len(values) == 0:
+                if inplace and label in self.labelMaps: del self.labelMaps[label]
+                return values0  # all values are NaNs
         if isinstance(values[0], (float, np.float64, np.int64)):
-            values = np.array([int(v) for v in values])
+            int_values = values.astype(int)
+            assert np.all(int_values == values), f''
+            values = int_values
 
         k = list(labelMap.keys())[0]
         typ = object if isinstance(k, str) else float
@@ -652,8 +683,7 @@ class Sample:
         else: return r
 
     def decodeAllLabels(self):
-        for l in self.labels:
-            if l in self.labelMaps: self.decode(l)
+        for l in self.labelMaps: self.decode(l)
 
     def encode(self, label, labelMap=None):
         """Run LabelEncoder and stores result in params and labelMaps"""
@@ -714,37 +744,52 @@ class Sample:
         else:
             return known, unknown
 
-    def plot(self, folder, colorParam=None, plotIndividualParams=None, maxIndivPlotCount=None, **kw):
+    def plot(self, folder, colorParam=None, spType='all spTypes', plotIndividualParams=None, maxIndivPlotCount=None, plotSampleParams=None):
         """
-        :param plotIndividualParams: dict params of plotToFile to plot individual spectra
+        :param plotIndividualParams: dict params of plotToFile to plot individual spectra (not on sample)
+        :param plotSampleParams: plotSample params and individual plot params if plotIndividualParams['plot on sample'] == True
         """
+        if spType == 'all spTypes': spTypes = self.spTypes()
+        else:
+            assert spType in self.spTypes()
+            spTypes = [spType]
+        if plotSampleParams is None: plotSampleParams = {}
+        plotSampleParams = copy.deepcopy(plotSampleParams)
+        if not (set(plotSampleParams.keys()) <= set(self.spTypes())):
+            plotSampleParams1 = {}
+            for spType in spTypes:
+                plotSampleParams1[spType] = copy.deepcopy(plotSampleParams)
+                if colorParam is not None and 'cmap' not in plotSampleParams1[spType]:
+                    plotSampleParams1[spType]['cmap'] = 'gist_rainbow'
+            plotSampleParams = plotSampleParams1
+        for spType in spTypes:
+            if spType not in plotSampleParams: plotSampleParams[spType] = {}
         if isinstance(colorParam, str):
             colorParamData = self.params[colorParam].to_numpy()
             if colorParam in self.labelMaps:
                 colorParamData = self.decode(colorParam, values=colorParamData)
-                if 'cmap' not in kw:
-                    plotSampleKws = copy.deepcopy(kw)
-                    plotSampleKws['cmap'] = 'gist_rainbow'
             colorParam = colorParamData
-        for spType in self._spectra:
-            plotSampleKws1 = copy.deepcopy(kw)
-            for n,v in plotSampleKws1.items():
-                if isinstance(v, dict) and set(v.keys()) == set(self.spTypes()):
-                    plotSampleKws1[n] = v[spType]
-            plotting.plotSample(self._energy[spType], self._spectra[spType], fileName=folder + os.sep + f'plot_{spType}.png', colorParam=colorParam, **plotSampleKws1)
+        for spType in spTypes:
+            ext = os.path.splitext(folder)[-1].lower()
+            if len(spTypes) == 1 and ext != '' and ext in ['.jpg','.png','.svg'] and plotIndividualParams is None:
+                filename = folder
+            else: filename = folder + os.sep + f'plot_{spType}.png'
+            plotting.plotSample(self._energy[spType], self._spectra[spType], fileName=filename, colorParam=colorParam, **plotSampleParams[spType])
         if plotIndividualParams is not None:
             assert isinstance(plotIndividualParams, dict)
-            for spType in self.spTypes():
+            if not (set(plotIndividualParams.keys()) <= set(self.spTypes())) or len(plotIndividualParams) == 0:
+                plotIndividualParams = {spType:copy.deepcopy(plotIndividualParams) for spType in self.spTypes()}
+            for spType in spTypes:
                 for i in range(self.getLength()):
                     name = utils.zfill(i,self.getLength()) if self.nameColumn is None else self.params.loc[i,self.nameColumn]
                     fileName = f'{folder}{os.sep}individ_{spType}{os.sep}{name}.png'
                     s = self.getSpectrum(i, spType=spType)
-                    if plotIndividualParams.get('plot on sample', False):
+                    if plotIndividualParams[spType].get('plot on sample', False):
                         if colorParam is not None:
                             fileName = [fileName, f'{folder}{os.sep}individ_{spType}_sorted{os.sep}{colorParam[i]}_{name}.png']
-                        plotting.plotSample(self._energy[spType], self._spectra[spType], fileName=fileName, colorParam=colorParam, highlight_inds=[i], **kw)
+                        plotting.plotSample(self._energy[spType], self._spectra[spType], fileName=fileName, colorParam=colorParam, highlight_inds=[i], **plotSampleParams[spType])
                     else:
-                        plotting.plotToFile(s.x,s.y,'', fileName=fileName, **plotIndividualParams)
+                        plotting.plotToFile(s.x,s.y,'', fileName=fileName, **plotIndividualParams[spType])
                     if maxIndivPlotCount is not None and i>=maxIndivPlotCount: break
 
     def convertEnergyToWeights(self):
@@ -753,7 +798,7 @@ class Sample:
         de2 = e[2:]-e[:-2]
         w = np.insert(de2, 0, e[1]-e[0])
         w = np.append(w, e[-1]-e[-2])
-        return w/2
+        return w/np.sum(w)
 
     def normalize(self, paramName, meanStd=None, inplace=True):
         """
@@ -828,14 +873,15 @@ def scoreFast(y, predictY):
     if len(y.shape) >=2 and np.sum(y.shape != 1) == 1: y = y.flatten()
     if len(predictY.shape) >=2 and np.sum(predictY.shape != 1) == 1: predictY = predictY.flatten()
     assert np.all(y.shape == predictY.shape), f'{y.shape} != {predictY.shape}'
-    if len(y.shape) == 1:
-        u = np.mean((y - predictY)**2)
-        v = np.mean((y - np.mean(y))**2)
-    else:
-        u = np.mean(np.linalg.norm(y - predictY, axis=1, ord=2)**2)
-        v = np.mean(np.linalg.norm(y - np.mean(y, axis=0).reshape([1,y.shape[1]]), axis=1, ord=2)**2)
-    if v == 0: return 0
-    return 1-u/v
+    return sklearn.metrics.r2_score(y, predictY, multioutput='uniform_average')
+    # if len(y.shape) == 1:
+    #     u = np.mean((y - predictY)**2)
+    #     v = np.mean((y - np.mean(y))**2)
+    # else:
+    #     u = np.mean(np.linalg.norm(y - predictY, axis=1, ord=2)**2)
+    #     v = np.mean(np.linalg.norm(y - np.mean(y, axis=0).reshape([1,y.shape[1]]), axis=1, ord=2)**2)
+    # if v == 0: return 0
+    # return 1-u/v
 
 
 def score(x,y,predictor):
@@ -843,12 +889,48 @@ def score(x,y,predictor):
     return scoreFast(y,predictY)
 
 
-def calcAllMetrics(y_true, y_pred, classification:bool):
+def confidenceInterval(valueName, confidenceLevel, **args):
+    assert valueName in ['ratio', 'sigma', 'R2score', 'MAE', 'max']
+    alpha = (1 - confidenceLevel) / 2
+    if valueName == 'ratio':
+        numerator, denominator = args['numerator'], args['denominator']
+        a, b = numerator, denominator-numerator
+        c1, c2 = scipy.stats.beta.ppf([alpha,1-alpha], a+1, b+1)
+        return [c1,c2]
+    elif valueName == 'sigma':
+        rmse, n = args['rmse'], args['n']
+        c1, c2 = scipy.stats.chi2.ppf([alpha, 1-alpha], n)
+        rmse_a, rmse_b = np.sqrt(n / c2) * rmse, np.sqrt(n / c1) * rmse
+        return [rmse_a, rmse_b]
+    elif valueName =='R2score':
+        R2score, n = args['R2score'], args['n']
+        u2_div_v2 = 1 - R2score
+        c1, c2 = scipy.stats.f.ppf([alpha, 1 - alpha], n, n)
+        rs_a, rs_b = u2_div_v2 / c2, u2_div_v2 / c1
+        rs_a, rs_b = 1 - rs_b, 1 - rs_a
+        return [rs_a, rs_b]
+    elif valueName == 'MAE':
+        # |pred-true| ~ half-normal distribution of N(0,sigma^2) with mean = sigma*sqrt(2/pi), we need confidence interval for mean. It equals to confidence interval of RMSE*sqrt(2/pi)
+        rmse_a, rmse_b = confidenceInterval('sigma', confidenceLevel, **args)
+        tmp = np.sqrt(2/np.pi)
+        return [rmse_a*tmp, rmse_b*tmp]
+    elif valueName == 'max':
+        # TODO: MAX - функция распределения максимума = произведению функций распределения (т.е. все просто возводится в степень!)
+        # проблема: в предыдущих случаях мы интервалы для матожиданий оценок (по определению confidence интервал - это случайный интервал для неслучайной характеристики сл. величины. А тут для чего? Для матожидания максимума? Легче для медианы: sigma*sqrt(2)*erf^-1(sqrtn(0.5)). Тогда мы выразим оценку медианы через оценку sigma - она у нас уже есть!
+        rmse_a, rmse_b = confidenceInterval('sigma', confidenceLevel, **args)
+        n = args['n']
+        tmp = np.sqrt(2)*scipy.special.erfinv(0.5**(1/n))
+        return [rmse_a*tmp, rmse_b*tmp]
+
+
+def calcAllMetrics(y_true, y_pred, classification:bool, confidenceLevel=0.95):
     assert len(y_pred.shape) == 1 or y_pred.shape[1] == 1
     if isinstance(y_true, (pd.Series,pd.DataFrame)): y_true = y_true.to_numpy()
     if isinstance(y_pred, (pd.Series,pd.DataFrame)): y_pred = y_pred.to_numpy()
     y_true = y_true.flatten()
     y_pred = y_pred.flatten()
+    assert len(y_pred) == len(y_true)
+    n = len(y_true)
     if classification:
         if y_pred.dtype == float:
             assert np.all(y_pred == np.round(y_pred)), str(y_pred)
@@ -856,22 +938,33 @@ def calcAllMetrics(y_true, y_pred, classification:bool):
         aba = sklearn.metrics.balanced_accuracy_score(y_true, y_pred, adjusted=True)
         acc = sklearn.metrics.accuracy_score(y_true, y_pred)
         res = {'adj.bal.acc': aba, 'accuracy': acc}
+        a = np.sum(y_true==y_pred)
+        intervals = {'accuracy': confidenceInterval('ratio', confidenceLevel, numerator=a, denominator=n)}
+        # TODO: adj.bal.acc - нужен интервал для суммы двух бета-распределений
     else:
         r_score = scoreFast(y_true, y_pred)
         mae = sklearn.metrics.mean_absolute_error(y_true, y_pred)
         max = np.max(np.abs(y_true - y_pred))
         rmse = sklearn.metrics.mean_squared_error(y_true, y_pred, squared=False)
         res = {'R2-score': r_score, 'MAE': mae, 'MAX': max, 'RMSE': rmse}
+        intervals = {
+            'R2-score': confidenceInterval('R2score', confidenceLevel, R2score=r_score, n=n),
+            'RMSE': confidenceInterval('sigma', confidenceLevel, rmse=rmse, n=n),
+            'MAE': confidenceInterval('MAE', confidenceLevel, rmse=rmse, n=n),
+            'MAX':confidenceInterval('max', confidenceLevel, rmse=rmse, n=n)
+        }
+
+    for n in intervals: res[f'{n} interval'] = intervals[n]
     return res
 
 
-def score_cv(model, X, y, cv_count, returnPrediction=True):
+def score_cv(model, X, y, cv_count, returnPrediction=True, random_state=0):
     if isinstance(y, pd.Series): y = y.to_numpy().reshape(-1,1)
     if isinstance(X, pd.Series): X = X.to_numpy().reshape(-1,1)
     if len(y.shape) == 1: y = y.reshape(-1,1)
     if len(X.shape) == 1: X = X.reshape(-1,1)
     if cv_count < len(X)/4:
-        cv = sklearn.model_selection.KFold(cv_count, shuffle=True)
+        cv = sklearn.model_selection.KFold(cv_count, shuffle=True, random_state=random_state)
     else:
         cv = sklearn.model_selection.LeaveOneOut()
     try:
@@ -924,7 +1017,10 @@ def crossValidation(estimator, X, Y, CVcount, YColumnWeights=None, nonUniformSam
     N = Y.shape[0]
     assert len(X) == N
     if YColumnWeights is None:
-        YColumnWeights = np.ones((1,Y.shape[1]))
+        YColumnWeights = np.ones(Y.shape[1])
+        YColumnWeights = YColumnWeights/np.sum(YColumnWeights)
+    if Y.shape[1]==1 and YColumnWeights is not None:
+        assert len(YColumnWeights) == 1
     if N > 20:
         kf = sklearn.model_selection.KFold(n_splits=CVcount, shuffle=True, random_state=0)
     else:
@@ -936,12 +1032,10 @@ def crossValidation(estimator, X, Y, CVcount, YColumnWeights=None, nonUniformSam
         estimator.fit(X_train, y_train)
         predictedY[test_index] = estimator.predict(X_test)
     if nonUniformSample: rowWeights = getWeightsForNonUniformSample(X)
-    else: rowWeights = np.ones(N)
+    else: rowWeights = np.ones(N)/N
     individualErrors = np.array([np.sqrt(np.sum(np.abs(Y[i] - predictedY[i])**2 * YColumnWeights)) for i in range(N)])
-    u = np.sum(individualErrors*rowWeights)
-    y_mean = np.mean(Y, axis=0)
-    v = np.sum(np.array([np.sqrt(np.sum(np.abs(Y[i] - y_mean)**2 * YColumnWeights)) for i in range(N)]) * rowWeights)
-    error = u / v
+    if Y.shape[1]==1: YColumnWeights = None
+    error = 1 - sklearn.metrics.r2_score(Y, predictedY, sample_weight=rowWeights, multioutput=YColumnWeights)
     return error, individualErrors, predictedY
 
 
@@ -1493,6 +1587,7 @@ def enlargeDataset(moleculas, values, newCount):
         #print(res[i,:])
     return res, resY
 
+
 def cross_val_predict(method, X, y, cv=10, predictFuncName='predict'):
     if isinstance(cv, int):       
         kf = sklearn.model_selection.KFold(n_splits=cv, shuffle=True, random_state=0)
@@ -1800,7 +1895,7 @@ def isFitted(estimator):
     return estimator.trained
 
 
-def validateNorm(expSample:Sample, theorySample:Sample, normFunc, spType, plotNormValuesFileName=None):
+def validateNormByRef(expSample:Sample, theorySample:Sample, normFunc, spType, plotNormValuesFileName=None):
     """
     Returns logCumRankError for ordering theorySample by normFunc to each exp spectrum. Also returns list of commonNames of theory and exp spectra
     :param normFunc: func(expSpectrum, theorySpectrum, expParams, theoryParams)
@@ -1840,7 +1935,7 @@ def validateNorm(expSample:Sample, theorySample:Sample, normFunc, spType, plotNo
     return qualities, commonNames
 
 
-def validateNormDuplicate(expSample:Sample, theorySample:Sample, normFunc, classColumn, spType, plotNormValuesFileName=None):
+def validateNormByClasses(expSample:Sample, theorySample:Sample, normFunc, classColumn, spType, plotNormValuesFileName=None):
     """
     Returns logCumRankError for ordering theorySample by normFunc to each exp spectrum. Classes of exp and theory spectra can be duplicate
     :param normFunc: func(expSpectrum, theorySpectrum, expParams, theoryParams)
@@ -1965,3 +2060,87 @@ def getSampleFiles(folder):
     meta = folder + os.sep + 'meta.json'
     if os.path.exists(meta): res = {**res, 'meta':meta}
     return res
+
+
+def pairwiseTransform(X,y, maxSize=None, randomSeed=None, pairwiseTransformType='binary'):
+    assert len(X) == len(y)
+    assert pairwiseTransformType in ['binary', 'numerical']
+    assert y.shape[1] == 1
+    n = len(X)
+    ind = utils.comb_index(n,2,repetition=False)
+    if maxSize is not None and len(ind) > maxSize:
+        rng = np.random.default_rng(randomSeed)
+        perm = rng.permutation(len(ind))
+    else: perm = np.arange(len(ind))
+    Xp, yp = [], []
+    for ii in range(len(ind)):
+        i = perm[ii]
+        j1, j2 = ind[i]
+        if y[j1] == y[j2]: continue
+        dy = y[j1]-y[j2]
+        if pairwiseTransformType == 'binary': dy = np.sign(dy)
+        dX = X[j1] - X[j2]
+        Xp.append(dX)
+        yp.append(dy)
+        Xp.append(-dX)
+        yp.append(-dy)
+        if len(yp) >= maxSize: break
+    Xp, yp = map(np.asanyarray, (Xp, yp))
+    return Xp, yp.reshape(-1,1)
+
+def pairwiseCV(model, X, y, testRatio=0.1, cvTryCount=300, pairwiseTransformType='numerical', maxTrainSize=1000, maxTestSize=100, lossFunc='RMSE'):
+    """
+    Run cross validation for pairwise problem
+
+    :param lossFunc: 'RMSE' for numerical pairwiseTransformType, 'accuracy' or 'AUC' - for binary
+    :returns: loss
+    """
+    assert 0<testRatio<1
+    if len(y.shape) == 1: y = y.reshape(-1,1)
+    n = len(X)
+    testSize = max(2, int(np.round(testRatio*n)))
+    y_true, y_pred = np.array([]), np.array([])
+    rng = np.random.default_rng(0)
+    for cv_try in range(min(cvTryCount, scipy.special.comb(n,testSize))):
+        test_index = rng.choice(n, testSize, replace=False)
+        train_index = np.setdiff1d(np.arange(n), test_index)
+        X_train, X_test = X[train_index,:], X[test_index,:]
+        y_train, y_test = y[train_index,:], y[test_index,:]
+        if len(np.unique(y_test)) == 1: continue
+        Xp, yp = pairwiseTransform(X_train, y_train, maxSize=maxTrainSize, randomSeed=0, pairwiseTransformType=pairwiseTransformType)
+        model.fit(Xp, yp)
+        # print(t1-t0, t2-t1)
+        Xp_test, yp_test = pairwiseTransform(X_test, y_test, maxSize=maxTestSize, randomSeed=0, pairwiseTransformType=pairwiseTransformType)
+        y_true = np.append(y_true, yp_test.flatten())
+        if pairwiseTransformType == 'numerical':
+            y_pred = np.append(y_pred, model.predict(Xp_test).flatten())
+        else:
+            y_pred = np.append(y_pred, model.predict_proba(Xp_test)[:,1])
+    if lossFunc == 'RMSE':
+        assert pairwiseTransformType == 'numerical'
+        return np.sqrt(np.mean((y_true-y_pred)**2))
+    elif lossFunc == 'AUC':
+        assert pairwiseTransformType == 'binary'
+        return sklearn.metrics.roc_auc_score(y_true, y_pred)
+    else:
+        assert pairwiseTransformType == 'binary'
+        assert lossFunc == 'accuracy', f'Unknown loss function {lossFunc}'
+        y_pred1 = -np.ones(len(y_true))
+        y_pred1[y_pred>=0.5] = 1
+        return np.sum(y_true == y_pred1)/len(y_true)
+
+
+def pairwiseRidgeCV(X, y, alphas=(0.1,1,10,100,1000,100*1000), testRatio=0.1):
+    assert 0<testRatio<1
+    losses = []
+    for alpha in alphas:
+        model = sklearn.linear_model.Ridge(alpha=alpha, fit_intercept=False, random_state=0)
+        loss = pairwiseCV(model, X, y, testRatio=testRatio, cvTryCount=300, pairwiseTransformType='numerical', maxTrainSize=1000, maxTestSize=100, lossFunc='RMSE')
+        losses.append(loss)
+    best_i = np.argmin(losses)
+    Xp, yp = pairwiseTransform(X, y, maxSize=10000, randomSeed=0, pairwiseTransformType='numerical')
+    print('best alpha =', alphas[best_i], losses)
+    model = sklearn.linear_model.Ridge(alpha=alphas[best_i], fit_intercept=False, random_state=0)
+    model.fit(Xp, yp)
+    return model
+

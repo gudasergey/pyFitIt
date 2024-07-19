@@ -388,7 +388,7 @@ def plotDirectMethodResult(predRegr, predProba, paramName, paramRange, folder):
 
 def truncate_colormap(cmapName, minval=0.0, maxval=1.0, n=100):
     import matplotlib.colors as colors
-    if isinstance(cmapName, str): cmap = plt.get_cmap(cmapName)
+    if isinstance(cmapName, str): cmap = matplotlib.colormaps[cmapName]
     else: cmap = cmapName
     new_cmap = colors.LinearSegmentedColormap.from_list('trunc({n},{a:.2f},{b:.2f})'.format(n=cmapName, a=minval, b=maxval), cmap(np.linspace(minval, maxval, n)))
     return new_cmap
@@ -409,6 +409,7 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
     :param kw: figure params (see function setFigureSettings)
     """
     from . import ML
+    assert not isinstance(colorParam, str), 'colorParam should be numpy array or list of values'
     if isinstance(spectra, pd.DataFrame): spectra = spectra.to_numpy()
     if energy is None: assert isinstance(spectra,list) and isinstance(spectra[0], utils.Spectrum)
     else: assert len(energy) == spectra.shape[1]
@@ -428,8 +429,8 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
         spectra_inds = spectra_inds[~indNan]
         if nanExists and not plotNaN: nanExists = False
         if len(colorParam) == 0: nanExists = True
-        # else:
-        #     nanExists = False
+    else:
+        nanExists = False
     if sortByColors:
         assert colorParam is not None
         ind = np.argsort(colorParam)
@@ -451,22 +452,28 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
         if cmap is None:
             if len(np.unique(colors)) > 2: cmap = 'plasma'
             else: cmap = 'plasma_r'
+
         colorMap = parseColorMap(cmap)
         colors = colorMap(colors)
         colors = colors[ind]
         ax.set_prop_cycle(cycler.cycler('color', colors))
-        if ML.isClassification(colorParam):
-            ticks = np.unique(colorParam)
-        else:
-            ticks = np.linspace(np.min(colorParam), np.max(colorParam), 10)
-        if colorParam.dtype != float:
-            ticksPos = np.arange(len(labelMap))
-            invLabelMap = {labelMap[name]:name for name in labelMap}
-            ticks = [invLabelMap[tp] for tp in ticksPos]
-            ticksPos = ticksPos / (len(labelMap) - 1)
-        else:
-            ticksPos = transform(ticks)
-        addColorBar(mappable=plt.cm.ScalarMappable(norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap=colorMap), fig=fig, ax=ax, labelMaps={}, label='', ticksPos=ticksPos, ticks=ticks, format=colorBarFormat, colorBarLabel=colorBarLabel)
+
+        if kw.get('colorbar', True):
+            if ML.isClassification(colorParam):
+                ticks = np.unique(colorParam)
+            else:
+                ticks = np.linspace(np.min(colorParam), np.max(colorParam), 10)
+            if colorParam.dtype != float:
+                ticksPos = np.arange(len(labelMap))
+                invLabelMap = {labelMap[name]:name for name in labelMap}
+                ticks = [invLabelMap[tp] for tp in ticksPos]
+                ticksPos = ticksPos / (len(labelMap) - 1)
+            else:
+                ticksPos = transform(ticks)
+            addColorBar(mappable=plt.cm.ScalarMappable(norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap=colorMap), fig=fig, ax=ax, labelMaps={}, label='', ticksPos=ticksPos, ticks=ticks, format=colorBarFormat, colorBarLabel=colorBarLabel)
+        if 'colorbar' in kw:
+            del kw['colorbar']
+
     else:
         colors = ['k']*len(spectra)
         ax.set_prop_cycle(cycler.cycler('color', colors))
@@ -485,7 +492,9 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
             ax.plot(e, s, color='k', lw=lw, alpha=alpha)
     else:
         # plot only highlight
-        for i in set(highlight_inds) & set(np.where(indNan)[0]):
+        highlight_inds1 = set(highlight_inds)
+        if nanExists: highlight_inds1 = highlight_inds1 & set(np.where(indNan)[0])
+        for i in highlight_inds1:
             if energy is None: e, s = spectra0[i].x, spectra0[i].y
             else: e, s = energy, spectra0[i]
             ax.plot(e, s, color='k', lw=3, alpha=alpha)
@@ -550,7 +559,7 @@ def parseColorMap(cmap):
             colorMap = truncate_colormap(colorMap, minval=0, maxval=0.8)
     else:
         if isinstance(cmap, str):
-            colorMap = plt.cm.get_cmap(name=cmap)
+            colorMap = matplotlib.colormaps[cmap]
         else:
             colorMap = cmap
     return colorMap
@@ -599,7 +608,25 @@ def getDefaultSpectraAlpha(count):
     return min(1/count*100,1)
 
 
-def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=None, markersize=None, marker='o', alpha=None, edgecolor=None, fileName='scatter.png', **kw):
+def trimNames(names, trimEdge):
+    names = list(names)
+    assert trimEdge in ['left', 'right']
+    if trimEdge == 'left': names = [n[::-1] for n in names]
+    def similarExist(n, i, names):
+        for j in range(len(names)):
+            if j == i: continue
+            if n == names[j][:len(n)]: return True
+        return False
+    for i in range(len(names)):
+        n = names[i]
+        if similarExist(n, i, names): continue
+        for j in range(len(n)-1):
+            if not similarExist(n[:-1-j], i, names): names[i] = n[:-1-j]
+    if trimEdge == 'left': names = [n[::-1] for n in names]
+    return names
+
+
+def scatter(x, y, color=None, colorMap='plasma', marker_text=None, trimText=None, text_size=None, markersize=None, min_marker_size=0, max_marker_size=0, marker='o', alpha=None, edgecolor=None, class_labels=None, fig_ax=None, fileName=None, **kw):
     """
 
     :param x:
@@ -607,6 +634,7 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     :param color:
     :param colorMap: 'plasma' (default) or 'gist_rainbow' or any other
     :param marker_text:
+    :param trimText: None or 'left' or 'right'
     :param text_size: if None - auto evaluation
     :param markersize:
     :param marker:
@@ -625,52 +653,96 @@ def scatter(x, y, color=None, colorMap='plasma', marker_text=None, text_size=Non
     if isinstance(color, np.ndarray):
         assert color.dtype in ['float64', 'int32'], color.dtype
     assert len(x) == len(y), f'{len(x)} != {len(y)}'
-    if color is not None: assert len(color) == len(x)
-    fig,ax = createfig()
+
+    if fig_ax is None:
+        fig, ax = createfig()
+        save_plot = True
+    else:
+        fig, ax = fig_ax
+        save_plot = False
+
     defaultMarkersize, defaulAlpha = getScatterDefaultParams(x, y, fig.dpi)
-    if markersize is None: markersize = defaultMarkersize
-    if alpha is None: alpha = defaulAlpha
-    if edgecolor is None: edgecolor = '#555'
+    if markersize is None:
+        markersize = defaultMarkersize
+        if min_marker_size * max_marker_size > 0:
+            markersize = min(max(markersize, min_marker_size), max_marker_size)
+    if alpha is None:
+        alpha = defaulAlpha
+    if edgecolor is None:
+        edgecolor = '#555'
     colorMap = parseColorMap(colorMap)
-    if color is not None:
+    if (color is not None) and (not isinstance(color, str)):
         assert len(color) == len(x), f'{len(color)} != {len(x)}'
         if isinstance(color, np.ndarray):
             assert len(color.shape) == 1 or color.shape[1] == 1, str(color.shape)
-            if len(color.shape) != 1: color = color.flatten()
+            if len(color.shape) != 1:
+                color = color.flatten()
         c = color
         c_min = np.min(c)
         c_max = np.max(c)
         transform = lambda r: (r - c_min) / (c_max - c_min)
+        if class_labels is None:
+            class_labels = {}
+        else:
+            class_labels = {'': class_labels}
         if ML.isClassification(color):
             ticks = np.unique(color)
         else:
             ticks = np.linspace(c_min, c_max, 10)
         ticksPos = transform(ticks)
         sc = ax.scatter(x, y, s=markersize**2, marker=marker, c=transform(c), cmap=colorMap, vmin=0, vmax=1, alpha=alpha, edgecolor=edgecolor)
-        addColorBar(sc, fig, ax, {}, '', ticksPos, ticks)
+        addColorBar(sc, fig, ax, class_labels, '', ticksPos, ticks)
+    elif color is not None:
+        ax.scatter(x, y, s=markersize**2, color=color, alpha=alpha, edgecolor=edgecolor)
     else:
         ax.scatter(x, y, s=markersize**2, color='green', alpha=alpha, edgecolor=edgecolor)
     if marker_text is not None and (text_size is None or text_size > 0):
         assert len(marker_text) == len(x), f'{len(marker_text)} != {len(x)}'
         if text_size is None: text_size = markersize*0.4
+        if trimText is not None:
+            marker_text = trimNames(marker_text, trimEdge=trimText)
         for i in range(len(marker_text)):
             ax.text(x[i], y[i], str(marker_text[i]), ha='center', va='center', size=text_size)
-    ax.set_xlim(getPlotLim(x))
-    ax.set_ylim(getPlotLim(y))
-    setFigureSettings(ax, **kw)
-    savefig(fileName, fig)
-    closefig(fig)
-    csv_data = pd.DataFrame()
-    csv_data['x'] = x
-    csv_data['y'] = y
-    if color is not None: csv_data['color'] = color
-    csv_data.to_csv(os.path.splitext(fileName)[0] + '.csv', index=False)
+    if save_plot:
+        ax.set_xlim(getPlotLim(x))
+        ax.set_ylim(getPlotLim(y))
+        setFigureSettings(ax, **kw)
+        savefig(fileName, fig)
+        closefig(fig)
+        csv_data = pd.DataFrame()
+        csv_data['x'] = x
+        csv_data['y'] = y
+        if color is not None: csv_data['color'] = color
+        csv_data.to_csv(os.path.splitext(fileName)[0] + '.csv', index=False)
+
+
+def symmetrical_colormap(cmap_settings, new_name = None ):
+    ''' This function take a colormap and create a new one, as the concatenation of itself by a symmetrical fold.
+    '''
+    import matplotlib.colors as mcolors
+    # get the colormap
+    cmap = plt.cm.get_cmap(*cmap_settings)
+    if not new_name:
+        new_name = "sym_"+cmap_settings[0]  # ex: 'sym_Blues'
+
+    # this defined the roughness of the colormap, 128 fine
+    n= 128
+
+    # get the list of color from colormap
+    colors_r = cmap(np.linspace(0, 1, n))    # take the standard colormap # 'right-part'
+    colors_l = colors_r[::-1]                # take the first list of color and flip the order # "left-part"
+
+    # combine them and build a new colormap
+    colors = np.vstack((colors_l, colors_r))
+    mymap = mcolors.LinearSegmentedColormap.from_list(new_name, colors)
+
+    return mymap
 
 
 def plotMatrix(mat, cmap=None, ticklabelsX=None, ticklabelsY=None, annot=False, fmt='.2g', fileName=None, wrapXTickLabelLength=10, vmin=None, vmax=None, **kw):
     ticklabelsX = copy.deepcopy(ticklabelsX)
     ticklabelsY = copy.deepcopy(ticklabelsY)
-    if not isinstance(ticklabelsX, list): ticklabelsX = list(ticklabelsX)
+    if ticklabelsX is not None and not isinstance(ticklabelsX, list): ticklabelsX = list(ticklabelsX)
     if 'figsize' in kw:
         figsize = kw['figsize']
         del kw['figsize']
@@ -696,7 +768,9 @@ def plotMatrix(mat, cmap=None, ticklabelsX=None, ticklabelsY=None, annot=False, 
         savefig(fileName, fig)
         closefig(fig, interactive=interactive)
         fileNameXls = os.path.splitext(fileName)[0] + '.xlsx'
-        df.to_excel(fileNameXls, index=False)
+        df.to_excel(fileNameXls, index=True)
+        cmap1 = cmap if isinstance(cmap,str) else None
+        utils.saveData(dict(cmap=cmap1, annot=annot, fmt=fmt, wrapXTickLabelLength=wrapXTickLabelLength, vmin=vmin, vmax=vmax, figsize=figsize, **kw), os.path.splitext(fileName)[0] + ' params.json')
     else: return fig, ax
 
 
@@ -723,7 +797,7 @@ def plotConfusionMatrixHelper(conf_mat, accuracy, labelName, uniqueLabelValues, 
     closefig(fig)
 
 
-def plotConfusionMatrix(trueLabels, predictedLabels, labelName, labelMap=None, cmap=None, fileName='', relativeConfMatrix=True, **kw):
+def plotConfusionMatrix(trueLabels, predictedLabels, labelName, labelMap=None, cmap=None, fileName='', relativeConfMatrix=False, **kw):
     """
     :param labelMap: dict{userFriendlyLabel:index}
     """

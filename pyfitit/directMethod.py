@@ -151,7 +151,8 @@ def recommendedParams(name):
     return params, allParams
 
 
-def getMethod(name, params0={}):
+def getMethod(name, params0=None):
+    if params0 is None: params0 = {}
     rparams, allParams = recommendedParams(name)
     params = {p: params0[p] for p in params0 if p in allParams}
     for p in rparams:
@@ -162,7 +163,7 @@ def getMethod(name, params0={}):
     elif name[:3] == "RBF": regressor = ML.RBF(**params)
     elif name == 'LightGBM': regressor = ML.makeMulti(lgb.LGBMRegressor(objective='regression', verbosity=-1, **params))
     elif name == 'NN': regressor = ML.makeMulti(ML.NeuralNetDirect(**params))
-    else: assert False
+    else: assert False, f'ML method {name} is unknown'
     return regressor
 
 

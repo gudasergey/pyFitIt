@@ -34,8 +34,8 @@ sample = readSample('data/sample')
 
 # %%
 # Plot sample
-sample.plot(folder='results/sample_plot', colorParam='centralRing1_Shift', sortByColors=True, plotIndividualParams={}, 
-            maxIndivPlotCount=10, xlim=[7270,7300])
+sample.plot(folder='results/sample_plot', colorParam='centralRing1_Shift', plotSampleParams=dict(sortByColors=True, xlim=[7270,7300]),
+            plotIndividualParams={}, maxIndivPlotCount=10)
 
 # %%
 # Save sample
@@ -102,12 +102,12 @@ plotToFile(s.x, s.y, 'init', ss.x, ss.y, 'smoothed', fileName=f'results/exp_smoo
 # %%
 # Pre-edge extraction (fully automatic)
 s = readSpectrum(f'data/LC39.nor', energyColumn=0, intensityColumn=3)
-result = substractBaseAuto(s.x, s.y, usePositiveConstrains=True, plotFileName=f'results/preedge_auto/LC39.png', sepFolders=False, debug=False)
+result = subtractBaseAuto(s.x, s.y, plotFileName=f'results/preedge_auto/LC39.png', debug=False)
 
 # %%
 # Pre-edge extraction (with turning)
 s = readSpectrum(f'data/LC39.nor', energyColumn=0, intensityColumn=3)
-result = substractBase(s.x, s.y, peakInterval=[4965,4974], baseFitInterval=[4955,4980], model='arctan', usePositiveConstrains=True, plotFileName=f'results/preedge_manual/LC39.png')
+result = subtractBase(s.x, s.y, peakInterval=[4965, 4974], baseFitInterval=[4955, 4980], plotFileName=f'results/preedge_manual/LC39.png')
 
 # %%
 # TODO: adf smooth
@@ -154,9 +154,7 @@ sample,_ = sample.splitUnknown('CN')
 unk = readSpectrum('data/exp_ground.txt')
 # mixtureTrysCount: 'all combinations of singles', 'all combinations for each label' or number
 for componentCount in [1,2]:
-    tryAllMixtures(unknownCharacterization=dict(type='spectrum', spectrum=unk, rFactorInterval=[7100,7250]), 
-                   componentCount=componentCount, mixtureTrysCount=100, singleComponentData=sample, 
-                   labelNames=['CN', 'avgDist'], folder=f'results/tryAllMixtures {componentCount}')
+    tryAllMixtures(unknownCharacterization=dict(type='spectrum', spectrum=unk, rFactorParams={'interval':[7100,7250]}), componentCount=componentCount, mixtureTrysCount=100, singleComponentData=sample, labelNames=['CN', 'avgDist'], folder=f'results/tryAllMixtures {componentCount}')
 
 # %% [markdown]
 # # Descriptors

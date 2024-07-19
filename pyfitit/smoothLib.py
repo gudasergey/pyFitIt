@@ -3,6 +3,7 @@ utils.fixDisplayError()
 import math, copy, os, json, gc, scipy, statsmodels.nonparametric.kernel_regression
 from . import fdmnes, optimize, plotting, curveFitting
 import numpy as np
+import numba as nb
 import pandas as pd
 from .optimize import param, arg2string, VectorPoint
 from scipy import interpolate
@@ -939,6 +940,8 @@ def calcNoiseLevel(s: utils.Spectrum, noiseSampleIntervals, min_w=None, max_w=No
 is_array = utils.isArray
 
 
+# TODO: переделать. Одиночные пики она обрабатывает более или менее. Но на взлетах лагает.
+# Составить пример: sing или tanh (резкий) + шум. Она должна правильно сгладить угол взлета и угол выполаживания!
 def confsmooth(y, noise_level, confidence=0.999, overlap_fraction=0.5, deg=2):
     """
     Smooth experimental spectrum, keeping peak intensity
@@ -1035,13 +1038,6 @@ def smoothExp(s: utils.Spectrum, noiseSampleIntervals, noiseConfidenceLevel=0.99
     :param noiseSampleIntervals: [e1,w1,[a1,b1], e2,w2,[a2,b2], ...] - means for e<=e1 calculate noise params on [a1,b1], for e1<e<=e2 - on [a2,b2], ... w1,w2,... is used in KernelRegression to calculate smooth function
     :param noiseConfidenceLevel: - for "3 sigma rule". Errors with probability < 1-noiseConfidenceLevel are treated as signal
     :param overlapFraction: how many percent of points of the smallest interval to use for overlap
-
-    Алгоритм сглаживает пики. В интернете есть несколько работ пытающихся решить эту проблему. На самом деле правильный алгоритм такой: задаем спокойные интервал(ы) функции для оценки дисперсии шума (апроксимируем функцию generalSmooth).
-    Теперь при построении аппроксимации нужно поставить жесткое ограничение: для каждой точки погрешности должно выполняться правило 3-х сигм, для каждого среднего пары последовательных погрешностей тоже (сигма в sqrt(2) раз для среднего пары меньше), для каждого среднего тройки последовательных погрешностей тоже (сигма в sqrt(3) раз меньше) и т.д.
-    Тут хорошо бы использовать обычную МНК polynomial.polynomial.Polynomial.fit (а еще лучше оптимизировать экспоненциальный лосс, чтобы минимизировать максимальую потерю). Берем полином наименьшей степени, для которого выполняется ограничение. Придется применять кусочками и сшивать.
-    Внимание: неопределенность. Можно менять кол-во точек сегмента для аппроксимации, а можно степень полинома! Легче полином - линейный, но варьируем число точек.
-
-    :param bw: function(w) -> list of points to interpolate bandwidth. Example: w -> [[4950,0.1], [4990,0.5], [5010,w]]
     """
     noise_level = calcNoiseLevel(s, noiseSampleIntervals=noiseSampleIntervals, min_w=min_w, max_w=max_w, debugFileName=debugFileName)
     result = confsmooth(s.y, noise_level, confidence=noiseConfidenceLevel, overlap_fraction=overlapFraction, deg=deg)
@@ -1083,4 +1079,142 @@ def smoothFindpeaks(s):
     fp.plot_persistence()
     print(fp)
     exit(0)
+
+
+@nb.njit
+def _coeff_mat(x, deg):
+    mat_ = np.zeros(shape=(x.shape[0],deg + 1))
+    const = np.ones_like(x)
+    mat_[:,0] = const
+    mat_[:, 1] = x
+    if deg > 1:
+        for n in range(2, deg + 1):
+            mat_[:, n] = x**n
+    return mat_
+
+@nb.njit
+def _fit_x(a, b):
+    # linalg solves ax = b
+    det_ = np.linalg.lstsq(a, b)[0]
+    return det_
+
+@nb.njit
+def fit_poly(x, y, deg):
+    a = _coeff_mat(x, deg)
+    p = _fit_x(a, y)
+    # Reverse order so p[0] is coefficient of highest order
+    return p[::-1]
+
+@nb.njit
+def eval_polynomial(P, x):
+    '''
+    Compute polynomial P(x) where P is a vector of coefficients, highest
+    order coefficient at P[0].  Uses Horner's Method.
+    '''
+    result = np.zeros(len(x), dtype=nb.float64)
+    for coeff in P:
+        result = x * result + coeff
+    return result
+
+@nb.vectorize
+def verfc(x):
+    return math.erfc(x)
+
+def is_array(obj):
+    if isinstance(obj, (dict, str)): return False
+    return hasattr(obj, "__len__")
+
+@nb.njit
+def approx_error(y, deg):
+    x_i = np.arange(len(y))  # we do not take x into account!
+    p = fit_poly(x_i, y, deg)
+    pred = eval_polynomial(p, x_i)
+    return pred, y-pred
+
+@nb.njit
+def is_noise_possible_ext(error, sigma, confidence):
+    ind = sigma>0
+    error = error[ind]
+    if len(error) == 0:
+        if np.any(error) > 1e-6: return False
+        else: return True
+    if np.all(error == 0): return True
+    sigma = sigma[ind]
+    noise_prob = verfc(np.abs(error)/sigma/np.sqrt(2))
+    if np.any(noise_prob < 1-confidence): return False
+    for j in range(2,len(error)//2):
+        error1 = np.convolve(error,np.ones(j)/j)[j-1:-j+1]
+        sigma1 = sigma[j//2:j//2+len(error1)]/np.sqrt(j)
+        noise_prob = verfc(np.abs(error1)/sigma1/np.sqrt(2))
+        if np.any(noise_prob < 1-confidence): return False
+    return True
+
+@nb.njit
+def is_noise_possible(y, i0, size, deg, noise_level, confidence):
+    error = approx_error(y[i0:i0 + size], deg)[1]
+    return is_noise_possible_ext(error, noise_level[i0:i0+size], confidence)
+
+@nb.njit
+def detect_segment_size(y, i0, old_size, deg, noise_level, confidence):
+    sz = old_size
+    is_ns_possible = is_noise_possible(y, i0, sz, deg, noise_level, confidence)
+    if is_ns_possible:
+        while is_ns_possible:
+            sz = sz + 1
+            if i0+sz > len(y): return sz-1
+            is_ns_possible = is_noise_possible(y, i0, sz, deg, noise_level, confidence)
+        return sz-1
+    else:
+        while not is_ns_possible:
+            sz = sz - 1
+            assert sz >= 2
+            is_ns_possible = is_noise_possible(y, i0, sz, deg, noise_level, confidence)
+        return sz
+
+@nb.njit
+def confsmooth_numba(y, noise_level, confidence=0.999, overlap_fraction=0.5, deg=2):
+    """
+    Smooth experimental spectrum, keeping peak intensity
+
+    :param y: function values
+    :param noise_level: scalar or vector of the same size as y, containing standard deviations of the noise
+    :param confidence: errors with probability < 1-confidence are treated as signal and are not smoothed
+    :param overlap_fraction: how many percent of points of interval to use for overlap
+    :param deg: degree of polynomial
+    :returns: smoothed y
+    """
+    n = len(y)
+#     if not is_array(noise_level): noise_level = np.ones(n)*noise_level
+    noise_level = np.ones(n)*noise_level
+
+    i0 = 0
+    old_size = deg+1
+    result = np.zeros(n)
+    osz = 0
+    while True:
+        new_size = detect_segment_size(y, i0, old_size, deg, noise_level, confidence)
+        # print(f'i0 = {i0} new_size = {new_size} old_size = {old_size} osz = {osz}')
+        pred, error = approx_error(y[i0:i0 + new_size], deg)
+        if i0 == 0:
+            result[:new_size] = pred
+            osz = int(np.round(new_size*overlap_fraction))
+            if osz == 0: osz = 1
+        else:
+            # overlap with old
+            corrected_osz = min(osz, new_size)
+            if corrected_osz >= 3:
+                alpha = np.linspace(0,1,corrected_osz)
+            else:
+                alpha = np.ones(corrected_osz)/2
+            result[i0:i0+corrected_osz] = (1-alpha)*result[i0:i0+corrected_osz] + alpha*pred[:corrected_osz]
+            # middle
+            result[i0+corrected_osz:i0+new_size] = pred[corrected_osz:]
+            #overlap with new
+            osz = int(np.round(new_size*overlap_fraction))
+            if osz == 0: osz = 1
+        if i0+new_size >= len(y): break
+        i0 = i0 + new_size - osz
+        old_size = new_size
+
+    return result
 

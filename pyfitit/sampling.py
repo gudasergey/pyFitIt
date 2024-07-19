@@ -716,8 +716,9 @@ def checkSampleIsGoodByCVError(maxError, samplePreprocessor, spectralProgram, es
             return False
 
         relToConstPredErrorCV, _, predictedSpectra = ML.crossValidation(estimator, sample.params, sample.spectra, cvCount, nonUniformSample=True, YColumnWeights=sample.convertEnergyToWeights())
-        print(f'sampleSize = {n}  relToConstPredError = {relToConstPredErrorCV}')
-        if debug: plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=True)
+        if debug:
+            print(f'sampleSize = {n}  relToConstPredError = {relToConstPredErrorCV}')
+            plotSpectra(sample, folderInds, estimator, samplePreprocessor, debugOutputFolder, plotPrediction=True)
 
         if testSample is not None:
             testSample1 = preprocessSample(testSample, samplePreprocessor)
@@ -827,7 +828,7 @@ def checkSampleIsGoodByVASP(spectralProgram, estimator=None, minCountToCheckErro
     return checkSampleIsGood
 
 
-def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=None, maxError=0.01, maxSampleSize=None, spectralProgram='fdmnes', samplePreprocessor=None, workingFolder='sample', seed=None, outputFolder=None, debugFolder=None, runConfiguration=None, adaptiveSamplerParams=None, settingsFileName='settings.json', debug=False):
+def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=None, maxError=0.01, maxSampleSize=None, spectralProgram='fdmnes', samplePreprocessor=None, workingFolder='sample', seed=None, outputFolder=None, debugFolder=None, runConfiguration=None, adaptiveSamplerParams=None, settingsFileName='settings.json', debugLevel=1):
     """
     Calculate sample adaptively
     :param paramRanges: dictionary with geometry parameters region {'paramName':[min,max], 'paramName':[min,max], ...}
@@ -843,7 +844,7 @@ def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=Non
     :param runConfiguration: dict, default = {'runType':'local', 'runCmd':'', 'nProcs':1, 'memory':5000, 'calcSampleInParallel':1, 'recalculateErrorsAttemptCount':0}, runCmd can be command string or function(workingFolder)
     :param adaptiveSamplerParams: dict, default = {'initialIHSDatasetSize':None}
     :param settingsFileName: name of the persistently saved settings, like seed, paramRanges, etc.
-    :param debug: print debug info
+    :param debugLevel: 0 - no print, 1 - print sample size and quality, 2 - all debug info
     :return:
     """
     if outputFolder is None: outputFolder = workingFolder+'_result'
@@ -869,16 +870,16 @@ def sampleAdaptively(paramRanges, moleculeConstructor=None, spectrCalcParams=Non
     else:
         seed = adaptiveSampling.writeSettings(workingFolder + os.sep + settingsFileName, seed, paramRanges)
     if callable(maxError): checkSampleIsGoodFunc = maxError
-    else: checkSampleIsGoodFunc = checkSampleIsGoodByCVError(maxError=maxError, samplePreprocessor=samplePreprocessor, spectralProgram=spectralProgram, minCountToCheckError=max(len(paramRanges)*2,10), debug=True, maxSampleSize=maxSampleSize, debugOutputFolder=debugFolder)
+    else: checkSampleIsGoodFunc = checkSampleIsGoodByCVError(maxError=maxError, samplePreprocessor=samplePreprocessor, spectralProgram=spectralProgram, minCountToCheckError=max(len(paramRanges)*2,10), debug=debugLevel>=1, maxSampleSize=maxSampleSize, debugOutputFolder=debugFolder)
 
     while True:
         try:
             lock = threading.Lock()
-            sampler = adaptiveSampling.ErrorPredictingSampler(rangeValues, checkSampleIsGoodFunc=checkSampleIsGoodFunc, seed=seed, initialDataset=initialPoints, **adaptiveSamplerParams, debug=debug)
-            folderGen = InputFilesGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder, debug=debug)
-            func = SpectrumCalculator(spectralProgram, folderGen, outputFolder, runConfiguration['recalculateErrorsAttemptCount'], samplePreprocessor, debug, lock)
+            sampler = adaptiveSampling.ErrorPredictingSampler(rangeValues, checkSampleIsGoodFunc=checkSampleIsGoodFunc, seed=seed, initialDataset=initialPoints, **adaptiveSamplerParams, debug=debugLevel>=2)
+            folderGen = InputFilesGenerator(rangeValues, paramNames, moleculeConstructor, spectrCalcParams, spectralProgram, workingFolder, debug=debugLevel>=2)
+            func = SpectrumCalculator(spectralProgram, folderGen, outputFolder, runConfiguration['recalculateErrorsAttemptCount'], samplePreprocessor, debugLevel>=2, lock)
             func.configAll(runConfiguration['runType'], runConfiguration['runCmd'], runConfiguration['nProcs'], runConfiguration['memory'])
-            orchestrator = adaptiveSampling.CalculationOrchestrator(func, lock, runConfiguration['calcSampleInParallel'], debug=debug)
+            orchestrator = adaptiveSampling.CalculationOrchestrator(func, lock, runConfiguration['calcSampleInParallel'], debug=debugLevel>=2)
             generator = adaptiveSampling.DatasetGenerator(sampler, orchestrator)
             generator.generate()
             break

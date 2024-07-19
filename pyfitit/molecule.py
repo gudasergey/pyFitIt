@@ -123,6 +123,26 @@ class Molecule:
             self.construct(*parseXYZFile(self.fileName))
 
     def construct(self, atom, atomNumber, atomName, latticeVectors):
+        atom, atomNumber = map(np.asarray, (atom, atomNumber))
+        if latticeVectors is not None:
+            latticeVectors = np.asarray(latticeVectors)
+            assert len(latticeVectors.shape) == 2
+            assert latticeVectors.shape == (3,3)
+            assert np.issubdtype(latticeVectors.dtype, np.number)
+        atomName = np.asarray(atomName, dtype=object)
+        if len(atom.shape) == 1: atom.reshape(1,-1)
+        assert len(atom.shape) == 2
+        assert len(atomNumber.shape) == 1
+        assert len(atomName.shape) == 1
+        assert atom.shape[1] == 3
+        assert atom.shape[0] == len(atomNumber)
+        assert atom.shape[0] == len(atomName)
+        assert np.issubdtype(atom.dtype, np.number)
+        assert np.issubdtype(atomNumber.dtype, np.number)
+        for n in atomNumber:
+            assert n in atom_proton_numbers.values(), f'Unknown atom number {n}'
+        for n in atomName:
+            assert n in atom_proton_numbers, f'Unknown atom name {n}'
         self.atom, self.atomNumber, self.atomName, self.latticeVectors = atom, atomNumber, atomName, latticeVectors
         self.az = self.atomNumber  # alias
         self.setParts('0-' + str(len(self.atom) - 1))
@@ -185,7 +205,7 @@ class Molecule:
         axis = axis / np.linalg.norm(axis)
         # https://ru.wikipedia.org/wiki/%D0%9C%D0%B0%D1%82%D1%80%D0%B8%D1%86%D0%B0_%D0%BF%D0%BE%D0%B2%D0%BE%D1%80%D0%BE%D1%82%D0%B0
         x = axis[0]; y = axis[1]; z = axis[2]
-        M = np.matrix([[cphi+(1-cphi)*x*x, (1-cphi)*x*y-sphi*z, (1-cphi)*x*z+sphi*y],\
+        M = np.array([[cphi+(1-cphi)*x*x, (1-cphi)*x*y-sphi*z, (1-cphi)*x*z+sphi*y],\
             [(1-cphi)*y*x+sphi*z, cphi+(1-cphi)*y*y, (1-cphi)*y*z-sphi*x],\
             [(1-cphi)*z*x-sphi*y, (1-cphi)*z*y+sphi*x, cphi+(1-cphi)*z*z]])
         for i in atomIndices:
@@ -355,9 +375,9 @@ class Molecule:
         if isinstance(atoms, str): atoms = [atoms]
         assert isinstance(atoms, (list, np.ndarray))
         if len(atoms) == 0: return emptyAtomsResult
-        assert isinstance(atoms[0], str)
         ind = np.zeros(len(self.atom), dtype=bool)
         for atomName in atoms:
+            assert isinstance(atomName, str)
             atomNumber = atom_proton_numbers[atomName]
             ind = ind | (self.atomNumber == atomNumber)
         if invert: ind = ~ind
@@ -367,11 +387,10 @@ class Molecule:
         """
         Returns sorted distances to atom[0]
         """
-        if (not utils.isArray(atoms)) or not utils.is_numeric(atoms[0]):
-            ind = self.getAtomInds(atoms, invert)
-        else:
-            ind = np.array(atoms)
-        if ind.size == 0:
+        if not utils.isArray(atoms): atoms = [atoms]
+        if utils.is_numeric(atoms[0]): ind = atoms
+        else: ind = self.getAtomInds(atoms, invert)
+        if len(ind) == 0:
             raise Exception("There are no atoms. Atoms = " + str(atoms)+', invert = '+str(invert))
         dists = np.linalg.norm(self.atom[ind,:]-self.atom[0], axis=1)
         return np.sort(dists)
@@ -481,7 +500,7 @@ def turn_mol_fast(mol, axis, center, angle):
     axis = axis / np.linalg.norm(axis)
     # https://ru.wikipedia.org/wiki/%D0%9C%D0%B0%D1%82%D1%80%D0%B8%D1%86%D0%B0_%D0%BF%D0%BE%D0%B2%D0%BE%D1%80%D0%BE%D1%82%D0%B0
     x = axis[0]; y = axis[1]; z = axis[2]
-    M = np.matrix([[cphi+(1-cphi)*x*x, (1-cphi)*x*y-sphi*z, (1-cphi)*x*z+sphi*y],\
+    M = np.array([[cphi+(1-cphi)*x*x, (1-cphi)*x*y-sphi*z, (1-cphi)*x*z+sphi*y],\
         [(1-cphi)*y*x+sphi*z, cphi+(1-cphi)*y*y, (1-cphi)*y*z-sphi*x],\
         [(1-cphi)*z*x-sphi*y, (1-cphi)*z*y+sphi*x, cphi+(1-cphi)*z*z]])
     for i in range(mol.shape[0]):

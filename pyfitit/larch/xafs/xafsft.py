@@ -260,7 +260,6 @@ def xftf(k, chi=None, group=None, kmin=0, kmax=20, kweight=None,
     cchi, win  = xftf_prep(k, chi, kmin=kmin, kmax=kmax, kweight=kweight,
                                dk=dk, dk2=dk2, nfft=nfft, kstep=kstep,
                                window=window, _larch=_larch)
-
     out = xftf_fast(cchi*win, kstep=kstep, nfft=nfft)
     rstep = pi/(kstep*nfft)
 

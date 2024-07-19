@@ -148,13 +148,14 @@ class ControlsManager:
     def drawControls(self, controls):
         self.initStyles()
         ui = widgets.VBox(tuple(controls) + (self.statusHTML,))
+        ui.add_class('fitBySlidersOutput')
         # ui.layout.flex_flow = 'row wrap'
         # ui.layout.justify_content = 'space-between'
         # ui.layout.align_items = 'flex-start'
         # ui.layout.align_content = 'flex-start'
 
         display(ui)
-        display(Javascript('$(this.element).addClass("fitBySlidersOutput");'))
+        # display(Javascript('this.element.classList.add("fitBySlidersOutput");'))
 
     def setStatus(self, s):
         self.status = s

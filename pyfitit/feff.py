@@ -1,6 +1,6 @@
 import numpy as np
 import os, tempfile, json, shutil, copy, re
-from . import utils
+from . import utils, exafs
 
 
 def getPotentials(molecule, absorber, separatePotentials, feffVersion):
@@ -221,11 +221,11 @@ def is_xmu(folder):
     return False
 
 
-def parseOneFolder(folder, multipleAbsorber=False, xanesProcessingParams=None):
+def parseOneFolder(folder, multipleAbsorber=False, xanesProcessingParams=None, returnEfermi=False):
     """
     :param xanesProcessingParams: dict with keys 'return': {'mu', 'mu0', 'chi(k)', 'chi(e)', 'mu normalized'(default)}, 'normalizeCrossFadeInterval':[75,125], 'edgeSearchLevel':0.5
     """
-    results = {}
+    results, Efermi = {}, {}
     ds, absorbers = getAbsorberFolders(folder, returnAbsorberNum=True)
     for i, d in enumerate(ds):
         if is_xmu(d):
@@ -256,14 +256,22 @@ def parseOneFolder(folder, multipleAbsorber=False, xanesProcessingParams=None):
             elif xanesProcessingParams['return'] == 'chi(e)':
                 s = utils.readSpectrum(xanesFile, guess=True, energyColumn=0, intensityColumn=5, xName='energy', yName='intensity')
             elif xanesProcessingParams['return'] == 'chi(k)':
-                s = utils.readSpectrum(xanesFile, guess=True, energyColumn=2, intensityColumn=5, xName='k', yName='intensity')
+                s = utils.readSpectrum(xanesFile, guess=True, energyColumn=2, intensityColumn=5)
+                s = exafs.Exafs(s.x, s.y)
             else: assert False
+            if returnEfermi:
+                tmp = utils.readSpectrum(xanesFile, guess=True, energyColumn=0, intensityColumn=2)
+                energy, k = tmp.x, tmp.y
+                ind = np.where(k==0)[0][0]
+                Efermi[absorbers[i]] = energy[ind]
         else:
+            assert not returnEfermi, 'Can\'t get Efermi when there is no xmu.dat file'
             exafsFile = d+os.sep+'chi.dat'
             if not os.path.exists(exafsFile):
                 raise Exception('Error: in folder ' + d + ' there is no output file chi.dat')
-            s = utils.readSpectrum(exafsFile, guess=True, energyColumn=0, intensityColumn=1, xName='k', yName='chi')
-            if s.k[0] == 0: s = s.changeEnergy(s.k[1:])
+            s = utils.readSpectrum(exafsFile, guess=True, energyColumn=0, intensityColumn=1)
+            if s.x[0] == 0: s = s.changeEnergy(s.x[1:])
+            s = exafs.Exafs(s.x, s.y)
         results[absorbers[i]] = s
     # make all spectra have the same point count
     enNums = [len(results[a].x) for a in absorbers]
@@ -272,8 +280,12 @@ def parseOneFolder(folder, multipleAbsorber=False, xanesProcessingParams=None):
     me = results[absorbers[maxEnInd]]
     for a in absorbers:
         if len(results[a].x) != maxEnNum:
-            results[a] = utils.Spectrum(me.x, np.interp(me.x, results[a].x, results[a].y), xName=me.xName, yName=me.yName)
-    if multipleAbsorber: return results
-    else:
+            newY = np.interp(me.x, results[a].x, results[a].y)
+            if me.xName == 'k': results[a] = exafs.Exafs(me.x, newY)
+            else: results[a] = utils.Spectrum(me.x, newY, xName=me.xName, yName=me.yName)
+    if not multipleAbsorber:
         assert len(results) == 1, 'Multiple absorbers detected. Set multipleAbsorber=True'
-        return list(results.values())[0]
+        results = list(results.values())[0]
+        if returnEfermi: Efermi = list(Efermi.values())[0]
+    if returnEfermi: return results, Efermi
+    else: return results

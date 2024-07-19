@@ -544,7 +544,7 @@ def spectrumExcitations(directory, N_points, Elarge, Gamma_max, Gamma_hole):
         j = output.find('  End of higher-order oscillator strengths (X-ray spectroscopy)', i)
         excitations = output[i:j - 3]
 
-        Exc = pd.read_csv(StringIO(excitations), sep='\s+', names=['Number', 'Energy', '3', '4', '5', '6', '7', 'Intensity'])
+        Exc = pd.read_csv(StringIO(excitations), sep=r'\s+', names=['Number', 'Energy', '3', '4', '5', '6', '7', 'Intensity'])
         print(Exc)
         Exc_numpy = np.zeros((N_points, 2))
 

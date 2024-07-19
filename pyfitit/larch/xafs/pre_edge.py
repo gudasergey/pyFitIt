@@ -5,7 +5,8 @@
 import numpy as np
 
 from lmfit import Parameters, Minimizer
-from ...xraydb import guess_edge
+from ...utils import importXrayDB
+xraydb = importXrayDB()
 from ...larch import Group, Make_CallArgs, parse_group_args
 
 from ...larch.math import index_of, index_nearest, remove_dups, remove_nans2
@@ -339,7 +340,7 @@ def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
     group.edge = getattr(group, 'edge', None)
 
     if group.atsym is None or group.edge is None:
-        _atsym, _edge = guess_edge(group.e0)
+        _atsym, _edge = xraydb.guess_edge(group.e0)
         if group.atsym is None: group.atsym = _atsym
         if group.edge is None:  group.edge = _edge
     return

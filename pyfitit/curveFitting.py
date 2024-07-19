@@ -1,7 +1,8 @@
 import scipy, scipy.special, copy, warnings, lmfit, os, scipy.interpolate
 import numpy as np
 from lmfit.models import ExpressionModel, PolynomialModel
-from . import utils, molecule, larch, geometry, plotting, xraydb
+from . import utils, molecule, larch, geometry, plotting, smoothLib
+xraydb = utils.importXrayDB()
 from .larch import xafs
 import matplotlib.pyplot as plt
 from sklearn.linear_model import Ridge
@@ -36,7 +37,7 @@ def linearReg2(y_true, f1, f2, weights=None):
         elif norm_f2 != 0:
             return [0, norm_y / norm_f2]
         else: return [0,0]
-    return [(rhs1*matr_22-rhs2*matr_12)/det, (matr_11*rhs2-matr_21*rhs1)/det]
+    return (rhs1*matr_22-rhs2*matr_12)/det, (matr_11*rhs2-matr_21*rhs1)/det
 
 
 def linearReg(x,y,de=None):
@@ -161,165 +162,164 @@ def findEfermiByArcTan(energy, intensity, maxlevel=None):
     """
     assert len(energy) == len(intensity), f'{len(energy)} != {len(intensity)} ' + str(energy.shape) + ' ' + str(intensity.shape)
     intensity = copy.deepcopy(intensity)
-    last = np.max(intensity)
-    efermi0 = findExpEfermi(energy, intensity, 0.5*last)
-    mod = ExpressionModel('b/(1+exp(-a*(x - x0)))+c')
-    params = mod.make_params(a=0.3, x0=efermi0, b=last, c=0)  # - start
-    params['a'].set(min=0)
-    params['b'].set(min=0)
     if maxlevel is not None:
         e_level = findExpEfermi(energy, intensity, maxlevel)
         intensity[energy > e_level] = np.interp([e_level], energy, intensity)[0]
+    last = np.max(intensity)
+    efermi0 = findExpEfermi(energy, intensity, 0.5*last)
+    a0 = np.max((intensity[1:]-intensity[:-1])/(energy[1:]-energy[:-1]))
+    mod = ExpressionModel('2*b/(1+exp(-(a/b)*(x - x0)))+c')
+    params = mod.make_params(a=a0, x0=efermi0, b=last, c=0)  # - start
+    params['a'].set(min=0)
+    params['b'].set(min=0)
     result = mod.fit(intensity, params, x=energy)
     # print(result.best_values['x0'])
     return result.best_values, result.best_fit
 
 
-def subtractLinearBase(x, y, initialPeakInterval=None, changePeakInterval='no', changeEdgeDirections=None):
+def findEfermiByArcTan1(energy, intensity, a0):
     """
-    Subtract linear base from function y such that: base <= y for all x in peakInterval
-    :param x:
-    :param y:
-    :param initialPeakInterval:
-    :param changePeakInterval: permit to correct peak interval: 'no' - do not change, 'make positive' - change only if peak is not positive on peakInterval, 'max' - expand to as biggest as possible keeping peak positive
-    :param changeEdgeDirections: dict {'left':subset[-1,1], 'right':subset[-1,1]}, default={'left':[+1], 'right':[-1]}
-    :return: x_peak, y_peak-(a*x_peak+b), [a,b]
+    Searches Efermi energy by fitting xanes by arctan.
+    :param energy:
+    :param intensity:
+    :return: best_params = {'a':..., 'x0':...}, arctan_y
     """
-    assert len(x) == len(y)
-    assert len(x.shape) == 1 and len(y.shape) == 1
-    assert np.all(np.diff(x) > 0)
-    assert changePeakInterval in ['no', 'make positive', 'max']
-    if initialPeakInterval is None: initialPeakInterval = [x[0], x[-1]]
-    if changeEdgeDirections is None: changeEdgeDirections = {'left':[+1], 'right':[-1]}
-    eps = 1e-10
-    assert set(changeEdgeDirections.keys()) == {'left', 'right'}
-    peakInterval = copy.deepcopy(initialPeakInterval)
-    peakIntervalInd = np.array([utils.findNearest(x, peakInterval[0], returnInd=True, ignoreDirectionIfEmpty=True), utils.findNearest(x, peakInterval[1], returnInd=True, ignoreDirectionIfEmpty=True)])
+    assert len(energy) == len(intensity), f'{len(energy)} != {len(intensity)} ' + str(energy.shape) + ' ' + str(intensity.shape)
+    intensity = copy.deepcopy(intensity)
+    c0 = intensity[0]
+    b0 = (intensity[-1]-c0)/2
+    mod = ExpressionModel(f'2*b/(1+exp(-(a/b)*(x - x0)))+c')
+    params = mod.make_params(a=a0, x0=(energy[0]+energy[-1])/2, b=b0, c=c0)  # - start
+    # result = mod.fit(intensity, params, x=energy)
+    # return result.best_values, result.best_fit
+    return params, mod.eval(params, x=energy)
 
-    def isGoodIntervalInd(peakIntervalInd):
-        return (peakIntervalInd[0] < peakIntervalInd[1]) and (peakIntervalInd[0] >= 0) and (peakIntervalInd[1] <= len(x)-1)
 
-    if not isGoodIntervalInd(peakIntervalInd):
-        assert peakIntervalInd[0] == peakIntervalInd[1]
-        if peakIntervalInd[0] > 0: peakIntervalInd[0] -= 1
-        else:
-            if peakIntervalInd[1] < len(x)-1: peakIntervalInd[1] += 1
-            else:
-                i = peakIntervalInd[0]
-                return np.array([x[i]]), np.array([0]), [0,0]
-
-    initialPeakIntervalInd = copy.deepcopy(peakIntervalInd)
-
-    def getLinearBase(peakIntervalInd):
-        assert isGoodIntervalInd(peakIntervalInd)
-        a = (y[peakIntervalInd[1]] - y[peakIntervalInd[0]]) / (x[peakIntervalInd[1]] - x[peakIntervalInd[0]])
-        b = y[peakIntervalInd[0]] - a * x[peakIntervalInd[0]]
-        return a, b
-
-    def result(peakIntervalInd):
-        a, b = getLinearBase(peakIntervalInd)
-        x_peak = x[peakIntervalInd[0]:peakIntervalInd[1]+1]
-        y_peak = y[peakIntervalInd[0]:peakIntervalInd[1]+1]
-        return x_peak, y_peak-(a*x_peak+b), [a,b]
-
-    def isPositive(peakIntervalInd, i=None, returnDeviation=False):
-        if i is None:
-            x_peak, peak, lin = result(peakIntervalInd)
-            a, b = lin
-            dev = peak + eps*np.abs(a*x_peak+b)
-            if returnDeviation: return dev
-            else: return np.all(dev >= 0)
-        else:
-            a, b = getLinearBase(peakIntervalInd)
-            return y[i] - (a*x[i] + b) >= -eps*np.abs(y[i])
-
-    def chooseChangeDirections(peakIntervalInd):
-        dirs = []
-        extra = []
-        getEntry = lambda interval: {'newInterval':interval, 'sum dev':np.sum(isPositive(interval, returnDeviation=True))}
-        if +1 in changeEdgeDirections['left']:
-            entry = getEntry([peakIntervalInd[0]+1, peakIntervalInd[1]])
-            if not isPositive(peakIntervalInd, peakIntervalInd[0]+1): dirs.append(entry)
-            else: extra.append(entry)
-        if -1 in changeEdgeDirections['left'] or (initialPeakIntervalInd[0]<peakIntervalInd[0] and isPositive([peakIntervalInd[0]-1,peakIntervalInd[1]])):
-            dirs.append(getEntry([peakIntervalInd[0]-1, peakIntervalInd[1]]))
-        if -1 in changeEdgeDirections['right'] and not isPositive(peakIntervalInd, peakIntervalInd[1]-1):
-            entry = getEntry([peakIntervalInd[0], peakIntervalInd[1]-1])
-            if not isPositive(peakIntervalInd, peakIntervalInd[0] + 1): dirs.append(entry)
-            else: extra.append(entry)
-        if +1 in changeEdgeDirections['right'] or (initialPeakIntervalInd[1]>peakIntervalInd[1] and isPositive([peakIntervalInd[0],peakIntervalInd[1]+1])):
-            dirs.append(getEntry([peakIntervalInd[0], peakIntervalInd[1]+1]))
-        # print('dirs:',[e['newInterval'] for e in dirs])
-        if len(dirs) == 0:
-            dirs = extra
-        dirs = sorted(dirs, key=lambda entry: entry['sum dev'], reverse=True)
-        return dirs[0]['newInterval'], dirs[0]['sum dev']
-
-    if changePeakInterval == 'no': return result(peakIntervalInd)
-    sumDev = np.sum(isPositive(peakIntervalInd, returnDeviation=True))
-    isPos = isPositive(peakIntervalInd)
-    while True:
-        oldPeakIntervalInd = copy.deepcopy(peakIntervalInd)
-        oldSumDev = sumDev
-        oldIsPos = isPos
-        peakIntervalInd, sumDev = chooseChangeDirections(peakIntervalInd)
-        isPos = isPositive(peakIntervalInd)
-        # print(x[peakIntervalInd], peakIntervalInd, isPos)
-        if peakIntervalInd is None:
-            peakIntervalInd = oldPeakIntervalInd
+def subtractLinearBase(x, y, baseFitInterval, debug=False):
+    ind = (baseFitInterval[0] <= x) & (x <= baseFitInterval[1])
+    xb,yb = x[ind],y[ind]
+    yb = (yb - np.min(yb)) / (np.max(yb) - np.min(yb))
+    # pre-edge is near the intersection point of the left and right linear envelopes of the spectrum
+    left_abc = None
+    i1 = 0
+    for i2_ in range(len(xb)-1):
+        i2 = len(xb)-i2_-1
+        a,b,c = geometry.get_line_by_2_points(xb[i1], yb[i1], xb[i2], yb[i2])
+        k,b1 = -a/b, -c/b
+        y_plus = yb-(k*xb+b1)
+        if np.all(y_plus >= -1e-10):
+            left_abc = [a,b,c]
             break
-        if isPos:
-            if changePeakInterval == 'make positive': break
-            if oldIsPos and oldSumDev > sumDev:
-                peakIntervalInd = oldPeakIntervalInd
-                break
-        if oldIsPos and not isPos:
-            peakIntervalInd = oldPeakIntervalInd
+    right_abc = None
+    i2 = len(xb)-1
+    for i1 in range(len(xb)-1):
+        a,b,c = geometry.get_line_by_2_points(xb[i1], yb[i1], xb[i2], yb[i2])
+        k,b1 = -a/b, -c/b
+        y_plus = yb-(k*xb+b1)
+        if np.all(y_plus >= -1e-10):
+            right_abc = [a,b,c]
             break
-        if np.all(oldPeakIntervalInd == peakIntervalInd): break
-    return result(peakIntervalInd)
+    assert left_abc is not None
+    assert right_abc is not None
+    corner_x, corner_y = geometry.get_line_intersection(*left_abc, *right_abc)
 
+    # all the significant intervals of spectrum decrease should be inside pre-edge region
+    decr_intervals = []
+    for i in range(len(xb)-1):
+        if yb[i+1] <= yb[i]:
+            last = decr_intervals[-1] if len(decr_intervals)>0 else [-100,-100]
+            if  last[1] == i: last[1] = i+1
+            else: decr_intervals.append([i,i+1])
+    # print('decr_intervals =', decr_intervals)
+    if len(decr_intervals) > 0:
+        decr_intervals_vals = np.array([yb[interval[0]]-yb[interval[1]] for interval in decr_intervals])
+        assert np.all(decr_intervals_vals>=0)
+        decr_intervals_y = np.array([yb[interval[0]] for interval in decr_intervals])
+        # print('decr_intervals_vals =', decr_intervals_vals)
+        big_ind = np.where( (decr_intervals_vals >= np.max(decr_intervals_vals)*0.3) & (decr_intervals_y >= np.max(yb)*0.03) )[0]
+        if len(big_ind) == 0: decr_intervals_union = [1e15,-1e15]
+        else:
+            decr_intervals = [decr_intervals[i] for i in big_ind]
+            # print('big decr_intervals =', decr_intervals)
+            decr_intervals_union = [decr_intervals[0][0], decr_intervals[-1][1]]
+            # print('decr_intervals_union =', decr_intervals_union)
+    else: decr_intervals_union = [1e15,-1e15]
+    if debug:
+        if decr_intervals_union[1]>decr_intervals_union[0]:
+            print('decr_intervals_union =', xb[decr_intervals_union[0]], xb[decr_intervals_union[1]])
+        else: print('Spectrum has no decrease intervals')
 
-def subtractLinearBase2(x, y, initialPeakInterval):
-    x1 = np.linspace(*initialPeakInterval, 200) # to help calculate integrals
-    y = np.interp(x1,x,y)
-    x = x1
-    n = len(x)
-    s = np.zeros((n,n)) - 1e10
+    n = len(xb)
+    # in descending order of priority
+    s_all_decr = np.zeros((n,n)) - 1e10 # contains the significant intervals of spectrum decrease
+    s_pos_small_y_corner = np.zeros((n, n)) - 1e10 # positive pre-edge, small y, near the corner
+    s_pos_small_y = np.zeros((n, n)) - 1e10 # positive pre-edge, small y
+    s_pos = np.zeros((n,n)) - 1e10 # positive pre-edge
+    # we iterate through all pairs of points, connect them with a line and see if the spectrum is located in the interval between the points above the line
     for i1 in range(n-1):
         for i2 in range(i1+1, n):
-            a,b,c = geometry.get_line_by_2_points(x[i1], y[i1], x[i2], y[i2])
-            k,b = -a/b, -c/b
-            y_plus = y[i1:i2+1]-(k*x[i1:i2+1]+b)
-            if len(y_plus)>0 and np.all(y_plus>=0):
-                s[i1,i2] = np.max(y_plus)
-    i1,i2 = np.unravel_index(s.argmax(), s.shape)
-    if i1 == i2: i1,i2 = 0,n-1
+            b,k = geometry.get_line_by_2_points_kb(xb[i1], yb[i1], xb[i2], yb[i2])
+            y_plus = yb[i1:i2+1] - (k*xb[i1:i2+1]+b)
+            integral = utils.integral(xb[i1:i2+1], y_plus)
+            if i1<=decr_intervals_union[0] and decr_intervals_union[1]<=i2:
+                s_all_decr[i1,i2] = integral
+            if len(y_plus)>0 and np.all(y_plus>=-1e-10):
+                s_pos[i1,i2] = integral
+                if yb[i2] < 0.5:
+                    s_pos_small_y[i1,i2] = s_pos[i1,i2]
+                    if abs(corner_x-xb[i1]) <= 20:
+                        s_pos_small_y_corner[i1,i2] = s_pos[i1,i2]
+    def chooseMax(s):
+        i1, i2 = np.unravel_index(s.argmax(), s.shape)
+        if i1 == i2: return None, None
+        else: return i1,i2
+
+    i1, i2 = chooseMax(s_all_decr)
+    # print('chooseMax =', i1,i2, s_all_decr[i1,i2])
+    # for iii in range(i1,i2): print(s_all_decr[iii,i2], iii)
+    if i1 is None:
+        if debug: print('subtractLinearBase failed to find peaks containing major decrease intervals')
+        i1, i2 = chooseMax(s_pos_small_y_corner)
+    if i1 is None:
+        if debug: print('subtractLinearBase failed to find close to edge peaks')
+        i1, i2 = chooseMax(s_pos_small_y)
+    if i1 is None:
+        if debug: print('subtractLinearBase failed to find close to edge peaks and low peaks')
+        i1, i2 = chooseMax(s_pos)
+    if i1 is None:
+        if debug: print('subtractLinearBase failed to find any peaks')
+        i1,i2 = 0,n-1
     a,b,c = geometry.get_line_by_2_points(x[i1], y[i1], x[i2], y[i2])
     k, b = -a / b, -c / b
-    x_peak = x[i1:i2+1]
-    y_peak = y[i1:i2+1]
+    x_peak = xb[i1:i2+1]
+    y_peak = yb[i1:i2+1]
     return x_peak, y_peak - (k * x_peak + b), [k, b]
 
 
-def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositiveConstrains=True, weights=None, slopeCorrection=None, extrapolate=None, useStartParams=None, plotFileName=None, sepFolders=False):
+def subtractBase_old(x, y, peakInterval, baseFitInterval, model='arctan', weights=None, slopeCorrection=None, extrapolate=None, useStartParams=None, plotFileName=None, sepFolders=False):
     """
-    Fit base by Cauchy function and substract from y.
+    Fit base by arctan function and subtract from y.
     :param x: argument
     :param y: function values
     :param peakInterval: interval of peak search (do not included in base fitting)
     :param baseFitInterval: interval of base fit. It should include peakInterval
     :param model: 'cauchy' or 'bezier' or 'arctan' or 'rbf
-    :param usePositiveConstrains: add constrain y_fit <= y
     :param weights: dict(left, middle, right, slope) - use to fit base, middle of the base if fitted to the left edge of the peak. Default: dict(left=1, middle=0, right=1, slope=1)
-    :param slopeCorrection: addition or substraction from the derivative of the base in the right peak edge
+    :param slopeCorrection: addition or subtraction from the derivative of the base in the right peak edge
     :param extrapolate: {'left':percent_dx_left, 'right':percent_dx_right}
+    :param useStartParams: start param dict for optimization
     :param plotFileName: filename to save debug plot
     :param sepFolders: save graphs in different folders
     :return: dict with keys: 'peak' - spectrum of peak with subtracted base (on interval peakInterval); 'peak full' - the same on interval baseFitInterval, 'base' - spectrum of base on peakInterval; 'base full' - the same on baseFitInterval, 'part' - initial spectrum on peakInterval, 'part full' - the same on baseFitInterval; 'info' - optimization info
     """
     assert model in ['cauchy', 'bezier', 'arctan', 'rbf', 'triangle']
     assert len(x) == len(y)
+    assert utils.intervalIntersection(x[[0,-1]], peakInterval) is not None
+    assert utils.intervalIntersection(x[[0,-1]], baseFitInterval) is not None
+    assert peakInterval[0] < peakInterval[1]
+    assert baseFitInterval[0] < baseFitInterval[1]
+    assert baseFitInterval[0] < peakInterval[0]
+    assert peakInterval[1] < baseFitInterval[1]
     defaultWeights = dict(left=1, middle=0, right=1, slope=1)
     if weights is None: weights = defaultWeights
     assert set(weights.keys()) <= {'left','middle','right','slope'}, str(set(weights.keys()))
@@ -332,7 +332,7 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
     ind_fit = ind_full & ~ind_peak
     ind_fit_left = (baseFitInterval[0] <= x) & (x < peakInterval[0])
     ind_fit_right = (peakInterval[1] < x) & (x <= baseFitInterval[1])
-    assert np.sum(ind_fit_left)>=1, f'Too few points in the left part of the baseFitInterval {baseFitInterval}. peakInterval = {peakInterval}'
+    assert np.sum(ind_fit_left)>=1, f'Too few points in the left part of the baseFitInterval {baseFitInterval}. peakInterval={peakInterval}'
     assert np.sum(ind_fit_right)>=1, f'Too few points in the right part of the baseFitInterval {baseFitInterval}. peakInterval = {peakInterval}'
     x_peak = x[ind_peak]; y_peak = y[ind_peak]
     x_fit = x[ind_fit]; y_fit = y[ind_fit]
@@ -342,20 +342,7 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
     x_fit_right = x[ind_fit_right]; y_fit_right = y[ind_fit_right]
 
     # make x_fit y_fit by extrapolating base inside peak interval (linear extrapolation from both ends)
-    if usePositiveConstrains:
-        b1, a1 = linearReg(x_fit_left, y_fit_left)
-        b2, a2 = linearReg(x_fit_right, y_fit_right)
-        y_gap = np.max([a1*x_peak+b1, a2*x_peak+b2], axis=0).reshape(-1)
-        assert len(y_gap) == len(x_peak)
-        x_fit = x_full
-        y_fit = np.concatenate((y_fit_left, y_gap, y_fit_right))
-        assert len(x_fit) == len(y_fit), str(len(x_fit))+" "+str(len(y_fit))
-    else:
-        x_fit = x_fit
-        y_fit = y_fit
-
     x1 = x_fit[0]; x2 = x_fit[-1]
-    y1 = y_fit[0]; y2 = y_fit[-1]
     if 'left' in extrapolate:
         n = np.where(x_fit <= x1+(x2-x1)/10)[0][-1] + 1
         if n<2: n = 2
@@ -376,84 +363,45 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
         y_fit = np.append(y_fit,new_x*slope+intercept)
     assert (len(x_peak) >= 2) and (len(x_fit) >= 2), 'len(x_peak) = '+str(len(x_peak))+' len(x_fit) = '+str(len(x_fit))
 
-    minx = np.min(x); maxx = np.max(x); maxy = np.max(y)
-    if model == 'cauchy':
-        modelFunc = lambda x, a, b, g, d: a / ((x - b) ** 2 + g) + d
-        mod = ExpressionModel('a/((x-b)**2+g) + d')
-        b0 = x2 + x2 - x1
-        g0 = 1
-        a0 = (y2 - y1) / (1 / ((x2 - b0) ** 2 + g0) - 1 / ((x1 - b0) ** 2 + g0))
-        d0 = y1 - a0 / ((x1 - b0) ** 2 + g0)
-        params = mod.make_params(a=a0, b=b0, g=g0, d=d0)
-        param_order = {'a': 0, 'b': 1, 'g': 2, 'd': 3}
-        start0 = [params['a'].value, params['b'].value, params['g'].value, params['d'].value]
-        result = mod.fit(y_fit, params, x=x_fit)
-        start = [result.params['a'].value, result.params['b'].value, result.params['g'].value, result.params['d'].value]
-        bounds = [[0,1e3*maxy],[minx,maxx+(maxx-minx)*10],[0,(maxx-minx)*10],[-maxy,maxy]]
-    elif model == 'arctan':
-        modelFunc = lambda x, a, b, c, x0, d: b/(1+np.exp(-a*(x - x0)))+c+d*(x-x_fit[0])
-        mod = ExpressionModel('b/(1+exp(-a*(x - x0)))+c+d*(x-'+str(x_fit[0])+')')
-        efp,_ = findEfermiByArcTan(x, y)
-        if efp['x0'] < x_peak[0]: efp['x0'] = x_peak[0]
-        a0 = efp['a']; b0 = efp['b']; c0 = efp['c']; x00 = efp['x0']; d0 = 0
-        params = mod.make_params(a=a0, b=b0, c=c0, x0=x00, d=d0)
-        param_order = {'a':0, 'b':1, 'c':2, 'x0':3, 'd':4}
-        start0 = [params['a'].value, params['b'].value, params['c'].value, params['x0'].value, params['d'].value]
-        assert np.all(x[1:]-x[:-1] > 0), str(x)
-        max_dy = np.max((y[1:]-y[:-1])/(x[1:]-x[:-1]))
-        params['a'].set(min=0); params['a'].set(max=max_dy/(np.max(y)-np.min(y))*10)
-        params['b'].set(min=0)
-        params['x0'].set(min=x_peak[0])
-        a_linreg = linearReg(x_fit_left, y_fit_left)[1]
-        params['d'].set(min=0); params['d'].set(max=3*abs(a_linreg))
-        dist = np.max([abs(x00-minx), abs(x00-maxx), maxx-minx])
-        left_dy = np.abs((y_peak[0]-y_fit[0])/(x_peak[0]-x_fit[0]))
-        bounds = [[0,a0*100], [0,maxy*10], [-maxy,maxy], [minx-dist,maxx+dist*10], [0, 3*left_dy]]
-        start = useStartParams
-        if not usePositiveConstrains and useStartParams is not None: start0 = useStartParams
-        result = type('TmpClass', (object,), {'params':params})()
-    elif model == 'rbf':
-        # xi = np.array([baseFitInterval[0], *peakInterval, baseFitInterval[1]])
-        # h = min(peakInterval[0]-baseFitInterval[0], baseFitInterval[1]-peakInterval[1])/5
-        # xi = np.array([*np.arange(baseFitInterval[0],peakInterval[0],h), *np.arange(peakInterval[1],baseFitInterval[1],h)])
-        xi = np.array([baseFitInterval[0], np.mean(peakInterval), baseFitInterval[1]])
-        yi = spectrum.val(xi)
+    maxy = np.max(y)
+    b_left, a_left = linearReg(x_fit_left, y_fit_left)
+    modelFunc = lambda x, a, b, c, x0, d: 2*b/(1+np.exp(-(a/b)*(x - x0)))+c+d*(x-x_fit[0]) + a_left*x+b_left
+    mod = ExpressionModel(f'2*b/(1+exp(-(a/b)*(x - x0)))+c+d*(x-({x_fit[0]})) + ({a_left})*x+({b_left})')
 
-        def modelFunc(x, *params):
-            assert len(yi) == len(params)
-            y1 = yi + params
-            rbfi = scipy.interpolate.Rbf(xi, y1)
-            return rbfi(x)
-        start0 = np.zeros(len(yi)); start = start0
-        result = None
-        scale_y = np.max(yi)-np.min(yi)
-        bounds = [[-scale_y*0.5, scale_y*0.5]]*len(yi)
-    elif model == 'triangle':
-        def modelFunc(x, *p):
-            yleft, xmid, ymid, yright = p
-            xi = [baseFitInterval[0], xmid, baseFitInterval[1]]
-            yi = [yleft, ymid, yright]
-            return np.interp(x, xi, yi)
-        yleft0 = spectrum.val(baseFitInterval[0])
-        start0 = [yleft0, np.mean(peakInterval), yleft0, spectrum.val(baseFitInterval[1])]
-        start = start0
-        result = None
-        yb = [np.min(y_full), np.max(y_full)]
-        bounds = [yb, baseFitInterval, yb, yb]
-    else:
-        Mtk = lambda n, t, k: t**k * (1-t)**(n-k) * scipy.misc.comb(n,k)
-        BezierCoeff = lambda ts: [[Mtk(3,t,k) for k in range(4)] for t in ts]
-        t = np.linspace(0,1,len(x_fit))
-        Pseudoinverse = np.linalg.pinv(BezierCoeff(t))
-        data = np.column_stack((x_fit, y_fit))
-        control_points = Pseudoinverse.dot(data)
-        Bezier = np.array(BezierCoeff(tPlot)).dot(control_points)
-        assert not usePositiveConstrains
-        
-        return x_peak, y_peak-approx_peak, x_full, approx_full, y_peak, y_full - approx_full
+    # prepare func for findEfermiByArcTan
+    y1 = copy.deepcopy(y)
+    y1[ind_fit_left] = y[ind_fit_left]-(a_left*x[ind_fit_left]+b_left)
+    x1,y1 = utils.expandByReflection(x[ind_full], y1[ind_full], side='right', reflType='odd', stableReflMeanCount=1)
 
+    max_dy = np.max((y1[1:]-y1[:-1])/(x1[1:]-x1[:-1]))
+    efp, findEfermiByArcTan_res = findEfermiByArcTan1(x1, y1, a0=max_dy)
+    findEfermiByArcTan_res = utils.Spectrum(x1, findEfermiByArcTan_res)
+    plotting.plotToFile(x1,y1,'expand', findEfermiByArcTan_res.x, findEfermiByArcTan_res.y,'atan', fileName='debug')
+    if efp['x0'] < x_peak[0]: efp['x0'] = x_peak[0]
+    a0 = efp['a'].value
+    b0 = efp['b'].value
+    c0 = efp['c'].value
+    x00 = efp['x0'].value
+    d0 = 0
+    params = mod.make_params(a=a0, b=b0, c=c0, x0=x00, d=d0)
+    plotting.plotToFile(x[ind_full],y[ind_full],'xanes', x[ind_full], mod.eval(params, x=x[ind_full]),'model', fileName='debug2')
+    param_order = {'a':0, 'b':1, 'c':2, 'x0':3, 'd':4}
+    heuristicStart = [params['a'].value, params['b'].value, params['c'].value, params['x0'].value, params['d'].value]
+    assert modelFunc(*([x_peak[0]]+heuristicStart)) == mod.eval(params,x=x_peak[0]), f'{modelFunc(*([x_peak[0]] + heuristicStart))} != {mod.eval(params, x=x_peak[0])}'
+    assert np.all(x[1:]-x[:-1] > 0), str(x)
+    params['a'].set(min=0); params['a'].set(max=max_dy*2)
+    params['b'].set(min=0)
+    params['x0'].set(min=x_peak[0])
+    a_linreg = linearReg(x_fit_left, y_fit_left)[1]
+    params['d'].set(min=0); params['d'].set(max=3*abs(a_linreg))
+    left_dy = np.abs((y_peak[0]-y_fit[0])/(x_peak[0]-x_fit[0]))
+    # do not expand x0 bound - optimize can't find minimum
+    bounds = [[0,a0*100], [0,maxy*10], [-maxy,maxy], [x_fit_right[0],max(x_fit_right[0]+2*(x00-x_fit_right[0]), x_fit_right[-1])], [0, 3*left_dy]]
+    for i in range(len(bounds)):
+        if heuristicStart[i] < bounds[i][0]: heuristicStart[i] = bounds[i][0]
+        if heuristicStart[i] > bounds[i][1]: heuristicStart[i] = bounds[i][1]
     scale_x = x_fit_right[-1] - x_fit_left[0]
-    scale_y = np.max(y_fit_left) - np.min(y_fit_left)
+    scale_y = np.max(y_fit_right) - np.min(y_fit_left)
     def getDerivative(modelFunc, params):
         assert len(x_fit_right) > 0
         xfr = x_fit_right
@@ -463,7 +411,7 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
         approxDerivative = (y_app_right[-1] - y_app_right[0]) / (xfr[-1] - xfr[0])
         return approxDerivative
 
-    def getTargetFunc(modelFunc, derivative=None):
+    def getTargetFunc(modelFunc, derivative=None, debug=False):
         def func(params):
             y_app_left = modelFunc(x_fit_left, *params)
             y_app_right = modelFunc(x_fit_right, *params)
@@ -489,61 +437,104 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
                 approxDerivative = getDerivative(modelFunc, params)
                 derivError = abs(approxDerivative - derivative)/(a0*b0)
 
-            #print(left, middle, right, derivError)
-            return np.linalg.norm([left*weights['left'], middle*weights['middle'], right*weights['right'], derivError*weights['slope']], ord=2)
+            if debug: print(left, middle, right, derivError)
+            # print(weights)
+            edges = np.linalg.norm([left*weights['left'], right*weights['right']], ord=10)
+            return np.linalg.norm([edges, middle*weights['middle'], derivError*weights['slope']], ord=2)
             # return max(left, right)
-
         return func
 
-    if start is None: start = start0
-    if useStartParams is None and usePositiveConstrains:
-        res = scipy.optimize.minimize(getTargetFunc(modelFunc), start0, bounds=bounds)
-        # print(getTargetFunc(modelFunc)(start), res.fun)
-        if res.fun < getTargetFunc(modelFunc)(start):
-            start = res.x
-            if not usePositiveConstrains and slopeCorrection is not None:
-                start = res.x
-                res = scipy.optimize.minimize(getTargetFunc(modelFunc, derivative=getDerivative(modelFunc, start) * slopeCorrection), start, bounds=bounds)
-            if result is not None:
-                for name in result.params:
-                    # print(f'Setting {name} = ',res.x[param_order[name]])
-                    result.params[name].set(res.x[param_order[name]])
-                # print(result.params)
+    def optimize(func, start, **params):
+        res = scipy.optimize.minimize(func, start, **params)
+        x = res.x if res.success else start
+        return dict(optimParam=x, optimVal=func(x), optimResult=res)
+
+    def fixParam(names, values, func, start, bounds):
+        ind_exclude = [param_order[name] for name in names]
+        ind_keep = [i for i in range(len(x)) if i not in ind_exclude]
+        squeeze = lambda x: [x[i] for i in range(len(x)) if i in ind_keep]
+        def expand(x1):
+            x = [None]*len(param_order)
+            for i,v in zip(ind_keep,x1): x[i] = v
+            for i,v in zip(ind_exclude,values):
+                assert x[i] is None
+                x[i] = v
+            return x
+        func1 = lambda params1: func(expand(params1))
+        return func1, squeeze(start), squeeze(bounds), expand
+    
+    def buildResult(info):
+        info = copy.deepcopy(info)
+        approx_peak = modelFunc(x_peak, *info['optimParam'])
+        approx_full = modelFunc(x_full, *info['optimParam'])
+        y_sub = y_peak-approx_peak
+        y_sub_full = y_full - approx_full
+        info['peakInterval'] = peakInterval
+        info['baseFitInterval'] = baseFitInterval
+        info['spectrum'] = spectrum
+        info['findEfermiByArcTan'] = findEfermiByArcTan_res
+        return {'peak':utils.Spectrum(x_peak, y_sub), 'peak full':utils.Spectrum(x_full, y_sub_full),
+                'base': utils.Spectrum(x_peak, approx_peak), 'base full':utils.Spectrum(x_full, approx_full),
+                'part':utils.Spectrum(x_peak, y_peak), 'part full':utils.Spectrum(x_full, y_full),
+                'info':info}
+
+    debug = True
+    if debug: print('bounds:',bounds)
+    start = heuristicStart if useStartParams is None else useStartParams
     info = {'optimParam':start, 'optimVal':getTargetFunc(modelFunc)(start)}
-    if usePositiveConstrains:
-        #while True:
-            #if np.all(modelFunc(x_peak,*start)<=y_peak): break
-            #dx = np.max(x_peak)-np.min(x_peak)
-            #dy = np.max(y_peak)-np.min(y_peak)
-            #start[1] += dx*0.01
-            #start[3] -= dy*0.01
-            
-        constrains = tuple()
-        for i in range(len(x_peak)):
-            cons_fun = lambda params,i=i: modelFunc(x_peak[i], *params)
-            constrains += (scipy.optimize.NonlinearConstraint(cons_fun, -maxy, y_peak[i]),)
-        # print(bounds)
-        res = scipy.optimize.minimize(getTargetFunc(modelFunc), start, bounds=bounds, constraints=constrains)
-        if slopeCorrection is not None:
-            start = res.x
-            res = scipy.optimize.minimize(
-                getTargetFunc(modelFunc, derivative=getDerivative(modelFunc, start) * slopeCorrection), start, bounds=bounds, constraints=constrains)
-        params = res.x
-        approx_peak = modelFunc(x_peak, *params)
-        approx_full = modelFunc(x_full, *params)
-        info = {'optimParam': params, 'optimVal': res.fun}
-    else:
-        if result is not None:
-            approx_peak = mod.eval(result.params, x=x_peak)
-            approx_full = mod.eval(result.params, x=x_full)
-        else:
-            approx_peak = modelFunc(x_peak, *start)
-            approx_full = modelFunc(x_full, *start)
+    if debug: print('start: ', info['optimParam'], 'F =', info['optimVal'])
+    result0_start = buildResult(info)
+    plotting.plotToFile(x[ind_full],y[ind_full],'xanes', x[ind_full], result0_start['base full'].y,'base', fileName='debug3')
+
+    func = getTargetFunc(modelFunc)
+
+    method = 'Powell'  # None 'Powell' 'trust-constr'
+    if useStartParams is None:
+        # model(a,b,c,x0,d): 2*b/(1+np.exp(-(a/b)*(x - x0)))+c+d*(x-x_fit[0]) + a_left*x+b_left
+        func1, start1, bounds1, expander = fixParam(['a','b','d'], [a0,b0,0], func, info['optimParam'], bounds)
+        info1 = optimize(func1, start1, bounds=bounds1, method=method)
+        info1['optimParam'] = expander(info1['optimParam'])
+        result1_fix_abd = buildResult(info1)
+        if debug: print('fix_abd: ', info1['optimParam'], 'F =', info1['optimVal'])
+        if info1['optimVal'] < info['optimVal']: info = info1
+
+        func1, start1, bounds1, expander = fixParam(['b','d'], [b0,0], func, info['optimParam'], bounds)
+        info1 = optimize(func1, start1, bounds=bounds1, method=method)
+        info1['optimParam'] = expander(info1['optimParam'])
+        result2_fix_bd = buildResult(info1)
+        if debug: print('fix_bd: ', info1['optimParam'], 'F =', info1['optimVal'])
+        if info1['optimVal'] < info['optimVal']: info = info1
+
+        func1, start1, bounds1, expander = fixParam(['d'], [0], func, info['optimParam'], bounds)
+        info1 = optimize(func1, start1, bounds=bounds1, method=method)
+        info1['optimParam'] = expander(info1['optimParam'])
+        result2_fix_d = buildResult(info1)
+        if debug: print('fix_d: ', info1['optimParam'], 'F =', info1['optimVal'])
+        if info1['optimVal'] < info['optimVal']: info = info1
+
+    info1 = optimize(func, info['optimParam'], bounds=bounds, method=method)
+    result3_wo_slopeCorr = buildResult(info1)
+    if debug: print('wo_slopeCorr: ', info1['optimParam'], 'F =', info1['optimVal'])
+    if info1['optimVal'] < info['optimVal']: info = info1
+
+    if slopeCorrection is not None:
+        info = optimize(getTargetFunc(modelFunc, derivative=getDerivative(modelFunc,info['optimParam'])*slopeCorrection), info['optimParam'], bounds=bounds, method=method)
+        info['optimVal'] = func(info['optimParam'])
+
+    approx_peak = modelFunc(x_peak, *info['optimParam'])
+    approx_full = modelFunc(x_full, *info['optimParam'])
     y_sub = y_peak-approx_peak
     y_sub_full = y_full - approx_full
     info['peakInterval'] = peakInterval
     info['baseFitInterval'] = baseFitInterval
     info['spectrum'] = spectrum
+    info['findEfermiByArcTan'] = findEfermiByArcTan_res
+    info['result0_start'] = result0_start
+    if useStartParams is None:
+        info['result1_fix_abd'] = result1_fix_abd
+        info['result2_fix_bd'] = result2_fix_bd
+        info['result2_fix_d'] = result2_fix_d
+    info['result3_wo_slopeCorr'] = result3_wo_slopeCorr
     result = {'peak':utils.Spectrum(x_peak, y_sub), 'peak full':utils.Spectrum(x_full, y_sub_full),
             'base': utils.Spectrum(x_peak, approx_peak), 'base full':utils.Spectrum(x_full, approx_full),
             'part':utils.Spectrum(x_peak, y_peak), 'part full':utils.Spectrum(x_full, y_full),
@@ -555,11 +546,25 @@ def substractBase(x, y, peakInterval, baseFitInterval, model='arctan', usePositi
 
 def plotPreedge(result, plotFileName, sepFolders=False, only='all'):
     assert only in ['base', 'full', 'sub', 'all']
+    def safeGetSpectrum(result, name):
+        if name in result['info']:
+            s = result['info'][name]
+            if isinstance(s, utils.Spectrum):
+                return s.x,s.y,name
+            else:
+                assert isinstance(s, dict)
+                assert 'peak' in s
+                s = s['base full']
+                if name.startswith('result'): name = name[6:]
+                return s.x,s.y,name
+        else: return tuple()
     x, y = result['info']['spectrum'].toTuple()
     x_full, approx_full = result['base full'].toTuple()
     x_peak, y_peak = result['part'].toTuple()
     y_sub = result['peak'].y
     y_sub_full = result['peak full'].y
+    info = result['info']
+    arctan = info['findEfermiByArcTan'] if findEfermiByArcTan in info else None
     if only != 'all': filename = plotFileName
     else:
         folder = os.path.split(plotFileName)[0]
@@ -568,11 +573,24 @@ def plotPreedge(result, plotFileName, sepFolders=False, only='all'):
     if only == 'all':
         filename = f'{folder}/base/{fn}' if sepFolders else f'{folder}/{name}-base{ext}'
     if only in ['all', 'base']:
-        plotting.plotToFile([x_full[0], x_full[-1]], [0, 0], 'zero', x_full, y_sub_full, 'sub full', x, y, 'init', x_full, approx_full, 'base', x_peak, y_peak, {'label': 'peak', 'lw': 3}, x_peak, y_sub, {'label':'sub','lw':3}, fileName=filename, xlim=[x_full[0], x_full[-1]])
+        toPlot = ([x_full[0], x_full[-1]], [0, 0], 'zero', x_full, y_sub_full, 'sub full', x, y, 'init', x_full, approx_full, 'base', x_peak, y_peak, {'label': 'peak', 'lw': 3}, x_peak, y_sub, {'label':'sub','lw':3})
+        for name in ['pseudo_approx_full', 'Cauchy_fit', 'Cauchy_sub']:
+            toPlot += safeGetSpectrum(result, name)
+        plotting.plotToFile(*toPlot, fileName=filename, xlim=[x_full[0], x_full[-1]])
+        toPlot = (x, y, 'init')
+        if arctan is not None: toPlot += (*arctan.toTuple(), {'label':'findEfermiByArcTan', 'alpha':0.5})
+        for name in ['result0_start', 'result1_fix_abd', 'result2_fix_bd', 'result2_fix_d', 'result3_wo_slopeCorr']:
+            toPlot += safeGetSpectrum(result, name)
+        if 'result0_start' in info: plotting.plotToFile(*toPlot, fileName=os.path.splitext(filename)[0]+'_SBres.png', xlim=[x_full[0], x_full[-1]])
     if only == 'all':
         filename = f'{folder}/full/{fn}' if sepFolders else f'{folder}/{name}-full{ext}'
     if only in ['all', 'full']:
         plotting.plotToFile(x, y, 'init', x_full, approx_full, 'base', x_peak, y_peak, 'peak', fileName=filename)
+        toPlot = (x, y, 'init')
+        if arctan is not None: toPlot += (*arctan.toTuple(), {'label':'findEfermiByArcTan', 'alpha':0.5})
+        for name in ['result0_start', 'result1_fix_abd', 'result2_fix_bd', 'result2_fix_d', 'result3_wo_slopeCorr']:
+            toPlot += safeGetSpectrum(result, name)
+        if 'result0_start' in info: plotting.plotToFile(*toPlot, fileName=os.path.splitext(filename)[0]+'_SBres.png')
     if only == 'all':
         filename = f'{folder}/sub/{fn}' if sepFolders else f'{folder}/{name}-sub{ext}'
     if only in ['all', 'sub']:
@@ -583,6 +601,7 @@ def findZeros(x, y):
     b = (y>0).astype(int)
     dy = b[1:]-b[:-1]
     ind = np.where(dy != 0)[0]
+    # print('x[ind] =', x[ind], x[ind[-1]], x[ind[-1]+1], y[ind[-1]], y[ind[-1]+1] )
     if len(ind) == 0: return None, None, None
     xz = np.zeros(len(ind))
     monot = dy[ind]
@@ -592,12 +611,362 @@ def findZeros(x, y):
     return xz, ind, monot
 
 
-def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, edgeLevel=None, weights=None, slopeCorrection=None, plotFileName=None, sepFolders=False, debug=False):
+def buildPreedgeResult(peakInterval, baseFitInterval, x, y, approx_full):
+    """
+    :param approx_full: monotone lower envelope of the spectrum on the baseFitInterval
+    """
+    assert peakInterval[0] <= peakInterval[1], f'peakInterval = {peakInterval} baseFitInterval = {baseFitInterval}'
+    assert baseFitInterval[0] <= baseFitInterval[1], f'peakInterval = {peakInterval} baseFitInterval = {baseFitInterval}'
+    assert baseFitInterval[0] <= peakInterval[0], f'peakInterval = {peakInterval} baseFitInterval = {baseFitInterval}'
+    assert baseFitInterval[1] >= peakInterval[1], f'peakInterval = {peakInterval} baseFitInterval = {baseFitInterval}'
+    ind_full = (x >= baseFitInterval[0]) & (x <= baseFitInterval[1])
+    assert np.sum(ind_full) == len(approx_full), f'{np.sum(ind_full)} != {len(approx_full)}'
+    x_full, y_full = x[ind_full], y[ind_full]
+    ind_peak = (x >= peakInterval[0]) & (x <= peakInterval[1])
+    x_peak, y_peak = x[ind_peak], y[ind_peak]
+    ind_peak_in_full = (x_full >= peakInterval[0]) & (x_full <= peakInterval[1])
+    approx_peak = approx_full[ind_peak_in_full]
+    y_sub = y_peak-approx_peak
+    y_sub_full = y_full - approx_full
+
+    ind_fit = ind_full & ~ind_peak
+    ind_fit_left = (baseFitInterval[0] <= x) & (x < peakInterval[0])
+    ind_fit_right = (peakInterval[1] < x) & (x <= baseFitInterval[1])
+
+    info = dict(peakInterval=peakInterval, baseFitInterval=baseFitInterval, spectrum=utils.Spectrum(x,y), ind_full=ind_full, ind_peak=ind_peak, ind_peak_in_full=ind_peak_in_full, ind_fit=ind_fit, ind_fit_left=ind_fit_left, ind_fit_right=ind_fit_right)
+    return {'peak':utils.Spectrum(x_peak, y_sub), 'peak full':utils.Spectrum(x_full, y_sub_full),
+                'base': utils.Spectrum(x_peak, approx_peak), 'base full':utils.Spectrum(x_full, approx_full),
+                'part':utils.Spectrum(x_peak, y_peak), 'part full':utils.Spectrum(x_full, y_full),
+                'info':info}
+
+
+def plotPreedgeResult(result, plotFileName, postfix, final):
+    folder = os.path.split(plotFileName)[0]
+    fn = os.path.split(plotFileName)[-1]
+    name, ext = os.path.splitext(fn)
+    def subfolder_filename(subfold, postfix):
+        return f'{folder}/{subfold}/{name}{postfix}{ext}'
+    plotPreedge(result, subfolder_filename('base',postfix), sepFolders=True, only='base')
+    if final:
+        plotPreedge(result, subfolder_filename('base_final',''), sepFolders=True, only='base')
+        plotPreedge(result, subfolder_filename('full_final',''), sepFolders=True, only='full')
+
+
+def fitCauchy(x_left, y_left, center_x, center_y, x_peak0):
+    # print(x_left)
+    # print(y_left)
+    # print(center_x, center_y, x_peak0)
+    y_left = np.copy(y_left)
+    if x_left[-1] < center_x:
+        x_left = np.append(x_left, center_x)
+        y_left = np.append(y_left, center_y)
+    y_left[y_left < 0] = 0
+    area = 2*utils.integral(x_left, y_left)
+    if area == 0: return 0,1
+    x,y = x_left, y_left/area
+    i1, i2 = x<x_peak0, x>=x_peak0
+    w1, w2 = 1,1
+    def optimFunc(sigma):
+        diff = np.abs(smoothLib.kernelCauchy(x-center_x,0,sigma) - y)**2
+        return utils.integral(x[i1], diff[i1]) * w1 + utils.integral(x[i2], diff[i2]) * w2
+    sigmaGauss = np.sqrt(utils.integral(x, (x-center_x)**2*y))
+    # print('sigmaGauss =', sigmaGauss)
+    # print('center_x =', center_x, 'sigmaGauss =', sigmaGauss, 'width/2 =', center_x-x_peak0)
+    res = scipy.optimize.minimize_scalar(optimFunc, bounds=(sigmaGauss*0.1, sigmaGauss*10))
+    sigma = res.x
+    # print('best sigma =', sigma, 'area =', area)
+    return area, sigma
+
+
+def fitPreedgeByCauchy(result, stepName, plotFileName, debug):
+    result = copy.deepcopy(result)
+    peakInterval, baseFitInterval = result['info']['peakInterval'], result['info']['baseFitInterval']
+    x_peak, y_sub = result['peak'].toTuple()
+    x_full, y_full = result['part full'].toTuple()
+    y_sub = np.copy(y_sub)
+    y_sub[y_sub<0] = 0
+    if np.all(y_sub == 0): return np.zeros(len(x_full))
+    area = utils.integral(x_peak, y_sub)
+    center = utils.integral(x_peak, y_sub * x_peak) / area
+    assert peakInterval[0] <= center <= peakInterval[1]
+    sp = result['info']['spectrum']
+    i2 = x_full <= center
+    # print(x_full[i2], y_full[i2], center, peakInterval)
+    cauchy_area, cauchy_sigma = fitCauchy(x_full[i2], y_full[i2], center, sp.val(center), peakInterval[0])
+    cauchy_full = smoothLib.kernelCauchy(x_full, center, cauchy_sigma) * cauchy_area
+    result['info']['Cauchy_fit'] = utils.Spectrum(x_full, result['base full'].y+cauchy_full)
+    result['info']['Cauchy_sub'] = utils.Spectrum(x_full, cauchy_full)
+    if 'pseudo_approx_full' in result['info']: del result['info']['pseudo_approx_full']
+    plotPreedgeResult(result, plotFileName, f'_{stepName}_0', final=False)
+    return cauchy_full
+
+
+def refineSubtractBaseResultHelper(result, cauchy_sub, stepName, plotFileName, final, debug):
+
+    def fix_negative_sub(x_peak,y_peak,b,k,x0,y0):
+        """
+        If line kx+b goes somewhere upper y_peak, we replace it by lower envelope line goes through (x0,y0).
+        :returns: new_b,new_k
+        """
+        assert np.all(x_peak >= x0) or np.all(x_peak <= x0)
+        if np.all(y_peak >= k*x_peak+b): return b,k
+        tang = (y_peak-y0) / (x_peak-x0)
+        if np.all(x0 <= x_peak):  new_k = np.min(tang)
+        else: new_k = np.max(tang)
+        new_b = y0-new_k*x0
+        return new_b, new_k
+
+
+    def fix_negative_approx(x_approx,y_approx,b,k,x0,y0):
+        """
+        If line kx+b goes everywhere upper y_approx, we replace it by lower line goes through (x0,y0).
+        :returns: new_b,new_k
+        """
+        assert np.all(x_approx >= x0) or np.all(x_approx <= x0)
+        if np.any(y_approx > k*x_approx+b): return b,k
+        tang = (y_approx-y0) / (x_approx-x0)
+        ind = np.argsort(tang)
+        if np.all(x0 <= x_approx):
+            if len(tang) >= 2:
+                i = ind[-2]
+                new_k = tang[i]
+            else: new_k = tang[0]*0.9
+        else:
+            if len(tang) >= 2:
+                i = ind[1]
+                new_k = tang[i]
+            else: new_k = tang[0]*1.1
+        new_b = y0-new_k*x0
+        return new_b, new_k
+
+    def smooth_corner(x0, y0, cx0, cy0):
+        # print(x0,cx0)
+        scale_x = x0[-1] - x0[0]
+        scale_y = y0[-1] - y0[0]
+        dx, dy = scale_x/10, scale_y/5
+        # scale
+        x,y = (x0-cx0)/dx, (y0-cy0)/dy
+        cx, cy = 0, 0
+        assert np.any(x<-1), f'Decrease left edge of the base fit interval or increase the left edge of the peak fit interval'
+        assert np.any(y>+1), f'Increase right edge of the base fit interval or decrease the right edge of the peak fit interval'
+        lx, ly = x[x< -1][-1], y[x< -1][-1]
+        # dist to corner must be equal, or we can't find correct circle
+        dc = np.sqrt((lx-cx)**2 + (ly-cy)**2)
+        v = np.array([ x[y>+1][0], y[y>+1][0] ])
+        v = geometry.normalize(v)
+        rx, ry = cx+v[0]*dc, cy+v[1]*dc
+        # print('l =', lx, ly)
+        # print('r =', rx, ry)
+
+        # find the circle, which touches the corner lines in the points (lx,ly) (rx,ry)
+        a1,b1,c1 = geometry.get_line_by_2_points(cx, cy, lx, ly)
+        a2,b2,c2 = geometry.get_line_by_2_points(cx, cy, rx, ry)
+        orth1 = (b1, -a1, -b1*lx+a1*ly)
+        orth2 = (b2, -a2, -b2*rx+a2*ry)
+        # print(orth1, orth2)
+        circ_x,circ_y = geometry.get_line_intersection(*orth1, *orth2)
+        # print('circ =', circ_x, circ_y)
+        # print('dist to line:', geometry.get_dist_to_line(a1,b1,c1,circ_x,circ_y), geometry.get_dist_to_line(a2,b2,c2,circ_x,circ_y))
+        r = np.sqrt((lx-circ_x)**2 + (ly-circ_y)**2)
+        r_check = np.sqrt((rx-circ_x)**2 + (ry-circ_y)**2)
+        assert np.abs(r-r_check)/r < 1e-6, f'{r} != {r_check}'
+
+        i = (lx<=x) & (x<=rx)
+        new_y = np.copy(y)
+        new_y[i] = circ_y - np.sqrt( np.abs(r**2 - (x[i]-circ_x)**2) )
+        return new_y*dy+cy0
+
+    x_full, y_full = result['part full'].toTuple()
+    x_peak, y_peak = result['part'].toTuple()
+    peakInterval, baseFitInterval = result['info']['peakInterval'], result['info']['baseFitInterval']
+    pseudo_approx_full = y_full - cauchy_sub
+    pseudo_approx_full_spectrum = utils.Spectrum(x_full, pseudo_approx_full)
+    ind_fit_left_in_full = x_full < peakInterval[0]
+    ind_fit_right_in_full = x_full > peakInterval[1]
+    # fit linear model y=kx+b on the left and right of the base. Returns [b,k]
+    # linear base is the most stable. Moreover - due to Cauchy subtraction we do not think on choosing intervals for linear fit! It is the best algorithm, I've done!
+    approx_left_params = linearReg(x_full[ind_fit_left_in_full], pseudo_approx_full[ind_fit_left_in_full])
+    approx_right_params = linearReg(x_full[ind_fit_right_in_full], pseudo_approx_full[ind_fit_right_in_full])
+
+    if approx_left_params[1] < 0: approx_left_params = [np.mean(pseudo_approx_full[ind_fit_left_in_full]), 0]
+
+    approx_left_params1 = fix_negative_sub(x_peak,y_peak,*approx_left_params, np.mean(x_full[ind_fit_left_in_full]), np.mean(pseudo_approx_full[ind_fit_left_in_full]))
+    if debug and approx_left_params1 != approx_left_params:
+        print('Left part linear fit failed to make y_sub positive')
+    approx_left_params = approx_left_params1
+
+    approx_left_params1 = fix_negative_approx(x_full[ind_fit_right_in_full], pseudo_approx_full[ind_fit_right_in_full],*approx_left_params, np.mean(x_full[ind_fit_left_in_full]), np.mean(pseudo_approx_full[ind_fit_left_in_full]))
+    if debug and approx_left_params1 != approx_left_params:
+        print('Left part linear fit failed to make right part of the pseudo_approx_full positive')
+    approx_left_params = approx_left_params1
+
+    approx_right_params1 = fix_negative_sub(x_peak,y_peak,*approx_right_params, np.mean(x_full[ind_fit_right_in_full]), np.mean(pseudo_approx_full[ind_fit_right_in_full]))
+    if debug and approx_right_params1 != approx_right_params:
+        print('Right part linear fit failed to make y_sub positive')
+    approx_right_params = approx_right_params1
+
+    approx_right_params1 = fix_negative_approx(x_full[ind_fit_left_in_full], pseudo_approx_full[ind_fit_left_in_full],*approx_right_params, np.mean(x_full[ind_fit_right_in_full]), np.mean(pseudo_approx_full[ind_fit_right_in_full]))
+    if debug and approx_right_params1 != approx_right_params:
+        print('Right part linear fit failed to make left part of the pseudo_approx_full positive')
+    approx_right_params = approx_right_params1
+
+    corner_x, corner_y = geometry.get_line_intersection_kb(*approx_left_params, *approx_right_params)
+    new_approx_full = approx_left_params[1]*x_full + approx_left_params[0]
+    i = x_full >= corner_x
+    new_approx_full[i] = approx_right_params[1]*x_full[i] + approx_right_params[0]
+    ind_peak_in_full = result['info']['ind_peak_in_full']
+    y_sub_not_smoothed = y_full[ind_peak_in_full] - new_approx_full[ind_peak_in_full]
+    if not np.all(y_sub_not_smoothed<=0):
+        new_approx_full = smooth_corner(x_full, new_approx_full, corner_x, corner_y)
+    new_result = buildPreedgeResult(peakInterval, baseFitInterval, *result['info']['spectrum'].toTuple(), new_approx_full)
+    new_result['info']['pseudo_approx_full'] = utils.Spectrum(x_full,pseudo_approx_full)
+    plotPreedgeResult(new_result, plotFileName, f'_{stepName}_1', final=final)
+    return new_result
+
+
+def refineSubtractBaseResult(result, stepName, plotFileName, final, debug):
+    cauchy_sub = fitPreedgeByCauchy(result, stepName, plotFileName, debug=debug)
+    return refineSubtractBaseResultHelper(result, cauchy_sub=cauchy_sub, stepName=stepName, plotFileName=plotFileName, final=final, debug=debug)
+
+
+def subtractBase(x, y, peakInterval, baseFitInterval, plotFileName=None, debug=False):
+    """
+    Subtract base from y
+    :param x: argument
+    :param y: function values
+    :param peakInterval: interval of peak search (do not included in base fitting)
+    :param baseFitInterval: interval of base fit. It should include peakInterval
+    :param plotFileName: filename to save debug plot
+    :return: dict with keys: 'peak' - spectrum of peak with subtracted base (on interval peakInterval); 'peak full' - the same on interval baseFitInterval, 'base' - spectrum of base on peakInterval; 'base full' - the same on baseFitInterval, 'part' - initial spectrum on peakInterval, 'part full' - the same on baseFitInterval; 'info' - optimization info
+    """
+    assert len(x) == len(y)
+    assert utils.intervalIntersection(x[[0,-1]], peakInterval) is not None
+    assert utils.intervalIntersection(x[[0,-1]], baseFitInterval) is not None
+    assert peakInterval[0] < peakInterval[1]
+    assert baseFitInterval[0] < baseFitInterval[1]
+    assert baseFitInterval[0] < peakInterval[0]
+    assert peakInterval[1] < baseFitInterval[1]
+    ind_fit_left = (baseFitInterval[0] <= x) & (x < peakInterval[0])
+    ind_fit_right = (peakInterval[1] < x) & (x <= baseFitInterval[1])
+    assert np.sum(ind_fit_left)>=1, f'Too few points in the left part of the baseFitInterval {baseFitInterval}. peakInterval={peakInterval}'
+    assert np.sum(ind_fit_right)>=1, f'Too few points in the right part of the baseFitInterval {baseFitInterval}. peakInterval = {peakInterval}'
+    result = buildPreedgeResult(peakInterval, baseFitInterval, x, y, approx_full=y[(baseFitInterval[0] <= x) & (x <= baseFitInterval[1])])
+    result = refineSubtractBaseResultHelper(result, np.zeros(len(result['peak full'].x)), '1_init', plotFileName, final=False, debug=debug)
+    result = refineSubtractBaseResult(result, stepName='2_refine', plotFileName=plotFileName, final=True, debug=debug)
+    return result
+
+
+def subtractBaseAuto(x, y, fitBaseInterval=None, edgeLevel=None, plotFileName=None, debug=False):
+    """
+    :param x: spectrum argument values
+    :param y: spectrum intensity values
+    :param fitBaseInterval: [x1,x2] - interval for pre-edge base fit (should be wider than pre-edge region)
+    :param edgeLevel: in (0,1), relative level to search peak (right min of the peak should be < edgeLevel*y[-1]). fitBaseInterval is chosen left to the edgeLevel energy point
+    :param plotFileName: file name for plot save
+    :param debug: enable debug output
+    """
+    edgeLevel1 = 0.5 if edgeLevel is None else edgeLevel
+    sp = utils.Spectrum(x,y)
+
+    # Step 1: find edge
+    # 'b/(1+exp(-a*(x - x0))) + c'
+    params, arctan_y = findEfermiByArcTan(x, y)
+    mid = params['c'] + params['b'] * edgeLevel1
+    rightBaseBorder = x[-1]
+    if edgeLevel is not None:
+        rightBaseBorder = sp.inverse(params['b'] * edgeLevel, select='max')
+    if fitBaseInterval is not None:
+        rightBaseBorder = fitBaseInterval[-1]
+    xz, ind, monot = findZeros(x, y-mid)
+    assert xz is not None, 'findEfermiByArcTan fails - no intersection with mean line'
+    ind_inc = np.where(monot==1)[0]
+    assert len(ind_inc)>0, 'No intersection with mean line with func increase?'
+    ind_inc = ind[ind_inc[-1]]
+
+    # Step 2: linear peak search
+    baseFitInterval = [x[0], x[ind_inc]] if fitBaseInterval is None else fitBaseInterval
+    baseFitInterval[1] = min(baseFitInterval[1], rightBaseBorder)
+    if debug: print('before linear peak search baseFitInterval =', baseFitInterval)
+    x_peak, y_sub, ab = subtractLinearBase(x, y, baseFitInterval, debug=debug)
+    peakInterval = [x_peak[0], x_peak[-1]]
+    assert np.sum((peakInterval[0]<=x) & (x<=peakInterval[1])) == len(x_peak)
+    assert np.all(x[(peakInterval[0]<=x) & (x<=peakInterval[1])] == x_peak)
+    if debug: print('subtractLinearBase gives peakInterval =', peakInterval)
+    approx_full = copy.deepcopy(y)
+    approx_full[(peakInterval[0]<=x) & (x<=peakInterval[1])] = ab[0]*x_peak + ab[1]
+    result = buildPreedgeResult(peakInterval, baseFitInterval, x, y, approx_full[(baseFitInterval[0]<=x) & (x<=baseFitInterval[1])])
+    plotPreedgeResult(result, plotFileName, '_0_linear', final=False)
+
+    # Step 3: interval correction: pre-edge should occupy 1/4 of the baseFitInterval width and 1/2 of the xanes height on baseFitInterval
+    def intervalCorrection(peakInterval, baseFitInterval):
+        peakInterval = copy.deepcopy(peakInterval)
+        baseFitInterval = copy.deepcopy(baseFitInterval)
+        min_y_preedge = np.min(y[(peakInterval[0]<=x) & (x<=peakInterval[1])])
+        max_y_preedge = np.max(y[(peakInterval[0]<=x) & (x<=peakInterval[1])])
+        # print('max_y_preedge =', max_y_preedge)
+        ymax_baseFitInterval = max_y_preedge + (max_y_preedge-min_y_preedge)
+        # print('ymax_baseFitInterval0 =', ymax_baseFitInterval)
+        ymax_baseFitInterval0 = ymax_baseFitInterval
+        my = np.min(y)
+        ymax_baseFitInterval = np.min([ymax_baseFitInterval, (np.max(y)-my)*0.7+my, (y[-1]-my)*0.7+my])
+        # print('before if: ymax_baseFitInterval =', ymax_baseFitInterval)
+        if ymax_baseFitInterval != ymax_baseFitInterval0:
+            tmp = (sp.val(peakInterval[1]) + ymax_baseFitInterval) / 2
+            ymax_baseFitInterval = max(ymax_baseFitInterval, tmp)
+        # print('after if: ymax_baseFitInterval =', ymax_baseFitInterval)
+        xmax_baseFitInterval =x[(y>=ymax_baseFitInterval) & (x>=peakInterval[1])][0]
+        # print('xmax_baseFitInterval =', xmax_baseFitInterval)
+        preedge_width = peakInterval[1] - peakInterval[0]
+        xmin_baseFitInterval = peakInterval[0] - 2*preedge_width
+        xmin_baseFitInterval = max(xmin_baseFitInterval, x[0])
+        if np.sum((baseFitInterval[0]<=x) & (x<=peakInterval[0])) < 2:
+            peakInterval[0] = x[x>=peakInterval[0]][2]
+        baseFitInterval = [xmin_baseFitInterval, xmax_baseFitInterval]
+        if debug: print('After interval relative size correction: baseFitInterval =', baseFitInterval, 'peakInterval =', peakInterval)
+        return peakInterval, baseFitInterval
+    peakInterval, baseFitInterval = intervalCorrection(peakInterval, baseFitInterval)
+    approx_full = approx_full[(baseFitInterval[0]<=x) & (x<=baseFitInterval[1])]
+    result = buildPreedgeResult(peakInterval, baseFitInterval, x, y, approx_full)
+    result = refineSubtractBaseResult(result, stepName='2_refine1', plotFileName=plotFileName, final=False, debug=debug)
+    result = refineSubtractBaseResult(result, stepName='3_refine2', plotFileName=plotFileName, final=True, debug=debug)
+    # expand peakInterval if peak edges are too high
+    def expandPeakInterval(result):
+        M = np.max(result['peak'].y)
+        pf = result['peak full']
+        i = np.where(pf.x == result['peak'].x[-1])[0][0]
+        while pf.y[i] >= M*0.05:
+            i = i+1
+            if i>=len(pf.y):
+                i = len(pf.y)-1
+                break
+        right = pf.x[i]
+        i = np.where(pf.x == result['peak'].x[0])[0][0]
+        while pf.y[i] >= M*0.05:
+            i = i-1
+            if i<0:
+                i = 0
+                break
+        left = pf.x[i]
+        return [left, right]
+    peakInterval = expandPeakInterval(result)
+    if peakInterval != result['info']['peakInterval']:
+        if debug: print('After expandPeakInterval: peakInterval =', peakInterval)
+        approx_full = copy.deepcopy(y)
+        approx_full[result['info']['ind_full']] = result['base full'].y
+        peakInterval, baseFitInterval = intervalCorrection(peakInterval, baseFitInterval)
+        approx_full = approx_full[(baseFitInterval[0]<=x) & (x<=baseFitInterval[1])]
+        result = buildPreedgeResult(peakInterval, baseFitInterval, x, y, approx_full)
+        result = refineSubtractBaseResult(result, stepName='4_refine1', plotFileName=plotFileName, final=False, debug=debug)
+        result = refineSubtractBaseResult(result, stepName='5_refine2', plotFileName=plotFileName, final=True, debug=debug)
+    return result
+
+
+def subtractBaseAuto_old(x, y, fitBaseInterval=None, edgeLevel=None, weights=None, slopeCorrection=None, plotFileName=None, sepFolders=False, debug=False):
     """
     :param fitBaseInterval: [x1,x2] - interval for base
     :param edgeLevel: in (0,1), relative level to search peak (right min of the peak should be < edgeLevel*y[-1]). baseInterval is chosen left to the edgeLevel energy point
     :param weights: dict(left, middle, right, slope) - use to fit base, middle of the base if fitted to the left edge of the peak. Default: dict(left=1, middle=0, right=1, slope=1)
-    :param slopeCorrection: addition or substraction from the derivative of the base in the right peak edge
+    :param slopeCorrection: addition or subtraction from the derivative of the base in the right peak edge
     """
     edgeLevel1 = 0.5 if edgeLevel is None else edgeLevel
     sp = utils.Spectrum(x,y)
@@ -618,7 +987,7 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         basefn = filename
 
     # Step 1: find edge
-    # 'b/(1+exp(-a*(x - x0)))+c'
+    # 'b/(1+exp(-a*(x - x0))) + c'
     params, arctan_y = findEfermiByArcTan(x, y)
     mid = params['c'] + params['b'] * edgeLevel1
     rightBaseBorder = x[-1]
@@ -633,47 +1002,65 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
     ind_inc = ind[ind_inc[-1]]
 
     # Step 2: linear peak search
-    initialPeakInterval = [x[0], x[ind_inc]] if fitBaseInterval is None else fitBaseInterval
-    initialPeakInterval[1] = min(initialPeakInterval[1], rightBaseBorder)
-    if debug: print('initialPeakInterval =', initialPeakInterval)
-    # x_peak, y_sub, ab = subtractLinearBase(x, y, initialPeakInterval=initialPeakInterval, changePeakInterval='max', changeEdgeDirections={'left':[+1], 'right':[-1]})
-    x_peak, y_sub, ab = subtractLinearBase2(x, y, initialPeakInterval)
+    baseFitInterval = [x[0], x[ind_inc]] if fitBaseInterval is None else fitBaseInterval
+    baseFitInterval[1] = min(baseFitInterval[1], rightBaseBorder)
+    if debug: print('before linear peak search baseFitInterval =', baseFitInterval)
+    x_peak, y_sub, ab = subtractLinearBase(x, y, baseFitInterval, debug=debug)
     newPeakInterval = [x_peak[0], x_peak[-1]]
-    if debug: print('newPeakInterval =', newPeakInterval)
+    if debug: print('subtractLinearBase3 gives peakInterval =', newPeakInterval)
+
+    # корректирум интервалы: предкрай должен занимать 1/4 экрана по высоте и 1/4 по ширине
+    preedgeHeight = np.max(y_sub)
+    min_y = np.min(sp.val(newPeakInterval))
+    ymax_baseFitInterval = min_y + 3*preedgeHeight
+    ymax_baseFitInterval = min(ymax_baseFitInterval, np.max(y))
+    xmax_baseFitInterval = sp.inverse(ymax_baseFitInterval, select='min')
+    preedge_width = newPeakInterval[1] - newPeakInterval[0]
+    xmin_baseFitInterval = newPeakInterval[0] - 2*preedge_width
+    baseFitInterval = [xmin_baseFitInterval, xmax_baseFitInterval]
+    if debug: print('After interval relative size correction: baseFitInterval =', baseFitInterval)
+
     y1 = sp.val(newPeakInterval[1])
     if mid - y1 < y1 - y[0]:
         # pre-edge looks like shoulder
         new_x1 = sp.limit([newPeakInterval[1], x[-1]]).inverse((y1 + params['c']+params['b']) / 2, select='min')
         if new_x1 is None: new_x1 = newPeakInterval[1] + (newPeakInterval[1]-newPeakInterval[0])
-        initialPeakInterval[1] = new_x1
-    dy = params['b']*params['a']
-    dx = (sp.val(initialPeakInterval[1]) - sp.val(initialPeakInterval[0])) / dy
+        baseFitInterval[1] = new_x1
+        if debug: print('Pre-edge looks like shoulder. Corrected baseFitInterval =', baseFitInterval)
+    dy = params['b']*params['a']/2  # model derivative at x=x0: diff (b/(1+exp(-a*(x - x0))) + c)
+    dx = (sp.val(baseFitInterval[1]) - sp.val(baseFitInterval[0])) / dy
     # print('dx =', dx)
     # correct too large left part
-    if dy>0 and dx < (initialPeakInterval[1] - initialPeakInterval[0])/20:
-        k = dx / ((initialPeakInterval[1] - initialPeakInterval[0])/20)
+    if dy>0 and dx < (baseFitInterval[1] - baseFitInterval[0])/20:
+        k = dx / ((baseFitInterval[1] - baseFitInterval[0])/20)
         # print('k =', k)
-        initialPeakInterval[0] = initialPeakInterval[1] - (initialPeakInterval[1] - initialPeakInterval[0])*k
-        # print(initialPeakInterval[0])
-        if newPeakInterval[0] - initialPeakInterval[0] < initialPeakInterval[1] - newPeakInterval[1]:
-            initialPeakInterval[0] = newPeakInterval[0] - (initialPeakInterval[1] - newPeakInterval[1])
-        # if initialPeakInterval[1] - initialPeakInterval[0] < 10: initialPeakInterval[0] = initialPeakInterval[1]-10
+        baseFitInterval[0] = baseFitInterval[1] - (baseFitInterval[1] - baseFitInterval[0])*k
+        # print(baseFitInterval[0])
+        if newPeakInterval[0] - baseFitInterval[0] < baseFitInterval[1] - newPeakInterval[1]:
+            baseFitInterval[0] = newPeakInterval[0] - (baseFitInterval[1] - newPeakInterval[1])
+        # if baseFitInterval[1] - baseFitInterval[0] < 10: baseFitInterval[0] = baseFitInterval[1]-10
+        if debug: print('Too large left part. Corrected baseFitInterval =', baseFitInterval)
     # correct too small left part (it results in wrong inclination of the base)
-    if initialPeakInterval[1]-initialPeakInterval[0] < 30:
-        initialPeakInterval[0] = initialPeakInterval[1]-30
-    if initialPeakInterval[0] < x[0]: initialPeakInterval[0] = x[0]
-    initialPeakInterval[1] = min(initialPeakInterval[1], rightBaseBorder)
-    if np.sum((newPeakInterval[1] < x) & (x < initialPeakInterval[1])) <= 1:
-        newPeakInterval[1] = initialPeakInterval[1]-1
-    if np.sum((initialPeakInterval[0] < x) & (x < newPeakInterval[0])) <= 1:
-        newPeakInterval[0] = initialPeakInterval[0]+1
-    if debug: print('corrected initialPeakInterval =', initialPeakInterval, 'newPeakInterval =', newPeakInterval)
+    if baseFitInterval[1]-baseFitInterval[0] < 30:
+        baseFitInterval[0] = baseFitInterval[1]-30
+        if debug: print('Too small left part (it results in wrong inclination of the base). Corrected baseFitInterval =', baseFitInterval)
+    baseFitInterval_tmp = copy.deepcopy(baseFitInterval)
+    if baseFitInterval[0] < x[0]: baseFitInterval[0] = x[0]
+    baseFitInterval[1] = min(baseFitInterval[1], rightBaseBorder)
+    if debug and baseFitInterval_tmp!=baseFitInterval: print('Correct baseFitInterval to match spectrum energy borders:', baseFitInterval)
+    newPeakInterval_tmp = copy.deepcopy(newPeakInterval)
+    if np.sum((newPeakInterval[1] < x) & (x < baseFitInterval[1])) <= 1:
+        newPeakInterval[1] = baseFitInterval[1]-1
+    if np.sum((baseFitInterval[0] < x) & (x < newPeakInterval[0])) <= 1:
+        newPeakInterval[0] = baseFitInterval[0]+1
+    if debug and newPeakInterval_tmp!=newPeakInterval: print('Corrected newPeakInterval to match baseFitInterval:', newPeakInterval)
     if plotFileName is not None:
         a,b = ab
-        plotting.plotToFile(x, y, 'init', x_peak, y_sub, 'y_sub', x_peak,a*x_peak+b,'ax+b', fileName=basefn('step2_linear'), xlim=initialPeakInterval)
+        plotting.plotToFile(x, y, 'init', x_peak, y_sub, 'y_sub', x_peak,a*x_peak+b,'ax+b', fileName=basefn('step2_linear'), xlim=baseFitInterval)
 
-    # Step 3: peak search without positive constrains
-    result = substractBase(x, y, newPeakInterval, initialPeakInterval, model=model, usePositiveConstrains=False, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=None, plotFileName=filename('step3_wo_pos'), sepFolders=sepFolders)
+    # Step 3: peak search
+    result = subtractBase(x, y, newPeakInterval, baseFitInterval, model=model, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=None, plotFileName=filename('step3_subtractBase'), sepFolders=sepFolders)
+    exit(0)
     def takeSignificantPart(y, level):
         res = copy.deepcopy(y)
         res[y < level] = level
@@ -687,11 +1074,11 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         err = exact_y - approx_y
         scale_y = np.max(err)
         for i in range(len(exact_y)):
-            if x[i] < corner[0]: continue
+            # if x[i] < corner[0]: continue
             x_inv = sp.inverse(approx_y[i], select='max')
             if x_inv is None: continue
             inv_err = abs(x[i] - x_inv) / scale_x * scale_y
-            if np.abs(inv_err) < np.abs(err[i]): err[i] = inv_err
+            if np.abs(inv_err) < err[i]: err[i] = inv_err
         return err
 
     def getCorner(x_full, approx_full, peakInterval, baseFitInterval):
@@ -702,13 +1089,13 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         xc,yc = geometry.get_line_intersection(a1,-1,b1, a2,-1,b2)
         return xc,yc
 
-    def getErrCorner(substractBaseResult):
-        x_full, y_full = substractBaseResult['part full'].toTuple()
-        y_sub_full = substractBaseResult['peak full'].y
-        approx_full = substractBaseResult['base full'].y
+    def getErrCorner(subtractBaseResult):
+        x_full, y_full = subtractBaseResult['part full'].toTuple()
+        y_sub_full = subtractBaseResult['peak full'].y
+        approx_full = subtractBaseResult['base full'].y
         scale_x = (x_full[-1] - x_full[0])/2  # /2 because width of graph is usually twice larger then height
         scale_y = np.max(y_sub_full)
-        corner = getCorner(x_full, approx_full, substractBaseResult['info']['peakInterval'], substractBaseResult['info']['baseFitInterval'])
+        corner = getCorner(x_full, approx_full, subtractBaseResult['info']['peakInterval'], subtractBaseResult['info']['baseFitInterval'])
         if debug: print('corner =',corner)
         distToCorner = lambda x,y: np.sqrt( ((x-corner[0])/scale_x)**2 + ((y-corner[1])/scale_y)**2 )
         err = calcErrorByXandY(x_full, y_full, approx_full, corner)
@@ -725,14 +1112,15 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         preedgeInterval = copy.deepcopy(preedgeInterval0)
         def finalCorrection(preedgeInterval):
             preedgeInterval = copy.deepcopy(preedgeInterval)
-            ind = (initialPeakInterval[0] <= x_full) & (x_full < preedgeInterval[0])
-            if np.sum(ind) <= 1: preedgeInterval[0] = x_full[initialPeakInterval[0] <= x_full][2]
-            ind = (preedgeInterval[1] < x_full) & (x_full <= initialPeakInterval[1])
-            if np.sum(ind) <= 1: preedgeInterval[1] = x_full[x_full <= initialPeakInterval[1]][-3]
+            ind = (baseFitInterval[0] <= x_full) & (x_full < preedgeInterval[0])
+            if np.sum(ind) <= 1: preedgeInterval[0] = x_full[baseFitInterval[0] <= x_full][2]
+            ind = (preedgeInterval[1] < x_full) & (x_full <= baseFitInterval[1])
+            if np.sum(ind) <= 1: preedgeInterval[1] = x_full[x_full <= baseFitInterval[1]][-3]
             return preedgeInterval
 
         def findPeaks(level):
             xz, ind, monot = findZeros(x_full, errCorner - level)
+            # print('xz =', xz)
             if xz is None: return preedgeInterval
             # find high peaks
             peaks = []
@@ -746,8 +1134,11 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
                 peaks.append({'height':height, 'width':width, 'area':area, 'pos':(xz[i+1]+xz[i])/2, 'region':[x_full[im1], x_full[im2]]})
             return peaks
         peaks = findPeaks(MerrCorner*refinePeakLevel)
-        if len(peaks) == 0: return finalCorrection(preedgeInterval)
-        i_best = np.argmax([p['area'] for p in peaks])
+        intersect = lambda s,d: not (s[1]<d[0] or d[1]<s[0])
+        preedge_intersect_peaks_ind = [i for i,p in enumerate(peaks) if intersect(p['region'], preedgeInterval0)]
+        if len(preedge_intersect_peaks_ind) == 0: return finalCorrection(preedgeInterval)
+        i_best = np.argmax([peaks[i]['area'] for i in preedge_intersect_peaks_ind])
+        i_best = preedge_intersect_peaks_ind[i_best]
         preedgePeaksInd = [i_best]
         largestPeakWidth = peaks[i_best]['width']
 
@@ -761,6 +1152,8 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
             if np.abs(peaks[nextPeakInd]['region'][1-dir01] - peaks[borderPeakInd]['region'][dir01]) < largestPeakWidth:
                 if direction == +1: newPreedgePeaksInd = preedgePeaksInd + [nextPeakInd]
                 else: newPreedgePeaksInd = [nextPeakInd] + preedgePeaksInd
+            # print(direction, preedgePeaksInd, newPreedgePeaksInd)
+            # print(np.abs(peaks[nextPeakInd]['region'][1-dir01] - peaks[borderPeakInd]['region'][dir01]), largestPeakWidth)
             return newPreedgePeaksInd
 
         def addMany(preedgePeaksInd):
@@ -808,10 +1201,10 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
     if debug: print('refineIntervals2 =', newPeakInterval3)
     newPeakInterval = newPeakInterval3
 
-    # Step 5: peak search with positive constrains
-    result = substractBase(x, y, newPeakInterval, initialPeakInterval, model=model, usePositiveConstrains=usePositiveConstrains, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=None, plotFileName=filename('step5_pos'), sepFolders=sepFolders)
+    # Step 5: peak search after refinement
+    result = subtractBase(x, y, newPeakInterval, baseFitInterval, model=model, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=None, plotFileName=filename('step5_subtractBase'), sepFolders=sepFolders)
 
-    # Step 6: enlarge positive peak
+    # Step 6: enlarge the peak
     def fixNegative(result):
         x_full = result['peak full'].x
         y_sub = result['peak'].y
@@ -823,21 +1216,25 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         y_sub_full[ind_full] = 0
 
     def enlargePositivePeak(result, peakInterval, tryCount):
-        errCorner, x_full, y_full, y_sub_full, approx_full, _ = getErrCorner(result)
-        MerrCorner = np.max(errCorner)
         peakInterval0 = peakInterval
         peakInterval = copy.deepcopy(peakInterval)
-        errCornerM20 = takeSignificantPart(errCorner, MerrCorner*0.05)
-        errCorner0 = takeSignificantPart(errCorner, 0)
-        i1_0 = utils.findNearest(x_full, peakInterval[0], returnInd=True)
-        i2_0 = utils.findNearest(x_full, peakInterval[1], returnInd=True)
-        pew = utils.integral(result['peak'].x, result['peak'].y) / (np.max(result['peak'].y)/2)
+
+        def getErrCornerExtra(result):
+            errCorner, x_full, y_full, y_sub_full, approx_full, _ = getErrCorner(result)
+            MerrCorner = np.max(errCorner)
+            errCornerM20 = takeSignificantPart(errCorner, MerrCorner*0.05)
+            errCorner0 = takeSignificantPart(errCorner, 0)
+            i1_0 = utils.findNearest(x_full, peakInterval[0], returnInd=True)
+            i2_0 = utils.findNearest(x_full, peakInterval[1], returnInd=True)
+            pew = utils.integral(result['peak'].x, result['peak'].y) / (np.max(result['peak'].y)/2)
+            return errCorner, errCorner0, errCornerM20, MerrCorner, i1_0, i2_0, pew, x_full, y_full, y_sub_full, approx_full
 
         def check(new_i, old_i, y):
             if abs(x_full[new_i] - x_full[old_i]) < pew/2 and (y[old_i] - y[new_i]) > MerrCorner * 0.05:
                 if new_i >= 2 and new_i <= len(y)-3: return new_i
             return old_i
 
+        errCorner, errCorner0, errCornerM20, MerrCorner, i1_0, i2_0, pew, x_full, y_full, y_sub_full, approx_full = getErrCornerExtra(result)
         i1_M20 = check(utils.findNextMinimum(errCornerM20, i1_0, direction=-1), i1_0, errCorner)
         i2_M20 = check(utils.findNextMinimum(errCornerM20, i2_0, direction=+1), i2_0, errCorner)
         i1_M0 = check(utils.findNextMinimum(errCorner0, i1_M20, direction=-1), i1_M20, errCorner)
@@ -846,29 +1243,45 @@ def substractBaseAuto(x, y, fitBaseInterval=None, usePositiveConstrains=True, ed
         i1_min = check(utils.findNextMinimum(y_sub_full, i1_M0, direction=-1), i1_M0, y_sub_full)
         i2_min = check(utils.findNextMinimum(y_sub_full, i2_M0, direction=+1), i2_M0, y_sub_full)
         peakInterval = [x_full[i1_min], x_full[i2_min]]
-        # if negative pit is too large run substractBase with positive constrains once more
+
+        def plotResult(result):
+            if plotFileName is None: return
+            plotPreedge(result, subfolder_filename('base', ''), sepFolders=sepFolders, only='base')
+            plotPreedge(result, subfolder_filename('base_final', ''), sepFolders=sepFolders, only='base')
+            plotPreedge(result, subfolder_filename('full_final', ''), sepFolders=sepFolders, only='full')
+
+        # if negative pit is too large, run subtractBase with positive constrains once more
         if min(errCorner[i1_min], errCorner[i2_min]) < -MerrCorner*0.1 and peakInterval0 != peakInterval:
             if debug:
-                print('Negative edge values detected. Run substractBase once more. peakInterval =', peakInterval)
-            result = substractBase(x, y, peakInterval, initialPeakInterval, model=model, usePositiveConstrains=usePositiveConstrains, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=None, plotFileName=filename(f'step6_pos{tryCount+1}'), sepFolders=sepFolders)
-            result = enlargePositivePeak(result, peakInterval, tryCount+1)
-        else:
-            if errCorner[i1_min] < 0: i1_min = check(utils.findNextMinimum(errCorner0, i1_0, direction=-1), i1_0, errCorner)
-            if errCorner[i2_min] < 0: i2_min = check(utils.findNextMinimum(errCorner0, i2_0, direction=+1), i2_0, errCorner)
-            peakInterval = [x_full[i1_min], x_full[i2_min]]
-            if debug: print('enlargePositivePeak finishes. peakInterval =', peakInterval)
-            x_peak = x_full[i1_min:i2_min+1]; y_peak = y_full[i1_min:i2_min+1]
-            y_sub = y_sub_full[i1_min:i2_min+1]
-            result['peak'] = utils.Spectrum(x_peak, y_sub)
-            result['base'] = utils.Spectrum(x_peak, approx_full[i1_min:i2_min+1])
-            result['part'] = utils.Spectrum(x_peak, y_peak)
-            result['info']['peakInterval'] = peakInterval
-            result['info']['baseFitInterval'] = initialPeakInterval
-            fixNegative(result)
-            if plotFileName is not None:
-                plotPreedge(result, subfolder_filename('base', ''), sepFolders=sepFolders, only='base')
-                plotPreedge(result, subfolder_filename('base_final', ''), sepFolders=sepFolders, only='base')
-                plotPreedge(result, subfolder_filename('full_final', ''), sepFolders=sepFolders, only='full')
+                print('Negative edge values detected. Run subtractBase once more. peakInterval =', peakInterval)
+            oldTol = result['info']['optimVal']
+            result1 = subtractBase(x, y, peakInterval, baseFitInterval, model=model, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=None, plotFileName=filename(f'step6_enlarge{tryCount+1}'), sepFolders=sepFolders)
+            if debug: print(f'step6_enlarge{tryCount+1}: oldTol =', oldTol, 'new =', result1['info']['optimVal'])
+            if result1['info']['optimVal'] > oldTol:
+                result1 = subtractBase(x, y, peakInterval, baseFitInterval, model=model, weights=weights, slopeCorrection=slopeCorrection, extrapolate=None, useStartParams=result['info']['optimParam'], plotFileName=filename(f'step6_pos{tryCount+1}sp'), sepFolders=sepFolders)
+                if debug: print(f'step6_enlarge{tryCount+1} with startParams: oldTol =', oldTol, 'new =', result1['info']['optimVal'])
+                if result1['info']['optimVal'] <= oldTol:
+                    result = result1
+                    result = enlargePositivePeak(result, peakInterval, tryCount+1)
+            else:
+                result = result1
+                result = enlargePositivePeak(result, peakInterval, tryCount + 1)
+
+        errCorner, errCorner0, errCornerM20, MerrCorner, i1_0, i2_0, pew, x_full, y_full, y_sub_full, approx_full = getErrCornerExtra(result)
+        # bad results for zeolite Ti TP0469
+        # if errCorner[i1_min] < 0: i1_min = check(utils.findNextMinimum(errCorner0, i1_0, direction=-1), i1_0, errCorner)
+        # if errCorner[i2_min] < 0: i2_min = check(utils.findNextMinimum(errCorner0, i2_0, direction=+1), i2_0, errCorner)
+        peakInterval = [x_full[i1_min], x_full[i2_min]]
+        if debug: print('enlargePositivePeak finishes. peakInterval =', peakInterval)
+        x_peak = x_full[i1_min:i2_min+1]; y_peak = y_full[i1_min:i2_min+1]
+        y_sub = y_sub_full[i1_min:i2_min+1]
+        result['peak'] = utils.Spectrum(x_peak, y_sub)
+        result['base'] = utils.Spectrum(x_peak, approx_full[i1_min:i2_min+1])
+        result['part'] = utils.Spectrum(x_peak, y_peak)
+        result['info']['peakInterval'] = peakInterval
+        result['info']['baseFitInterval'] = baseFitInterval
+        fixNegative(result)
+        plotResult(result)
         return result
     result = enlargePositivePeak(result, newPeakInterval, 0)
     return result
@@ -1321,6 +1734,9 @@ def mback(spectrum, pre=None, post=None, e0=None, element=None, edge=None, deg=N
 
 
 def autobk(spectrum, **larchAutobkParams):
+    """
+    :returns: flat spectrum, chi(k) spectrum and extra info dict with the keys: 'chie' - chi(e), 'bkg', 'delta_bkg', 'pre_edge', 'post_edge', 'norm', 'kraw'
+    """
     group = larch.Group(name='tmp')
     larch.xafs.autobk(spectrum.x, spectrum.y, group, **larchAutobkParams)
     # print(dir(group))  # atsym, autobk_details, bkg, callargs, chi, chie, d2mude, delta_bkg, delta_chi, dmude, e0, edge, edge_step, edge_step_poly, flat, journal, k, norm, norm_poly, post_edge, pre_edge, pre_edge_details

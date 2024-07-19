@@ -459,9 +459,9 @@ def getAttributes(folder,step):
         for name in name_paths:
             attr0=pd.read_csv(subfolders[m]+os.sep+name+'.csv')
             attr1=pd.read_csv(subfolders[m]+os.sep+name+'_attr_'+'.csv')
-            
-            reff=attr1['reff'].values
-            deg=attr1['deg'].values
+            assert len(attr1) == 1
+            reff=attr1['reff'][0]
+            deg=attr1['deg'][0]
             
             k0=attr0['k'].values
             amplitude0=attr0['mag[feff]'].values*attr0['red_factor'].values
@@ -1207,7 +1207,7 @@ class MSPathGroupManager:
 
     def generateDeformationsAdaptive(self, folder, maxSampleSize=500, maxError=0.01, calcSampleInParallel=4, seed=0):
         if self.debug: print('Run adaptive sampling')
-        sampling.sampleAdaptively(self.paramRanges, self.moleculeConstructor, self.feffCards, maxError=maxError, spectralProgram='feff6', samplePreprocessor=samplePreprocessor, workingFolder=folder, seed=seed, outputFolder=folder+'_result', debugFolder=folder+'_debug', runConfiguration={'calcSampleInParallel': calcSampleInParallel}, adaptiveSamplerParams={'initialIHSDatasetSize':100}, maxSampleSize=maxSampleSize, debug=False)
+        sampling.sampleAdaptively(self.paramRanges, self.moleculeConstructor, self.feffCards, maxError=maxError, spectralProgram='feff6', samplePreprocessor=samplePreprocessor, workingFolder=folder, seed=seed, outputFolder=folder+'_result', debugFolder=folder+'_debug', runConfiguration={'calcSampleInParallel': calcSampleInParallel}, adaptiveSamplerParams={'initialIHSDatasetSize':100}, maxSampleSize=maxSampleSize, debugLevel=1 if self.debug else 0)
 
     def extractSelectedPathsForOneFolder(self, shells, inputFolder, outputFolder):
         all_atoms_info = read_xyz_file_with_name_index(inputFolder + os.sep + 'molecule.xyz')

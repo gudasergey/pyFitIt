@@ -1,4 +1,4 @@
-import os, copy, sklearn, sklearn.feature_selection, sklearn.cross_decomposition, shutil, itertools, statsmodels, warnings, scipy.signal, scipy.interpolate, types, logging
+import os, copy, sklearn, sklearn.feature_selection, sklearn.cross_decomposition, shutil, itertools, statsmodels, warnings, scipy.signal, scipy.interpolate, types, logging, scipy.spatial, sklearn.manifold
 from . import ML, mixture, utils, plotting, smoothLib, curveFitting
 import numpy as np
 import pandas as pd
@@ -348,7 +348,6 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
     """
     :param sample: Sample instance
     :param descriptors: list of str (descriptor type) or dict{'type':.., 'columnName':.., 'arg1':.., 'arg2':.., ...}.
-        Possible descriptor types: 'stableExtrema', 'efermi', 'pca', 'rel_pca', 'max', 'min', 'variation', 'polynom'
         Params: common: spType, energyInterval, columnName
             type=stableExtrema - see. stableExtrema function
             type in ['max', 'min', 'maxGroup', 'minGroup'] - smoothRad, constrain=func(extr_e, extr_intensity, spectrum, params) -> True/False, selector=func(all_extr_e, all_extr_inten, spectrum, params) -> list_extr_e, list_extr_inten
@@ -361,7 +360,10 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
             type=best_linear - features(list) or None (then spType with energyInterval used), usePrebuiltData=True/False, fileName (for prebuilt data), cv_parts, best_alpha (set it to None first), infoFile - file used to choose best_alpha (test score should be as much as possible, but approx. equal to train score!!!), baggingParams - if you need to use bagging, for example: dict(max_samples=0.1, max_features=1.0, n_estimators=10)
             type=polynom - deg
             type=moment - deg in [0,1,2,3,...]
+            type=area
+            type=center
             type=value - energies(list) - values of spectra in this energy points
+            type=separable - 'labels':'all' or list, 'redefineLabelMap': labelMap to redefine (returned by findBestLabelMap function), params of separableDesctriptors: 'normalize':True, 'pairwiseTransformType':'binary', 'features':'exafs spectra', 'debugFolder':None
 
     :return: new sample with descriptors, goodSpectrumIndices
     """
@@ -432,9 +434,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
         energy1 = sample1.getEnergy(spType)
         spectra1 = sample1.getSpectra(spType)
         paramNames = sample.paramNames
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         if typ == 'stableExtrema':
             assert 'extremaType' in params
             if name == typ:
@@ -459,9 +461,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
             sample.addParam(paramName=ext_e, paramData=expandByZeros(ext[:, 0]))
             sample.addParam(paramName=ext_int, paramData=expandByZeros(ext[:, 1]))
             sample.addParam(paramName=ext_d2, paramData=expandByZeros(ext[:, 2]))
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ in ['max', 'min', 'maxGroup', 'minGroup']:
             if 'Group' in typ:
                 count = np.zeros(N)
@@ -524,9 +526,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                 sample.addParam(paramName=name+'_e', paramData=extr_es)
                 sample.addParam(paramName=name+'_i', paramData=extr_is)
                 sample.addParam(paramName=name+'_d2', paramData=extr_d2)
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'variation':
             var = np.zeros(N)
             smoothRad = params['smoothRad'] if 'smoothRad' in params else 5
@@ -543,9 +545,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                 diff = (y[1:] - y[:-1]) / (e[1:] - e[:-1])
                 var[i] = utils.integral((e[1:] + e[:-1])/2, np.abs(diff))
             sample.addParam(paramName=name, paramData=var)
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'efermi':
             maxlevel = params.get('maxlevel',None)
             efermi, arctan_y = efermiDescriptor(sample.getSpectra(spType).to_numpy(), energy, maxlevel)
@@ -572,9 +574,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                     plotting.plotToFile(energy, y, 'spectrum', energy, arctan_y[i], 'arctan', *toPlot, fileName=f'{plotFolder}/{sp_name}.png', title=f'efermi={efermi[i, 0]:.1f} efermiRate={efermi[i, 1]}', ylim=ylim)
             sample.addParam(paramName=f'{name}_e', paramData=efermi[:, 0])
             sample.addParam(paramName=f'{name}_slope', paramData=efermi[:, 1])
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ in ['pca', 'scaled_pca']:
             checkParams(params, allParamNames={'usePrebuiltData', 'count', 'fileName', 'energyInterval'}, obligatoryParams=['usePrebuiltData'], help="Use pca in the following way: {'type':'pca/scaled_pca', 'count':3, 'usePrebuiltData':True/False, 'fileName':'?????.pkl'}")
             count = params.get('count',3)
@@ -595,9 +597,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                     utils.save_pkl((pca_u, energy1), params['fileName'])
             for j in range(count):
                 sample.addParam(paramName=f'{name}{j+1}', paramData=pca[:, j])
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'rel_pca':
             checkParams(params, allParamNames={'usePrebuiltData', 'count', 'fileName', 'energyInterval'}, obligatoryParams=['usePrebuiltData'], help="Use rel_pca in the following way: {'type':'rel_pca', 'count':3, 'usePrebuiltData':True/False, 'fileName':'?????.pkl'}")
             count = params.get('count',3)
@@ -614,9 +616,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                     utils.save_pkl((relpca_u, relEnergy), params['fileName'])
             for j in range(count):
                 sample.addParam(paramName=f'{name}{j+1}', paramData=relpca[:, j])
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'pls':
             checkParams(params, allParamNames={'label', 'features', 'spType', 'energyInterval',  'usePrebuiltData', 'count', 'fileName'}, obligatoryParams=['label', 'usePrebuiltData', 'fileName'], help="Use pls in the following way: {'type':'pls', 'label':..., 'features':[...], 'count':2, 'usePrebuiltData':True/False, 'fileName':'?????.pkl'} or {'type':'pls', 'label':..., 'spType':[...], 'energyInterval':[..,..], 'count':2, 'usePrebuiltData':True/False, 'fileName':'?????.pkl'}")
             label = params['label']
@@ -634,9 +636,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
             pls = getPLS(sample1, pls_regr=pls_regr, features=features, spType=spType)
             for j in range(count):
                 sample.addParam(paramName=f'{name}{j+1}_{fname}_{label}', paramData=pls[:, j])
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'tsne':
             from openTSNE import TSNE
             logging.getLogger('openTSNE.tsne').setLevel(logging.ERROR)
@@ -671,9 +673,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
             fname = spType if features is None else 'features'
             for j in range(count):
                 sample.addParam(paramName=f'{name}{j + 1}_{fname}', paramData=embedding[:, j])
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'best_linear':
             checkParams(params, allParamNames={'label', 'features', 'spType', 'energyInterval', 'usePrebuiltData', 'fileName', 'baggingParams', 'cv_parts', 'debug'}, obligatoryParams=['label', 'usePrebuiltData', 'fileName'], help="Use best_linear in the following way: {'type':'best_linear', 'label':..., 'features':[...], 'cv_parts':4, 'usePrebuiltData':True/False, 'fileName':'?????.pkl', 'baggingParams':dict(max_samples=0.1, max_features=1.0, n_estimators=10)} or {'type':'best_linear', 'label':..., 'spType':[...], 'energyInterval':[..,..], 'cv_parts':4, 'usePrebuiltData':True/False, 'fileName':'?????.pkl', 'baggingParams':dict(max_samples=0.1, max_features=1.0, n_estimators=10)}")
             label = params['label']
@@ -699,9 +701,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
             X, _ = getXYFromSample(sample1, features, None)
             pred = model.predict(X)
             sample.addParam(paramName=name, paramData=pred)
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'polynom':
             deg = params['deg'] if 'deg' in params else 3
             descr = np.zeros((N, deg+1))
@@ -715,9 +717,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                 descr[i] = np.polyfit((sp.energy-sp.energy[0])/(sp.energy[-1]-sp.energy[0]), sp.intensity, deg)
             for j in range(deg+1):
                 sample.addParam(paramName=f'{name}_{j}', paramData=descr[:, j])
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == 'moment':
             area = utils.integral(energy1, spectra1.to_numpy())
             center = utils.integral(energy1, spectra1.to_numpy() * energy1) / area
@@ -736,9 +738,9 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                 v = [np.interp(e, energy1, spectra1.loc[i]) for i in range(spectra1.shape[0])]
                 sample.addParam(paramName=f'{name}_{e}', paramData=v)
         # type=value - energies(list) - values of spectra in this energy points
-        # ====================================================================================
-        # ====================================================================================
-        # ====================================================================================
+        # =======================================================================
+        # =======================================================================
+        # =======================================================================
         elif typ == '1st_peak':
             # '1st_peak' - centroid of xanes_y > ylevel & xanes_e < elevel
             common_efermi = get_common_efermi()
@@ -782,6 +784,23 @@ def addDescriptors(sample:ML.Sample, descriptors, inplace=True):
                     plotting.plotToFile(energy, y, 'smoothed', energy, y0, 'initial', [peak_x[i]], [peak_y[i]], {'label':'1st_peak', 'fmt':'o'}, *toPlot, fileName=f'{plotFolder}/{sp_name}.png', title=f'1st_peak=({peak_x[i]:.1f}, {peak_y[i]:.2f})')
             sample.addParam(paramName=name+'_e', paramData=peak_x)
             sample.addParam(paramName=name+'_i', paramData=peak_y)
+        elif typ == 'separable':
+            redefineLabelMap = params.get('redefineLabelMap', {})
+            labels = params.get('labels', 'all')
+            if isinstance(labels, str) and labels == 'all':
+                labels = sample.labels
+            normalize = params.get('normalize', True)
+            pairwiseTransformType = params.get('pairwiseTransformType', True)
+            features = params.get('features', sample.getDefaultSpType()+' spectra')
+            debugFolder = params.get('debugFolder', None)
+            for il,label in enumerate(labels):
+                if label in redefineLabelMap:
+                    sample_redefLM = sample1.copy()
+                    if label in sample.labelMaps: sample_redefLM.decode(label)
+                    sample_redefLM.encode(label, redefineLabelMap[label])
+                else: sample_redefLM = sample1
+                d = separableYDescriptor(sample_redefLM, features=features, label=label, normalize=normalize, pairwiseTransformType=pairwiseTransformType, debugFolder=debugFolder)
+                sample.addParam(paramName=name+'_'+label, paramData=d)
         else:
             assert False, f"Unknown descriptor type {typ}"
 
@@ -872,11 +891,11 @@ def plotDescriptors1d(data, spectra, energy, label_names, desc_points_names=None
 def getXYFromSample(sample, features, label_names, textColumn=None):
     """Construct X, y from sample
 
-    Args:
-        sample:  sample or DataFrame with descriptors and labels
-        features (list of strings or string): features to use, or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
-        label_names (list)
-        textColumn (str): title of column to use as names
+        :param sample:  sample or DataFrame with descriptors and labels
+        :param features: (list of strings or string) features to use, or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
+        :param label_names: (list)
+        :param textColumn: (str) title of column to use as names
+        :return: X,y or X,y,text if textColumn is not None
     """
     if label_names is None: label_names = []
     if isinstance(label_names, str): label_names = [label_names]
@@ -923,7 +942,7 @@ def getXYFromSample(sample, features, label_names, textColumn=None):
         return X, y, data.loc[:, textColumn].to_numpy()
 
 
-def getQuality(sample, features, label_names, makeMixtureParams=None, model_class=None, model_regr=None, m=1, cv_count=10, returnModels=False, printDebug=True):
+def getQuality(sample, features, label_names, makeMixtureParams=None, model_class=None, model_regr=None, m=1, cv_count=10, testSample=None, returnModels=False, random_state=0, printDebug=True):
     """Get cross validation quality
     
     Args:
@@ -935,7 +954,9 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
         model_regr: model for regression
         m (int, optional): number of cross validation attempts (each cv composed of cv_count parts)
         cv_count (int, optional): number of parts to divide dataset in cv
+        testSample: if not None calculate quality using the testSample, instead of CV
         returnModels (bool, optional): whether to return models
+        random_state (int): seed of random generator
         printDebug (boolean): show debug output
     Returns:
         dict {label: dict{'quality':..., 'predictedLabels':... (dict for mixture), 'trueLabels':...(dict for mixture), 'model':..., 'quality_std':..., 'singlePred':... (for mix), 'singleTrue':... (for mix)}}
@@ -965,21 +986,28 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
             else:
                 assert False, f'{name1} {arr[0][name1]}'
         return res
+    rng = np.random.default_rng(seed=random_state)
     isSample = isinstance(sample, ML.Sample)
     data = sample.params if isSample else sample
-    for l in label_names: assert np.all(np.isfinite(data[l])), f'Unknown labels detected for {l}: {data[l]}'
+    for l in label_names:
+        assert np.all(np.isfinite(data[l])), f'Unknown labels detected for {l}: {data[l]}'
     mix = makeMixtureParams is not None
     quality, quality_std = {}, {}
     predictedLabels, trueLabels, singleCVAll = {}, {}, {}
     models = {}
     X,Y = getXYFromSample(sample, features, label_names)
+    if testSample is not None:
+        X_test, Y_test = getXYFromSample(testSample, features, label_names)
+        assert m == 1
+        assert cv_count == 1
+        assert not mix, 'TODO: not implemented yet'
     if printDebug:
         print('Try predict by:', features)
     n_estimators = 40
     if X.shape[1] > 5: n_estimators = 100
     if X.shape[1] > 10: n_estimators = 200
-    tryParams = [{'n_estimators': n_estimators, 'min_samples_leaf': 4}, {'n_estimators': n_estimators, 'min_samples_leaf': 1}]
-    if X.shape[0] > 500: tryParams = [{'n_estimators': n_estimators}]
+    # do not provide min_samples_leaf > 1, because for small samples it causes too large smoothing of the target function
+    tryParams = [{'n_estimators': n_estimators}]
     for il, label in enumerate(label_names):
         y = Y[:,il]
         classification = ML.isClassification(y)
@@ -989,11 +1017,11 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
         if model0 is None:
             try_acc = np.zeros(len(tryParams))
             try_model = [None]*len(tryParams)
-            for modelParams, j in zip(tryParams, range(len(tryParams))):
+            for j,modelParams in enumerate(tryParams):
                 if classification:
-                    try_model[j] = sklearn.ensemble.ExtraTreesClassifier(**modelParams)
+                    try_model[j] = sklearn.ensemble.ExtraTreesClassifier(**modelParams, random_state=rng.integers(np.iinfo(np.int32).max, dtype=np.int32))
                 else:
-                    try_model[j] = sklearn.ensemble.ExtraTreesRegressor(**modelParams)
+                    try_model[j] = sklearn.ensemble.ExtraTreesRegressor(**modelParams, random_state=rng.integers(np.iinfo(np.int32).max, dtype=np.int32))
                 if mix:
                     try:
                         try_acc_mix, _, _, _ = mixture.score_cv(try_model[j], sample, features, label, label_names, makeMixtureParams, testRatio=0.5, repetitions=1, model_class=sklearn.ensemble.ExtraTreesClassifier(**modelParams))
@@ -1002,7 +1030,7 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
                         print(f'Error: label {label} has too few values.', e)
                         try_acc[j] = -1
                 else:
-                    r = ML.score_cv(try_model[j], X, y, cv_count, returnPrediction=False)
+                    r = ML.score_cv(try_model[j], X, y, cv_count, returnPrediction=False, random_state=rng.integers(np.iinfo(np.int32).max, dtype=np.int32))
                     try_acc[j] = r['accuracy'] if classification else r['R2-score']
             bestj = np.argmax(try_acc)
             model = try_model[bestj]
@@ -1014,17 +1042,22 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
         # переиспользовать try выше нельзя т.к. testRatio разный!
         for i in range(m):
             if model0 is not None: model = copy.deepcopy(model0)
-            if hasattr(model, 'random_state'): model.random_state = i
+            if hasattr(model, 'random_state'): model.random_state = rng.integers(np.iinfo(np.int32).max, dtype=np.int32)
             if mix:
                 try:
                     # repetitions=cv_count - means not m, but covering all the dataset, because for repetitions=1 mixture.score_cv only one train-test split
-                    acc[i], trueVals[i], pred[i], singleCV[i] = mixture.score_cv(model, sample, features, label, label_names, makeMixtureParams, testRatio=1 / cv_count, repetitions=cv_count, model_class=model_class)
+                    acc[i], trueVals[i], pred[i], singleCV[i] = mixture.score_cv(model, sample, features, label, label_names, makeMixtureParams, testRatio=1 / cv_count, repetitions=cv_count, model_class=model_class, random_state=rng.integers(np.iinfo(np.int32).max, dtype=np.int32))
                 except mixture.LabelValuesLackError as e:
                     print(f'Error: label {label} has too few values for cv_count={cv_count} and sample size={len(sample)}.', e)
             else:
-                acc[i], pred = ML.score_cv(model, X, y, cv_count)
-                trueVals = y
-
+                if testSample is None:
+                    acc[i], pred = ML.score_cv(model, X, y, cv_count)
+                    trueVals = y
+                else:
+                    model.fit(X,y)
+                    pred = model.predict(X_test)
+                    trueVals = Y_test[:,il]
+                    acc[i] = ML.calcAllMetrics(trueVals, pred, ML.isClassification(trueVals))
         # gather results
         if mix:
             acc = [a for a in acc if a is not None]
@@ -1033,8 +1066,8 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
             singleCV = [a for a in singleCV if a is not None]
             if len(acc) > 0:
                 singleCVAll[label] = singleCV[0]  # take first only (better to average, but we need reencode labels first)
-                quality[label] = applyToArrayOfDictsOfDicts(np.mean, acc)
-                quality_std[label] = applyToArrayOfDictsOfDicts(np.std, acc)
+                quality[label] = applyToArrayOfDictsOfDicts(lambda x: np.mean(x,axis=0), acc)
+                quality_std[label] = applyToArrayOfDictsOfDicts(lambda x: np.std(x,axis=0), acc)
                 sz = len(pred[0]['avgLabels'])
                 predictedLabels[label] = {problemType: np.array([p[problemType] for p in pred]).reshape(sz*len(acc),-1) for problemType in acc[0]}
                 trueLabels[label] = {problemType: np.array([t[problemType] for t in trueVals]).reshape(sz*len(acc),-1) for problemType in acc[0]}
@@ -1049,13 +1082,13 @@ def getQuality(sample, features, label_names, makeMixtureParams=None, model_clas
                 print(f'No good CV attempts for label {label}. Decrease cv_count = {cv_count}')
                 continue
         else:
-            quality[label] = applyToArrayOfDicts(np.mean, acc)
-            quality_std[label] = applyToArrayOfDicts(np.std, acc)
+            quality[label] = applyToArrayOfDicts(lambda x: np.mean(x,axis=0), acc)
+            quality_std[label] = applyToArrayOfDicts(lambda x: np.std(x,axis=0), acc)
             predictedLabels[label] = pred
             trueLabels[label] = trueVals
         if returnModels:
             if mix:
-                model_regr_avgLabel, model_regr_conc, model_comp_labels = mixture.fit_mixture_models(sample, features, 500, label, label_names, 0, makeMixtureParams, model, ML.isClassification(sample.params[label]), model_class=model_class)
+                model_regr_avgLabel, model_regr_conc, model_comp_labels = mixture.fit_mixture_models(sample, features=features, mixSampleSize=500, label=label, label_names=label_names, randomSeed=rng.integers(np.iinfo(np.int32).max, dtype=np.int32), makeMixtureParams=makeMixtureParams, model_regr=model, isClassification=ML.isClassification(sample.params[label]), model_class=model_class)
                 models[label] = {'avgLabels': model_regr_avgLabel, 'concentrations': model_regr_conc, 'componentLabels': model_comp_labels}
             else:
                 try:
@@ -1135,6 +1168,7 @@ def descriptorQuality(sample:ML.Sample, label_names=None, all_features=None, fea
         folder (str, optional): output folder to save results
         printDebug (boolean): show debug output
     """
+    if all_features is None: all_features = sample.features
     assert len(all_features) >= 1
     sample = sample.copy()
     if unknown_sample is not None: unknown_sample = unknown_sample.copy()
@@ -1218,6 +1252,7 @@ def descriptorQuality(sample:ML.Sample, label_names=None, all_features=None, fea
     for label in qualities:
         cv_data[label].to_csv(f'{folder}{os.sep}{label} cv.csv', sep=';', index=False)
         for metric in qualities[label][0]['quality']:
+            if metric.endswith(' interval'): continue
             results = sorted(qualities[label], key=lambda res_list: res_list['quality'][metric], reverse=True)
 
             # plot feature mutual information matrix
@@ -1295,7 +1330,7 @@ def plotDescriptors2d(data, descriptorNames, labelNames, labelMaps=None, folder_
         :param textColumn: if given, use to put text inside markers
         :param additionalMapPlotFunc: function(ax) to plot some additional info
         :param cmap: pyplot color map name, or 'seaborn ...' - seaborn
-        :param minQualityForPlot: float or dict{label:float} - plot only if quality greater this number
+        :param minQualityForPlot: dict{label: {metrics: float})} - plot only if quality greater this number
         returns: saves all graphs to two folders: folder_prefix_by_label, folder_prefix_by descriptors
     """
     assert len(descriptorNames) == 2
@@ -1355,10 +1390,11 @@ def plotDescriptors2d(data, descriptorNames, labelNames, labelMaps=None, folder_
             predictions = qualityRes[label]['predictedLabels']
             model = qualityRes[label]['model']
             if minQualityForPlot is not None:
-                if isinstance(minQualityForPlot, dict):
-                    if quality < minQualityForPlot[label]: continue
-                else:
-                    if quality < minQualityForPlot: continue
+                skip_plot = False
+                for metric, threshold in minQualityForPlot[label].items():
+                    skip_plot = skip_plot or (quality[metric] < threshold)
+                if skip_plot:
+                    continue
         labelData = data[label].to_numpy()
         if doNotPlotRemoteCount > 0:
             labelData = labelData[good_ind]
@@ -1677,13 +1713,13 @@ def generateBestLinearTransformation(sample:ML.Sample, label, best_alpha=None, f
     return res
 
 
-def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_class=None, model_regr=None, labelMaps=None, folder='.', markersize=None, textsize=None, alpha=None, cv_count=2, repForStdCalc=3, unknown_sample=None, textColumn=None, unknown_data_names=None, fileName=None, plot_diff=True, relativeConfMatrix=True):
-    """Plot cv result graph.
+def directPrediction(sample:ML.Sample, features=None, label_names=None, makeMixtureParams=None, model_class=None, model_regr=None, labelMaps=None, folder='.', markersize=None, textsize=None, alpha=None, cv_count=2, repForStdCalc=1, unknown_sample=None, test_sample=None, textColumn=None, unknown_data_names=None, fileName=None, plot_diff=True, relativeConfMatrix=True, explanationParams=None, random_state=0, save_model=False):
+    """Make direct prediction of the labels. Plot cv result graph.
 
         :param sample:  sample (not mixtures) or DataFrame with descriptors and labels
         :param features: (list of strings or string) features to use (x), or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
         :param label_names: all label names to predict
-        :param makeMixtureParams: arguments for mixture.generateMixtureOfSample excluding sample. Sample is divided into train and test and then make mixtures separately. All labels becomes real (concentration1*labelValue1 + concentration2*labelValue2).
+        :param makeMixtureParams: arguments for mixture.generateMixtureOfSample excluding sample. Sample is divided into train and test and then make mixtures separately. All labels become real (concentration1*labelValue1 + concentration2*labelValue2).
         :param model_class: model for classification tasks
         :param model_regr: model for regression tasks
         :param labelMaps: dict {label: {'valueString':number, ...}, ...} - maps of label vaules to numbers
@@ -1694,6 +1730,7 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
         :param cv_count: cv_count - for cross validation, inf means - LOO
         :param repForStdCalc: - number of cv repetitions to calculate std of quality
         :param unknown_sample: sample with unknown labels to make prediction
+        :param test_sample: sample to test (if is not None, sample is used as train set)
         :param textColumn: if given, use to put text inside markers
         :param unknown_data_names: if given it is used to print unk names
         :param fileName: file to save result
@@ -1701,6 +1738,9 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
         :param relativeConfMatrix: normalize confusion matrix for classification by sample size
     """
     assert repForStdCalc>=1
+    if label_names is None: label_names = sample.labels
+    if features is None: features = sample.features
+    if textColumn is None: textColumn = sample.nameColumn
     mix = makeMixtureParams is not None
     sample = sample.copy()
     if unknown_sample is not None: unknown_sample = unknown_sample.copy()
@@ -1708,13 +1748,16 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
         assert labelMaps is None, 'We decode all features to make mixture. Set labelMaps=None'
         sample.decodeAllLabels()
         if unknown_sample is not None: unknown_sample.decodeAllLabels()
-    if labelMaps is None: labelMaps = {}
+    if labelMaps is None: labelMaps = sample.labelMaps
     os.makedirs(folder, exist_ok=True)
-    qualityResult = getQuality(sample, features, label_names, makeMixtureParams=makeMixtureParams, model_class=model_class, model_regr=model_regr, m=repForStdCalc, cv_count=cv_count, returnModels=True)
+    qualityResult = getQuality(sample, features, label_names, makeMixtureParams=makeMixtureParams, model_class=model_class, model_regr=model_regr, m=repForStdCalc, cv_count=cv_count, testSample=test_sample, returnModels=True, random_state=random_state)
     cv_result = {}
     res = getXYFromSample(sample, features, label_names, textColumn if textColumn in sample.paramNames else None)
     text = None if textColumn is None or textColumn not in sample.paramNames else res[2]
     if mix: text = None
+    if test_sample is not None:
+        res = getXYFromSample(test_sample, features, label_names, textColumn if textColumn in test_sample.paramNames else None)
+        text = None if textColumn is None or textColumn not in test_sample.paramNames else res[2]
 
     if unknown_sample is not None:
         res = getXYFromSample(unknown_sample, features, label_names, textColumn)
@@ -1770,6 +1813,11 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
             fileNam = folder + os.sep + fileName
         cv_result[label]['fileNam'] = fileNam
 
+        # saving the model
+        if save_model:
+            import joblib
+            joblib.dump(qualityResult[label]['model'], fileNam + '_model.pkl')
+
         # predictions for knows (to plot predictive strength)
         if mix:
             y_pred = qualityResult[label]['singlePred']
@@ -1777,14 +1825,15 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
         else:
             y_pred = qualityResult[label]['predictedLabels']
             y_true = qualityResult[label]['trueLabels']
-        assert np.all(y_true == sample.params[label]), f'{y_true.tolist()}\n{sample.params[label].tolist()}'
+        if test_sample is None:
+            assert np.all(y_true == sample.params[label]), f'{y_true.tolist()}\n{sample.params[label].tolist()}'
         if label in sample.labelMaps:
             y_true = sample.decode(label=label, values=y_true)
             if not mix:
                 y_pred = sample.decode(label=label, values=y_pred)
         cv_data = pd.DataFrame()
         if sample.nameColumn is not None:
-            cv_data[sample.nameColumn] = sample.params[sample.nameColumn]
+            cv_data[sample.nameColumn] = text
         cv_data['true'], cv_data['pred'] = y_true, y_pred
         cv_result[label]['true_vs_pred'] = cv_data
         cv_data.to_csv(fileNam+'_cv.csv', index=False, sep=';')
@@ -1809,7 +1858,11 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
                                 ax.text(utr[i], upr[i], str(ut[i]), ha='center', va='center', size=textsize)
                     ax.plot([pred.min(), pred.max()], [pred.min(), pred.max()], 'r', lw=2)
                 quality_s = ''
-                for m in quality: quality_s += f' {m}={quality[m]:.2f}'
+                for m,qm in quality.items():
+                    if utils.isArray(qm):
+                        assert len(qm) == 2, f'Error: {qm} must be confidence interval'
+                        quality_s += f' {m}=[{qm[0]:.2f}; {qm[1]:.2f}]'
+                    else: quality_s += f' {m}={qm:.2f}'
                 quality_s = quality_s.strip()
                 plotting.scatter(pred, true, color=err, alpha=alpha, markersize=markersize, text_size=textsize, marker_text=text, xlabel='predicted ' + label, ylabel='true ' + label, title='CV result for label ' + label + f'. Quality: {quality_s}', fileName=plotFileName + '.png', plotMoreFunction=plotMoreFunction)
                 if plot_diff:
@@ -1836,8 +1889,44 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
                 plot(trueLabels, predictedLabels, cv_result[label]["quality"])
             else:
                 plot(trueLabels, predictedLabels, cv_result[label]["quality"], unkn_true=unky[:,il], unkn_pred=cv_result[label]['predictionsForUnknown'])
+    if explanationParams is not None and len(features) == 1 and isinstance(features[0],str) and features[0].split()[-1]=='spectra' and ' ' in features[0] and features[0][:features[0].index(' ')] in sample.spTypes():
+        assert isinstance(explanationParams, dict)
+        spType = features[0][:features[0].index(' ')]
+        e = sample.getEnergy(spType)
+        e1, e2 = e[0], e[-1]
+        h = explanationParams.get('h', (e2-e1)/20)
+        n = explanationParams.get('n', 20)
+        assert sample.nameColumn is not None and unknown_sample.nameColumn is not None
+        known_names = sample.params[sample.nameColumn].tolist()
+        unknown_names = [] if unknown_sample is None else unknown_sample.params[unknown_sample.nameColumn].tolist()
+        if 'explainFor' in explanationParams:
+            explainFor = explanationParams['explainFor']
+        else:
+            if unknown_sample is None: explainFor = known_names
+            else: explainFor = unknown_names
+        centers = np.linspace(e1+h, e2-h, n)
+        for label in qualityResult:
+            Y = qualityResult[label]['trueLabels']
+            model = copy.deepcopy(qualityResult[label]['model'])
+            predictions = {name:np.zeros(n) for name in explainFor}
+            for i in range(n):
+                c = centers[i]
+                X = sample.limit([c-h, c+h], spType=spType, inplace=False).getSpectra(spType).to_numpy()
+                model.fit(X,Y)
+                unknown_sample_limited = None
+                for name in explainFor:
+                    if name in known_names: pred_x = X[sample.getIndByName(name)]
+                    else:
+                        if unknown_sample_limited is None: unknown_sample_limited = unknown_sample.limit([c-h, c+h], spType=spType, inplace=False).getSpectra(spType).to_numpy()
+                        pred_x = unknown_sample_limited[unknown_sample.getIndByName(name)]
+                    predictions[name][i] = model.predict(pred_x.reshape(1,-1))[0]
+            for name in explainFor:
+                toPlot = (centers, predictions[name], 'prediction')
+                if name in known_names:
+                    true = sample.params.loc[sample.getIndByName(name),label]
+                    toPlot += ([centers[0], centers[-1]], [true,true], 'true')
+                plotting.plotToFile(*toPlot, fileName=f'{folder}{os.sep}explanation{os.sep}{label} {name}.png')
 
-    if unknown_sample is None: return
     cv_result_for_print = copy.deepcopy(cv_result)
     # apply labelMaps
     for label in cv_result_for_print:
@@ -1854,10 +1943,10 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
                 compLab.append(convert(r['trueLabels']['componentLabels'][:,component]))
                 u_compLab.append(convert(r['predictionsForUnknown']['componentLabels'][:,component]))
             r['trueLabels']['componentLabels'] = np.array(compLab).T
-            r['predictionsForUnknown']['componentLabels'] = np.array(u_compLab).T
+            if unknown_sample is not None: r['predictionsForUnknown']['componentLabels'] = np.array(u_compLab).T
         else:
             r['trueLabels'] = convert(r['trueLabels'])
-            r['predictionsForUnknown'] = convert(r['predictionsForUnknown'])
+            if unknown_sample is not None: r['predictionsForUnknown'] = convert(r['predictionsForUnknown'])
     for label in cv_result_for_print:
         r = cv_result_for_print[label]
         with open(r['fileNam'] + '_unkn.txt', 'w', encoding='utf-8') as f:
@@ -1922,6 +2011,63 @@ def plot_cv_result(sample, features, label_names, makeMixtureParams=None, model_
                             s += '\n'
                         f.write(s)
                 # print(pred[:-1])
+
+
+def directPredictionParser(folder, knownOnly=False, labels=None):
+    """
+    Parse results of the directPrediction function.
+    
+    :returns: cv Dataframe, predictions Dataframe for unknown
+    """
+
+    if labels is None:
+        labels = []
+        fs = utils.findFile(folder=folder, postfix='_diff.txt', returnAll=True)
+        for f in fs:
+            with open(f) as file: s = file.readline()
+            i = s.rfind(' for label ')
+            assert i>=0
+            i += len(' for label ')
+            labels.append(s[i:].strip())
+    unk_pred = None
+    cv_pred = pd.DataFrame(columns=labels)
+    for label in labels:
+        # unknown
+        if not knownOnly:
+            if unk_pred is None: unk_pred= pd.DataFrame(columns=labels)
+            fileName = utils.findFile(folder=folder, mask=f'{label}*_unkn.txt', check_unique=True)
+            with open(fileName,'r') as f: s = f.read()
+            i1 = s.index('predictions:')+len('predictions:')+1
+            while s[i1] == '\n': i1 += 1
+            i2 = s.index('\n\n',i1)
+            s = s[i1:i2].strip()
+            if 'prediction:' in s: s = s[s.index('\n')+1:]
+            for line in s.split('\n'):
+                unkName, pred = line.split(': ')
+                if utils.is_str_float(pred):
+                    pred = float(pred)
+                if label in unk_pred.columns and unkName in unk_pred.index:
+                    assert pd.isnull(unk_pred.loc[unkName, label]), f'Row {unkName} column {label} was already filled. Old value = {unk_pred.loc[unkName, label]} new value = {pred}'
+                unk_pred.loc[unkName, label] = pred
+
+        # known
+        fileName = utils.findFile(folder=folder, mask=f'{label}*_cv.csv')
+        d = pd.read_csv(fileName, sep=';')
+        nameCol = d.columns[0]
+        for i in range(len(d)):
+            name = d.loc[i, nameCol]
+            if f'true {label}' not in cv_pred.columns or name not in cv_pred.index or pd.isnull(
+                    cv_pred.loc[name, f'true {label}']):
+                cv_pred.loc[name, f'true {label}'] = d.loc[i, 'true']
+            else:
+                if cv_pred.loc[name, f'true {label}'] - d.loc[i, 'true'] > 1e-3:
+                    print(fileName)
+                    for ii in range(len(d)):
+                        name = d.loc[ii, nameCol]
+                        print('name =', name, 'true1 =', cv_pred.loc[name, f'true {label}'], 'true2 =', d.loc[ii, 'true'])
+                assert cv_pred.loc[name, f'true {label}'] - d.loc[i, 'true'] <= 1e-3
+            cv_pred.loc[name, f'pred {label}'] = d.loc[i, 'pred']
+    return cv_pred, unk_pred
 
 
 def getLinearAnalyticModel(data, features, label, l1_ratio, try_alpha=None, cv_count=10):
@@ -2031,7 +2177,7 @@ def getAnalyticFormulasForGivenFeatures(data, features, label_names, l1_ratio=1,
         result_file.close()
 
 
-def calcCalibrationData(expData, theoryData, componentNameColumn=None, folder=None, excludeColumnNames=None, multiplierOnlyColumnNames=None, shiftOnlyColumnNames=None, stableLinearRegression=True):
+def calcCalibrationData(expData, theoryData, componentNameColumn=None, folder=None, excludeColumnNames=None, multiplierOnlyColumnNames=None, shiftOnlyColumnNames=None, stableLinearRegression=True, plotMoreFunction=None, scatterExtraParams=None):
     """
     Calculate calibration coefficients
     :param expData: params DataFrame of experimental sample
@@ -2042,11 +2188,14 @@ def calcCalibrationData(expData, theoryData, componentNameColumn=None, folder=No
     :param multiplierOnlyColumnNames: list of columns to calibrate only by multiplier
     :param shiftOnlyColumnNames: list of columns to calibrate only by shift
     :param stableLinearRegression: throw away 10% of points with max error and rebuild regression
+    :param plotMoreFunction: user defined function(ax, x,y,names, descriptor_name, [a,b]) to plot something more
+    :param scatterExtraParams:
     :return: dict {descriptorName: [toDiv, toSub]} theory = toDiv*exp + toSub, then calibration:  newTheoryDescr = (theoryDescr - toSub) / toDiv
     """
     if excludeColumnNames is None: excludeColumnNames = []
     if multiplierOnlyColumnNames is None: multiplierOnlyColumnNames = []
     if shiftOnlyColumnNames is None: shiftOnlyColumnNames = []
+    if scatterExtraParams is None: scatterExtraParams = {}
     calibration = {}
     if componentNameColumn is None:
         expComponentNames = np.arange(len(expData))
@@ -2091,18 +2240,23 @@ def calcCalibrationData(expData, theoryData, componentNameColumn=None, folder=No
         # print('Descriptor '+descriptor_name+' std error after calibration =', np.sqrt(np.mean((x - (y-b)/a)**2)))
         calibration[descriptor_name] = [a, b]
         if folder is not None:
-            fig, ax = plotting.createfig()
-            ax.scatter(x, y, 600, c='yellow')
-            for i in range(len(names)):
-                ax.text(x[i], y[i], names[i], ha='center', va='center', size=10)
-            ax.plot(x, y_regr, color='k')
-            ax.set_xlabel('exp')
-            ax.set_ylabel('theory')
-            ax.set_xlim(np.min(x), np.max(x))
-            ax.set_ylim(np.min(y), np.max(y))
-            ax.set_title(f"{descriptor_name}: theory = {a:.3f}*exp + {b:.2f}")
-            plotting.savefig(folder+os.sep+descriptor_name+'.png', fig)
-            plotting.closefig(fig)
+            def plotMoreFunction1(ax):
+                ax.plot(x, y_regr, color='k')
+                if plotMoreFunction is not None:
+                    plotMoreFunction(ax, x,y,names, descriptor_name, [a,b])
+            plotting.scatter(x,y,marker_text=names, fileName=folder+os.sep+descriptor_name+'.png', plotMoreFunction=plotMoreFunction1, title=f"{descriptor_name}: theory = {a:.3f}*exp + {b:.2f}", xlabel='exp', ylabel='theory', **scatterExtraParams)
+            # fig, ax = plotting.createfig()
+            # ax.scatter(x, y, 600, c='yellow')
+            # for i in range(len(names)):
+            #     ax.text(x[i], y[i], names[i], ha='center', va='center', size=7)
+            # ax.plot(x, y_regr, color='k')
+            # ax.set_xlabel('exp')
+            # ax.set_ylabel('theory')
+            # ax.set_xlim(np.min(x), np.max(x))
+            # ax.set_ylim(np.min(y), np.max(y))
+            # ax.set_title(f"{descriptor_name}: theory = {a:.3f}*exp + {b:.2f}")
+            # plotting.savefig(folder+os.sep+descriptor_name+'.png', fig)
+            # plotting.closefig(fig)
     return calibration
 
 
@@ -2188,24 +2342,48 @@ def concatCalibratedDatasets(expSample, theorySample, componentNameColumn=None, 
     theory.delRow(commTheor)
     for spType in theory.spTypes():
         theory.changeEnergy(newEnergy=combined.getEnergy(spType=spType), spType=spType, inplace=True)
-    combined.unionWith(theory)
+    combined.unionWith(theory, inplace=True)
     return combined
 
 
-def energyImportance(sample, label_names, folder, model=None, method='one model', spType=None):
-    assert method in ['one model', 'model for each energy']
+def energyImportance(sample:ML.Sample, label_names=None, folder='energyImportance', model=None, spType=None, class_metric=None, regr_metric=None):
+    if label_names is None: label_names = sample.labels
     def saveRes(e,q,fn):
         d = pd.DataFrame()
-        i = np.argsort(-q)
+        if len(q.shape) == 1: i = np.argsort(-q)
+        else: i = np.argsort(-q[0])
         d['energy'] = e[i]
-        d['quality'] = q[i]
+        if len(q.shape) == 1: d['quality'] = q[i]
+        else:
+            for j in range(q.shape[0]): d[f'quality_d{j}'] = q[j][i]
         d.to_csv(fn, index=False)
-    n = sample.getLength()
+    def plot(e, quality, spectra, label, title, filename):
+        if len(quality.shape) == 1: quality = quality.reshape(1, -1)
+        sample1 = sample.copy()
+        sample1.addSpectrumType(spectra, energy=e, spType='temp sptype')
+        def plotMore(ax):
+            ax2 = ax.twinx()
+            for i in range(quality.shape[0]):
+                lb = '' if quality.shape[0] == 1 else f'd{i}'
+                ax2.plot(e, quality[i], label=lb, lw=2)
+            if quality.shape[0] != 1: ax2.legend()
+        sample1.plot(colorParam=sample.params[label], spType='temp sptype', folder=filename, plotSampleParams=dict(title=title, plotMoreFunction=plotMore))
+
+    # autocorrelation
+    n = len(sample)
+    spectra = sample.getSpectra(spType=spType).to_numpy()
+    energy = sample.getEnergy(spType=spType)
+    auto_mi = np.zeros((len(energy),len(energy)))
+    for j in range(len(energy)):
+        auto_mi[j] = sklearn.feature_selection.mutual_info_regression(spectra, spectra[:,j],random_state=0)
+        auto_mi[j,j] = 0
+    format = '%g'
+    es = [(format % ei) for ei in energy]
+    plotting.plotMatrix(auto_mi, fileName=f'{folder}/auto MI.png', ticklabelsX=es, ticklabelsY=es)
+
     if n < 100: min_samples_leaf = 1
     else: min_samples_leaf = 4
     modelIsNone = model is None
-    spectra = sample.getSpectra(spType=spType).to_numpy()
-    energy = sample.getEnergy(spType=spType)
     denergy = energy[1:]-energy[:-1]
     dspectra = (spectra[:,1:]-spectra[:,:-1])/denergy
     d2spectra = (dspectra[:,1:]-dspectra[:,:-1])/denergy[:-1]
@@ -2214,42 +2392,29 @@ def energyImportance(sample, label_names, folder, model=None, method='one model'
     for label in label_names:
         classification = ML.isClassification(sample.params, label)
         if modelIsNone:
-            n_estimators = 20 if method == 'model for each energy' else 1000
+            n_estimators = 1000
             if classification:
                 model = sklearn.ensemble.ExtraTreesClassifier(n_estimators=n_estimators, min_samples_leaf=min_samples_leaf)
-                qName = 'accuracy'
+                qName = class_metric if class_metric is not None else 'accuracy'
             else:
                 model = sklearn.ensemble.ExtraTreesRegressor(n_estimators=n_estimators, min_samples_leaf=min_samples_leaf)
-                qName = 'R2-score'
+                qName = regr_metric if regr_metric is not None else 'R2-score'
         for isp,sp in enumerate(spectras):
             overall_quality = ML.score_cv(model, sp, sample.params[label], cv_count=10, returnPrediction=False)[qName]
             m = len(energies[isp])
             quality = np.zeros(m)
-            if method == 'model for each energy':
-                for j in range(m):
-                    quality[j] = ML.score_cv(model, sp[:,j], sample.params[label], cv_count=10, returnPrediction=False)[qName]
-            else:
-                model.fit(sp, sample.params[label])
-                quality[:] = model.feature_importances_
-            plotting.plotToFile(energies[isp], quality, 'enImportance', title=f'Energy importance for label {label}. Overall quality = {overall_quality:.2f}', fileName=f'{folder}/{label}_d{isp}.png')
+            model.fit(sp, sample.params[label])
+            quality[:] = model.feature_importances_
+            plot(energies[isp], quality, spectra=sp, label=label, title=f'Energy importance for label {label}. Overall quality = {overall_quality:.2f}', filename=f'{folder}/{label}_d{isp}.png')
             saveRes(energies[isp], quality, f'{folder}/{label}_d{isp}_data.txt')
         overall_quality = ML.score_cv(model, np.hstack(spectras), sample.params[label], cv_count=10, returnPrediction=False)[qName]
         m = len(energies[-1])
-        quality = np.zeros(m)
-        if method == 'model for each energy':
-            for j in range(m):
-                spj = np.hstack((spectras[0][:,j+1].reshape(-1,1), spectras[1][:,j].reshape(-1,1), spectras[2][:,j].reshape(-1,1)))
-                quality[j] = ML.score_cv(model, spj, sample.params[label], cv_count=10, returnPrediction=False)[qName]
-        else:
-            sps = np.hstack((spectras[0][:, 1:-1], spectras[1][:, :-1], spectras[2]))
-            assert sps.shape[1] == 3*m
-            model.fit(sps, sample.params[label])
-            f = model.feature_importances_
-            quality[:] = 0
-            quality[:] = quality[:] + f[:m]
-            quality[:] = quality[:] + f[m:2*m]
-            quality[:] = quality[:] + f[2*m:]
-        plotting.plotToFile(energies[-1], quality, 'enImportance', title=f'Energy importance for label {label}. Overall quality = {overall_quality:.2f}', fileName=f'{folder}/{label}_d012.png')
+        sps = np.hstack((spectras[0][:, 1:-1], spectras[1][:, :-1], spectras[2]))
+        assert sps.shape[1] == 3*m
+        model.fit(sps, sample.params[label])
+        f = model.feature_importances_
+        quality = np.array([f[:m], f[m:2*m], f[2*m:]])
+        plot(energies[-1], quality, spectra=spectras[0][:, 1:-1], label=label, title=f'Energy importance for label {label}. Overall quality = {overall_quality:.2f}', filename=f'{folder}/{label}_d012.png')
         saveRes(energies[-1], quality, f'{folder}/{label}_d012_data.txt')
 
 
@@ -2342,7 +2507,7 @@ def plotProbabilityMapsForLabelPair(sample, features, label_pair, maxPlotCount='
             plotForOneSpectrum(unkX[i], unkText[i])
 
 
-def calcPreedge(sample:ML.Sample, usePositiveConstrains=True, specialParams=None, commonOptimizationParams=None, plotFolder=None, debug=False, inplace=False):
+def calcPreedge(sample:ML.Sample, specialParams=None, commonOptimizationParams=None, plotFolder=None, debug=False, inplace=False):
     """
     :param specialParams: dict{ name: dict of substractBase params for spectrum}, if name == 'all' - apply to all spectra
     :param commonOptimizationParams: list of dicts with keys: src - name of spectra to take params, dst - 'all' or list of names, useAsStart - True/False run or not optimization
@@ -2375,12 +2540,7 @@ def calcPreedge(sample:ML.Sample, usePositiveConstrains=True, specialParams=None
     area, center = [], []
     preedgeSpectra = []
     xanesWoPreedge = []
-    if commonOptimizationParams is None: inds = range(sample.getLength())
-    else:
-        inds = [sample.getIndByName(p['src']) for p in commonOptimizationParams]
-        inds += [i for i in range(sample.getLength()) if i not in inds]
-    startParams = {}
-    for i in inds:
+    for i in range(len(sample)):
         sp = sample.getSpectrum(ind=i, spType='xanes')
         name = sample.params.loc[i,sample.nameColumn] if sample.nameColumn is not None else str(i)
         if debug: print(name)
@@ -2389,20 +2549,10 @@ def calcPreedge(sample:ML.Sample, usePositiveConstrains=True, specialParams=None
         # print('auto =',auto,'params =',params)
         if auto:
             assert commonOptimizationParams is None
-            res = curveFitting.substractBaseAuto(sp.x, sp.y, usePositiveConstrains=usePositiveConstrains, plotFileName=plotFileName, sepFolders=True, debug=debug, **params)
+            res = curveFitting.subtractBaseAuto(sp.x, sp.y, plotFileName=plotFileName, debug=debug, **params)
         else:
             if 'plotFileName' not in params: params['plotFileName'] = plotFileName
-            if commonOptimizationParams is not None:
-                for cp in commonOptimizationParams:
-                    if name in cp['dst']:
-                        assert 'useStartParams' not in params, str(params)
-                        params['useStartParams'] = startParams[cp['src']]
-            res = curveFitting.substractBase(sp.x, sp.y, sepFolders=True, **params)
-            startParams[name] = res['info']['optimParam']
-            os.makedirs(f'{plotFolder}/base_final', exist_ok=True)
-            shutil.copyfile(f'{plotFolder}/base/{name}.png', f'{plotFolder}/base_final/{name}.png')
-            os.makedirs(f'{plotFolder}/full_final', exist_ok=True)
-            shutil.copyfile(f'{plotFolder}/full/{name}.png', f'{plotFolder}/full_final/{name}.png')
+            res = curveFitting.subtractBase(sp.x, sp.y, debug=debug, **params)
         peak = res['peak']
         area.append( utils.integral(peak.x, peak.y) )
         center.append( utils.integral(peak.x, peak.x*peak.y)/area[-1] )
@@ -2419,14 +2569,21 @@ def calcPreedge(sample:ML.Sample, usePositiveConstrains=True, specialParams=None
     if not inplace: return sample
 
 
-def resultSummary(sample:ML.Sample, labels=None, unknownNames=None, baseFolder='results', settings=None, wrapXTickLabelLength=10, figsize=None, postfix='', notExistIsError=True, fileExtension='.png'):
+def resultSummary(sample:ML.Sample, labels=None, unknownNames=None, baseFolder='results', settings=None, wrapXTickLabelLength=10, figsize=None, postfix='', notExistIsError=True, fileExtension='.png', delFromCV=None, criticalQuantileIndivPlot=0.5, plotIndividualParams=None, plotIndividualExtraNames=None, plotSampleParams=None):
     """
     Gather unknown exp predictions from various methods. Settings is the list of dicts with keys: type (descriptor, direct, LCF), folder, label (str or list), count, measure, prefix ...
     """
     assert settings is not None
     if labels is None: labels = sample.labels
+    if plotIndividualParams is None: plotIndividualParams = {}
+    knownOnly = False
     if unknownNames is None:
-        unknownNames = sample.splitUnknown(labels)[1].params[sample.nameColumn]
+        if sample.splitUnknown(labels)[1] is None: knownOnly = True
+        else:
+            unknownNames = sample.splitUnknown(labels)[1].params[sample.nameColumn]
+    if delFromCV is None: delFromCV = []
+    if plotIndividualExtraNames is None: plotIndividualExtraNames = []
+    if plotSampleParams is None: plotSampleParams = {}
 
     def updateKnown(cv_pred, columnName, label, dataSrc, predName='pred'):
         # known
@@ -2455,12 +2612,14 @@ def resultSummary(sample:ML.Sample, labels=None, unknownNames=None, baseFolder='
             cv_pred[label].loc[name, columnName] = d.loc[i, predName]
 
     def updateUnknown(r:pd.DataFrame, index, column, value):
+        if knownOnly: return
         if column in r.columns:
             assert pd.isnull(r.loc[index, column]), f'Row {index} column {column} was already filled. Old value = {r.loc[index, column]} new value = {value}'
         r.loc[index, column] = value
 
     r = pd.DataFrame()
-    r.index = pd.MultiIndex.from_product([unknownNames,labels], names=['unk', 'label'])
+    if not knownOnly:
+        r.index = pd.MultiIndex.from_product([unknownNames,labels], names=['unk', 'label'])
     inverseLabelMaps = sample.inverseLabelMaps()
     cv_pred = {}
 
@@ -2473,27 +2632,26 @@ def resultSummary(sample:ML.Sample, labels=None, unknownNames=None, baseFolder='
         prefix0 = setngs.get('prefix', '')
         typ = setngs['type']
         if typ == 'direct':
+            cv, unk = directPredictionParser(folder, knownOnly=False, labels=None)
             for l in lbs:
                 # unknown
-                fileName = utils.findFile(folder=folder, mask=f'{l}*_unkn.txt', check_unique=notExistIsError)
-                if fileName is None: continue
-                with open(fileName,'r') as f: s = f.read()
-                features = os.path.split(fileName)[-1][len(l)+1:-9]
-                if utils.is_str_float(features.split('_')[-1]): features = 'features'
-                i1 = s.index('predictions:')+len('predictions:')+1
-                while s[i1] == '\n': i1 += 1
-                i2 = s.index('\n\n',i1)
-                s = s[i1:i2].strip()
-                if 'prediction:' in s: s = s[s.index('\n')+1:]
-                for line in s.split('\n'):
-                    unkName, pred = line.split(': ')
-                    if utils.is_str_float(pred) and len(pred)>10 and '.' in pred:
-                        pred = pred[:pred.index('.')+4]
-                    updateUnknown(r, (unkName, l), prefix0+features, pred)
+                if not knownOnly:
+                    fileName = utils.findFile(folder=folder, mask=f'{l}*_unkn.txt', check_unique=notExistIsError)
+                    if fileName is None: continue
+                    features = os.path.split(fileName)[-1][len(l)+1:-9]
+                    if utils.is_str_float(features.split('_')[-1]): features = 'features'
+                    prefix = prefix0+features if prefix0 == '' else prefix0
+                    for unkName, row in unk.iterrows():
+                        if unkName not in unknownNames: continue
+                        updateUnknown(r, (unkName, l), prefix, value=row[l])
 
                 # known
                 fileName = utils.findFile(folder=folder, mask=f'{l}*_cv.csv')
-                updateKnown(cv_pred, columnName=prefix0+features, label=l, dataSrc=fileName)
+                features = os.path.split(fileName)[-1][len(l)+1:-7]
+                prefix = prefix0+features if prefix0 == '' else prefix0
+                for name, row in cv.iterrows():
+                    cv_pred[l].loc[name, 'true'] = row[f'true {l}']
+                    cv_pred[l].loc[name, prefix] = row[f'pred {l}']
         elif typ == 'LCF':
             # unknown
             for unkName in unknownNames:
@@ -2548,14 +2706,43 @@ def resultSummary(sample:ML.Sample, labels=None, unknownNames=None, baseFolder='
             assert False, f'Unknown type: '+typ
     os.makedirs(f'{baseFolder}{os.sep}summary{postfix}', exist_ok=True)
     r.to_excel(f'{baseFolder}{os.sep}summary{postfix}{os.sep}unknown.xlsx')
+    known:ML.Sample = sample.splitUnknown(labels)[0]
+    if len(delFromCV) > 0:  known.delRowByName(delFromCV, inplace=True)
     for l in cv_pred:
+        if len(delFromCV)>0:  cv_pred[l].drop(delFromCV, axis=0, inplace=True)
         d = cv_pred[l].sort_values('true')
         d.to_excel(f'{baseFolder}{os.sep}summary{postfix}{os.sep}known {l}.xlsx')
         cols = d.columns[d.columns != 'true']
         m = d.loc[:, cols].to_numpy()
         m = m - d.loc[:,'true'].to_numpy().reshape(-1,1)
-        vmax = (np.max(d.loc[:,'true'])-np.min(d.loc[:,'true']))/2
-        plotting.plotMatrix(m, ticklabelsX=cols, ticklabelsY=d.index, fileName=f'{baseFolder}{os.sep}summary{postfix}{os.sep}known {l} pred-true{fileExtension}', title=f'Difference between predicted and true label values for {l}', wrapXTickLabelLength=wrapXTickLabelLength, figsize=figsize, cmap='RdYlBu', annot=True, fmt='.1f', vmin=-vmax, vmax=vmax, interactive=True)
+        vmax = (np.max(d.loc[:,'true']) - np.min(d.loc[:,'true'])) / 2
+        # cmap = 'RdYlBu'
+        cmap = plotting.symmetrical_colormap(cmap_settings=('Reds', None), new_name=None)
+        plotting.plotMatrix(m, ticklabelsX=cols, ticklabelsY=d.index, fileName=f'{baseFolder}{os.sep}summary{postfix}{os.sep}known {l} pred-true{fileExtension}', title=f'Difference between predicted and true label values for {l}', wrapXTickLabelLength=wrapXTickLabelLength, figsize=figsize, cmap=cmap, annot=True, fmt='.1f', vmin=-vmax, vmax=vmax, interactive=True)
+        # plot spectra with max errors
+        m = np.abs(m)
+        q = np.quantile(m, q=criticalQuantileIndivPlot, axis=0, keepdims=True)
+        error_count = np.sum(m >= q, axis=1)
+        ind = np.argsort(-error_count)
+        print(f'Spectra with max errors count for label {l}:', end=' ')
+        for ii in range(len(m)):
+            i = ind[ii]
+            name = d.index[i]
+            if error_count[i] == error_count[ind[0]]:
+                print(f'{name}', end=' ')
+        print('')
+        known.plot(f'{baseFolder}{os.sep}tmp_sample_plot{postfix}{os.sep}/{l}', colorParam=l, plotIndividualParams={'plot on sample': True}, plotSampleParams=plotSampleParams)
+        os.makedirs(f'{baseFolder}{os.sep}summary{postfix}{os.sep}cv_errors {l}', exist_ok=True)
+        ii = 0
+        while True:
+            i = ind[ii]
+            name = d.index[i]
+            if ii < 5 or error_count[i] == error_count[ind[0]] or name in plotIndividualExtraNames:
+                for spType in known.spTypes():
+                    shutil.copyfile(f'{baseFolder}{os.sep}tmp_sample_plot{postfix}{os.sep}{l}{os.sep}individ_{spType}{os.sep}{name}.png', f'{baseFolder}{os.sep}summary{postfix}{os.sep}cv_errors {l}{os.sep}{name} {spType}.png')
+            ii += 1
+            if ii >= len(m): break
+
     if utils.isJupyterNotebook():
         print('Predictions for unknown spectra from the file', f'{baseFolder}{os.sep}summary{postfix}{os.sep}unknown.xlsx')
         print(r)
@@ -2595,7 +2782,7 @@ def graphConnectedComponents(aNeigh):
     return list(myToRet.values())
 
 
-def getBestIndependentFeatureSubset(sample:ML.Sample, features=None, labels=None, pair_MI_threshold=None, preliminary_label_MI_threshold=None, result_label_MI_threshold=None, debugInfoFolder=None):
+def independentFeatureSubset_old(sample:ML.Sample, features=None, labels=None, pair_MI_threshold=None, preliminary_label_MI_threshold=None, result_label_MI_threshold=None, debugInfoFolder=None):
     """
     :param preliminary_label_MI_threshold: for one label - MI threshold, for multiple - dict {label: threshold}
     :param result_label_MI_threshold: the same
@@ -2672,3 +2859,206 @@ def getBestIndependentFeatureSubset(sample:ML.Sample, features=None, labels=None
                     f.write(f'{features[i]}:{label_MI[i]:.3f}; ')
                 f.write(f'\n\nResult features: {result[label]}\n')
     return result
+
+
+def independentFeatureSubset(data:pd.DataFrame, features=None, labels=None, MIalgorithm='MI', featureFeatureMItype='regression', featureLabelMItype='auto', folder=None, neighbourCountForColor=None, logColor=False, scatterParams=None, perplexity=None, plotAxes='TSNE and PCA', debug=True):
+    """
+    :param features: list of feature column names
+    :param labels: list of label names
+    :param MIalgorithm: 'MI' (mutual information) or 'corr' (correlation - faster)
+    :param featureFeatureMItype: 'regression' or 'classification' - use mutual_info_regression or mutual_info_classification for feature-feature similarity calculation
+    :param featureLabelMItype: 'auto' (label dependent), 'regression' or 'classification', or dict(label:'regression/classification') - use mutual_info_regression or mutual_info_classification for feature-label similarity calculation
+    :param plotAxes: 'TSNE and PCA' or 'PCA only'
+    """
+
+    def scale(data):
+        return sklearn.preprocessing.StandardScaler().fit_transform(data)
+    def similarity(f1,f2,typ):
+        if isinstance(f1, pd.DataFrame):
+            names = f1.columns
+            f1 = f1.to_numpy()
+        else:
+            if len(f1.shape) == 2: names = [f'{j+1}' for j in range(f1.shape[1])]
+        if len(f1.shape) == 1:
+            f1 = f1.reshape(-1,1)
+            names = ['0']
+        if MIalgorithm == 'MI':
+            if typ == 'regression':
+                res = sklearn.feature_selection.mutual_info_regression(f1, f2, random_state=0)
+            else:
+                for j in range(f1.shape[1]): assert ML.isClassification(f1[:,j]), f'Feature {names[j]} is not polynominal: {f1[:,j].tolist()}'
+                assert ML.isClassification(f2)
+                res = sklearn.feature_selection.mutual_info_classif(f1, f2, random_state=0)
+        else:
+            if typ == 'regression':
+                res = sklearn.feature_selection.r_regression(f1,f2)
+            else:
+                for j in range(f1.shape[1]): assert ML.isClassification(f1[:,j]), f'Feature {names[j]} is not polynominal'
+                assert ML.isClassification(f2)
+                res = np.array([sklearn.metrics.matthews_corrcoef(f1[:,j],f2) for j in range(f1.shape[1])])
+                if f1.shape[1] == 1: res = res[0]
+            res = np.abs(res)
+            # print(res.shape)
+        return res
+
+    def sim2dist(similarityVector, M=None):
+        if M is None:
+            assert len(similarityVector) > 1
+            M = np.max(similarityVector)
+        dist = M - similarityVector
+        if logColor: dist += 0.1*M
+        return dist
+    assert MIalgorithm in ['MI', 'corr']
+    assert featureFeatureMItype in ['regression', 'classification']
+    assert featureLabelMItype in ['auto', 'regression', 'classification']
+    assert plotAxes in ['TSNE and PCA', 'PCA only']
+    if features is None: features = data.columns
+    if isinstance(features, list): features = np.array(features)
+    assert len(set(labels) & set(features)) == 0
+    assert set(labels) <= set(data.columns)
+    assert set(features) <= set(data.columns)
+    assert np.all(np.isfinite(data.loc[:,features]))
+    if labels is None: labels = []
+    if len(labels) > 0:
+        assert np.all(np.isfinite(data.loc[:,labels]))
+    if scatterParams is None: scatterParams = {}
+    n = len(features)
+    if np.all([f.startswith('e_') for f in features]):
+        d = scale(data.loc[:,features])
+        s = ML.Sample(params=data.loc[:, labels], spectra=d, energy=utils.getEnergy(data.loc[:,features]))
+        if len(labels) == 0:
+            s.plot(f'{folder}{os.sep}scaled spectra.png')
+        else:
+            for label in labels:
+                s.plot(f'{folder}{os.sep}scaled spectra by {label}.png', colorParam=label)
+    features_MI = np.zeros((n, n))
+    for i in range(n):
+        print(f'Calculate {i} from {n}')
+        features_MI[i] = similarity(data.loc[:, features], data[features[i]], featureFeatureMItype)
+        assert np.all(np.isfinite(features_MI[i]))
+    figsize = (20, 10)
+    plotting.plotMatrix(features_MI, ticklabelsX=features, ticklabelsY=features, fileName=f'{folder}{os.sep}MI matrix.png', title='Mutual information feature-feature', figsize=figsize)
+    if neighbourCountForColor is None:
+        neighbourCountForColor = max(1,int(n/20))
+    r = np.partition(sim2dist(features_MI), neighbourCountForColor, axis=1)[:,neighbourCountForColor]
+    # print(features_MI)
+    # for i in range(len(r)): print(features[i], r[i])
+    if logColor: r = np.log(r)
+    # rows - descriptors
+    descrAsObjects = scale(data.loc[:,features].to_numpy()).T
+    pca_axes = pcaDescriptor(descrAsObjects, count=2, returnU=False)
+    if plotAxes == 'PCA only':
+        axes = pca_axes
+    else:
+        M = np.max(features_MI)
+        def metric(f1,f2):
+            mi = similarity(f1, f2, featureFeatureMItype)
+            return sim2dist(mi,M)
+        if perplexity is None:
+            perplexity = min(30, len(descrAsObjects)//4)
+            print(f'Set perplexity = {perplexity}')
+        tsne = sklearn.manifold.TSNE(perplexity=perplexity, random_state=0, metric=metric)
+        axes = tsne.fit_transform(descrAsObjects)
+    def plotScatter(color, colorName):
+        def plotScatterHelper(axes, plotAxesName):
+            plotting.scatter(axes[:,0], axes[:,1], color=color, marker_text=features, fileName=f'{folder}{os.sep}{plotAxesName} {colorName}.png', title=f'Descriptors on {plotAxesName} plot colored by dist(MI) to {colorName}', **scatterParams)
+        plotScatterHelper(axes, 'PCA' if plotAxes == 'PCA only' else 'TSNE')
+        if plotAxes == 'TSNE and PCA':
+            plotScatterHelper(pca_axes, 'PCA')
+
+    plotScatter(color=r, colorName='neighbour')
+    for label in labels:
+        if len(np.unique(data[label])) == 1:
+            print(f'Label {label} is constant = {data[label][0]}')
+            continue
+        if featureLabelMItype == 'auto':
+            typ = 'classification' if ML.isClassification(data, label) else 'regression'
+            if debug: print(f'For label {label} use {typ} similarity')
+        else: typ = featureLabelMItype
+        labMI = similarity(data.loc[:, features], data[label], typ)
+        assert np.all(np.isfinite(labMI))
+        plotScatter(color=sim2dist(labMI), colorName=label)
+
+
+def separableXDescriptor(sample: ML.Sample, features, expIndexes, normalize=True):
+    """Find two descriptors, that separate experiments most (first) and label values (second). Calculate these descriptors for all the objects inside sample
+
+        :param sample:  sample with descriptors and labels
+        :param features: (list of strings or string) features to use (x), or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
+        :param expIndexes: array or list of sample object indexes to separate
+        :param normalize: normalize X by StandardScaler
+        :returns: two column array with exp and label separable descriptors
+    """
+    assert len(expIndexes) >= 2
+    for i in expIndexes: assert 0<=i<len(sample)
+    X,_ = getXYFromSample(sample, features, label_names=None, textColumn=None)
+    if normalize: X = sklearn.preprocessing.StandardScaler().fit_transform(X)
+    d = scipy.spatial.distance.cdist(X[expIndexes], X[expIndexes])
+    i,j = np.where(d == np.max(d))
+    expDiff = X[expIndexes[i[0]]] - X[expIndexes[j[0]]]
+    return np.dot(X, expDiff)
+
+
+def separableYDescriptor(sample: ML.Sample, features, label, normalize=True, pairwiseTransformType='binary', debugFolder=None):
+    """Find two descriptors, that separate experiments most (first) and label values (second). Calculate these descriptors for all the objects inside sample
+
+        :param sample:  sample with descriptors and labels
+        :param features: (list of strings or string) features to use (x), or 'spectra' or 'spectra_d_i1,i2,i3,...' (spectra derivatives together), or ['spType1 spectra_d_i1,i2', 'spType2 spectra_d_i1,i2', ...]
+        :param label: label name
+        :param normalize: normalize X by StandardScaler
+        :param pairwiseTransformType: 'binary' or 'numerical' to find descriptor for label separation
+        :returns: two column array with exp and label separable descriptors
+    """
+    assert isinstance(label, str)
+    assert label in sample.params.columns
+    X,y = getXYFromSample(sample, features, [label], None)
+    if normalize: X = sklearn.preprocessing.StandardScaler().fit_transform(X)
+    _,_,known_ind,_ = sample.splitUnknown(columnNames=label, returnInd=True)
+    Xp, yp = ML.pairwiseTransform(X[known_ind,:],y[known_ind], maxSize=10000, randomSeed=0, pairwiseTransformType=pairwiseTransformType)
+    if pairwiseTransformType == 'binary':
+        model = sklearn.linear_model.LogisticRegression(fit_intercept=False, random_state=0)
+    elif pairwiseTransformType == 'numerical':
+        model = ML.pairwiseRidgeCV(X[known_ind,:],y[known_ind], alphas=(0.1,1,10,100,1000,100*1000), testRatio=0.1)
+    else: raise Exception(f'Unknown pairwiseTransformType = {pairwiseTransformType}')
+    model.fit(Xp,yp)
+    coef = model.coef_.flatten()
+    if debugFolder is not None and isinstance(features,str) and features.endswith(' spectra'):
+        spType = features[:features.rfind(' ')]
+        e = sample.getEnergy(spType)
+        def plotMoreFunction(ax):
+            ax2 = ax.twinx()
+            ax2.plot(e, coef, c='k')
+        sample.plot(debugFolder+os.sep+label, colorParam=label, plotSampleParams=dict(plotMoreFunction=plotMoreFunction, title='Projection base'))
+        shutil.copyfile(debugFolder+os.sep+label+os.sep+f'plot_{spType}.png', debugFolder+os.sep+label+'.png')
+        shutil.rmtree(debugFolder+os.sep+label)
+
+    # oblique projection on two vectors: expDiff, coef
+    # res = np.zeros((len(y),2))
+    # for i in range(len(y)):
+    #     res[i] = curveFitting.linearReg2(y_true=X[i,:], f1=expDiff, f2=coef)
+    # orthogonal projection
+    return np.dot(X, coef)
+
+
+def findBestLabelMap(sample:ML.Sample, features, label):
+    sample,_ = sample.splitUnknown(label)
+    if label in sample.labelMaps: sample.decode(label)
+    labelValues = sample.params[label]
+    uniq_vals = np.unique(labelValues)
+    n = len(uniq_vals)
+    permutations = itertools.permutations(np.arange(n))
+    X,_ = getXYFromSample(sample, features, [label], None)
+    model = sklearn.linear_model.LogisticRegression(fit_intercept=False, random_state=0)
+    qualities = []
+    for perm in permutations:
+        # direct and inverse permutations result in the symmetrical labelMaps, so we need only half of all permutations
+        if perm[0] > perm[-1]: continue
+        labelMap = {v:i for v,i in zip(uniq_vals,perm)}
+        y1 = ML.encode(labelValues, labelMap)
+        acc = ML.pairwiseCV(model, X, y1, pairwiseTransformType='binary', lossFunc='AUC')
+        qualities.append([perm, acc])
+    i = np.argmax([q[1] for q in qualities])
+    print(qualities)
+    best_perm = qualities[i][0]
+    labelMap = {v:i for v,i in zip(uniq_vals,best_perm)}
+    return labelMap

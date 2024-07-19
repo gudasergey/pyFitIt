@@ -4,12 +4,15 @@
 """
 import copy
 
+from ...utils import importXrayDB
+xraydb = importXrayDB()
+
 import numpy as np
 from scipy.special import erfc
 from time import time
-from ...xraydb import (xray_edge, xray_line, xray_lines,
-                    f1_chantler, f2_chantler, guess_edge,
-                    atomic_number, atomic_symbol)
+# from xraydb import (xray_edge, xray_line, xray_lines,
+                    # f1_chantler, f2_chantler, guess_edge,
+                    # atomic_number, atomic_symbol)
 from lmfit import Parameter, Parameters, minimize
 
 from ...larch import Group, isgroup, parse_group_args, Make_CallArgs
@@ -19,7 +22,9 @@ from ...larch.math import index_of, index_nearest, remove_dups, remove_nans2
 from .xafsutils import set_xafsGroup
 from .pre_edge import find_e0, preedge, pre_edge
 
+
 MAXORDER = 6
+
 
 def find_xray_line(z, edge):
     """
@@ -27,12 +32,12 @@ def find_xray_line(z, edge):
     """
     intensity = 0
     line      = ''
-    for key, value in xray_lines(z).items() :
+    for key, value in xraydb.xray_lines(z).items() :
         if value.initial_level == edge.upper():
             if value.intensity > intensity:
                 intensity = value.intensity
                 line      = key
-    return xray_line(z, line[:-1])
+    return xraydb.xray_line(z, line[:-1])
 
 
 def linearReg(x,y):
@@ -152,8 +157,8 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
     assert np.all(weight != 0)
 
     ## get the f'' function from CL or Chantler
-    f1 = f1_chantler(z, energy)
-    f2 = f2_chantler(z, energy)
+    f1 = xraydb.f1_chantler(z, energy)
+    f2 = xraydb.f2_chantler(z, energy)
     group.f2 = f2
     if return_f1:
         group.f1 = f1
@@ -352,7 +357,7 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
     group.norm_poly = group.norm*1.0
 
     if z is not None:              # need to run find_e0:
-        e0_nominal = xray_edge(z, edge).energy
+        e0_nominal = xraydb.xray_edge(z, edge).energy
     if e0 is None:
         e0 = getattr(group, 'e0', None)
         if e0 is None:
@@ -361,10 +366,10 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
 
     atsym = None
     if z is None or z < 2:
-        atsym, edge = guess_edge(group.e0)
-        z = atomic_number(atsym)
+        atsym, edge = xraydb.guess_edge(group.e0)
+        z = xraydb.atomic_number(atsym)
     if atsym is None and z is not None:
-        atsym = atomic_symbol(z)
+        atsym = xraydb.atomic_symbol(z)
 
     if getattr(group, 'pre_edge_details', None) is None:  # pre_edge never run
         pre_edge(group, pre1=pre1, pre2=pre2, nvict=nvict,
@@ -383,7 +388,7 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
         nnorm = group.pre_edge_details.nnorm
 
     mu_pre = mu - group.pre_edge
-    f2 = f2_chantler(z, energy)
+    f2 = xraydb.f2_chantler(z, energy)
 
     weights = np.ones(len(energy))*1.0
 
@@ -395,10 +400,10 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
     # avoid l2 and higher edges
     if edge.lower().startswith('l'):
         if edge.lower() == 'l3':
-            e_l2 = xray_edge(z, 'L2').energy
+            e_l2 = xraydb.xray_edge(z, 'L2').energy
             norm2 = min(norm2,  e_l2-e0)
         elif edge.lower() == 'l2':
-            e_l1 = xray_edge(z, 'L1').energy
+            e_l1 = xraydb.xray_edge(z, 'L1').energy
             norm2 = min(norm2,  e_l1-e0)
 
     ipre2 = index_of(energy, e0+pre2)
