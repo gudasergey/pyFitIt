@@ -464,10 +464,9 @@ def plotSample(energy, spectra, colorParam=None, sortByColors=False, fileName=No
             else:
                 ticks = np.linspace(np.min(colorParam), np.max(colorParam), 10)
             if colorParam.dtype != float:
-                ticksPos = np.arange(len(labelMap))
                 invLabelMap = {labelMap[name]:name for name in labelMap}
-                ticks = [invLabelMap[tp] for tp in ticksPos]
-                ticksPos = ticksPos / (len(labelMap) - 1)
+                ticks = [invLabelMap[tp] for tp in np.arange(len(labelMap))]
+                ticksPos = np.arange(1, 2 * len(labelMap), 2) / (2 * len(labelMap))
             else:
                 ticksPos = transform(ticks)
             addColorBar(mappable=plt.cm.ScalarMappable(norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap=colorMap), fig=fig, ax=ax, labelMaps={}, label='', ticksPos=ticksPos, ticks=ticks, format=colorBarFormat, colorBarLabel=colorBarLabel)

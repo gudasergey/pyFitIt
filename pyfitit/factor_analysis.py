@@ -375,7 +375,7 @@ class Dataset:
             for k in range(np.shape(self.original_intensity)[1]):
                 curves1[k].set_ydata(self.original_intensity[p1:p2,k]); curves1[k].set_xdata(self.original_energy[p1:p2])
                 curves2[k].set_ydata(self.original_intensity[p1:p2,k]); curves2[k].set_xdata(self.original_energy[p1:p2])
-            line1.set_xdata(self.original_energy[p1]); line2.set_xdata(self.original_energy[p2])
+            line1.set_xdata([self.original_energy[p1]]); line2.set_xdata([self.original_energy[p2]])
             if cbsave.value==True:
                 range_slider.disabled=True
                 df=pd.DataFrame(self.original_intensity[p1:p2,:])
