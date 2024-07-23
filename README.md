@@ -15,15 +15,6 @@ Python implementation of FitIt software to fit X-ray absorption near edge struct
 ## Installation
 `pip install pyfitit`
 
-If you have problems with notebook widgets, create new environment and install pyfitit there using the commands:
-```
-conda create -y --name pyfitit python=3.12.4
-conda install -y --name pyfitit pip
-conda activate pyfitit
-pip install ipywidgets==8.1.3 jupyterlab==4.2.3 jupyterlab-widgets==3.0.11 ipympl==0.9.4 jupytext  tqdm scipy numba cycler statsmodels lmfit matplotlib numpy pandas parsy notebook nbformat toml pulp scikit_learn seaborn vasppy confsmooth openTSNE sqlalchemy ipynbname widgetsnbextension xraydb pymcr openpyxl
-pip install pyfitit
-```
-
 ## Usage
 See examples folder in this repository.
 
